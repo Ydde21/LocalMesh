@@ -64,8 +64,8 @@ func PinUpdateKey(cfg *Config, pubData []byte) (keyID string, err error) {
 		return "", err
 	}
 	cfg.UpdatePubkey = string(pubData)
-	cfg.UpdatePubkeyID = pub.ID()
-	return pub.ID(), nil
+	cfg.UpdatePubkeyID = pub.RegistryID()
+	return pub.RegistryID(), nil
 }
 
 // reportUpgrade writes one upgrade_state frame. c may be nil (or dead)
@@ -211,8 +211,8 @@ func (a *Agent) runUpgrade(ctx context.Context, c *wsjson.Conn, job *upgradeJob)
 		fail("configured update_pubkey does not parse: %v — re-run `localmesh-agent update-key <file>`", err)
 		return
 	}
-	if u.KeyID != pub.ID() {
-		fail("release signed by untrusted key %s (pinned: %s)", u.KeyID, pub.ID())
+	if u.KeyID != pub.RegistryID() {
+		fail("release signed by untrusted key %s (pinned: %s)", u.KeyID, pub.RegistryID())
 		return
 	}
 

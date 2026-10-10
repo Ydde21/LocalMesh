@@ -27,11 +27,23 @@ func (k *PublicKey) ID() string {
 	if k.Kind == "minisign" {
 		return "minisign:" + k.Minisign.KeyIDHex
 	}
+	return "pem:" + k.RegistryID()
+}
+
+// RegistryID returns the canonical key id used in release manifests,
+// the server-side release-key registry, and agent_upgrade wire frames —
+// the minisign keynum hex, or "sha256:<hex>" (DER fingerprint, first 32
+// hex chars) for PEM keys. Trust-anchor comparisons must use this, not
+// the display ID().
+func (k *PublicKey) RegistryID() string {
+	if k.Kind == "minisign" {
+		return k.Minisign.KeyIDHex
+	}
 	der, err := x509.MarshalPKIXPublicKey(k.Key)
 	if err != nil {
-		return "pem:unknown"
+		return "sha256:unknown"
 	}
-	return "pem:sha256:" + fmt.Sprintf("%x", sha256.Sum256(der))[:32]
+	return "sha256:" + fmt.Sprintf("%x", sha256.Sum256(der))[:32]
 }
 
 // ParsePublicKey sniffs a public key file: minisign format first, then

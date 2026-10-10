@@ -78,7 +78,7 @@ func signRelease(t *testing.T, version string, proto, minProto int) (files map[s
 	if err != nil {
 		t.Fatal(err)
 	}
-	return files, pubData, key.ID(), artName, artBytes
+	return files, pubData, key.RegistryID(), artName, artBytes
 }
 
 // serveRelease maps a release files map to fakeCP's "<id>/<name>" keys.
@@ -306,7 +306,7 @@ func TestUpgradeRefusesNewerProtocolThanServer(t *testing.T) {
 	}
 	dispatchUpgrade(f, contracts.AgentUpgrade{
 		OperationID: "op-proto", Version: "0.7.0",
-		KeyID:           func() string { k, _ := release.ParsePublicKey(pubData); return k.ID() }(),
+		KeyID:           func() string { k, _ := release.ParsePublicKey(pubData); return k.RegistryID() }(),
 		Source:          "localmesh://releases/r1",
 		ProtocolVersion: contracts.ProtocolVersion + 1, MinAgentProtocol: 1,
 	})
