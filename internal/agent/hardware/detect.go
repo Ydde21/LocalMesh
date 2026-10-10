@@ -17,6 +17,9 @@ var version = "dev"
 // SetVersion stamps the agent build version into hardware reports.
 func SetVersion(v string) { version = v }
 
+// Version returns the stamped build version ("dev" when unstamped).
+func Version() string { return version }
+
 // Detect returns the node's static hardware information.
 func Detect(ctx context.Context) contracts.HardwareInfo {
 	hw := contracts.HardwareInfo{

@@ -12,6 +12,11 @@ import (
 // stay cheap on the heartbeat path, long enough for a stable sample.
 const cpuSampleInterval = 200 * time.Millisecond
 
+// commandContext is exec.CommandContext, swappable in tests so the
+// nvidia-smi exec path (missing binary, non-zero exit, canned output)
+// can be exercised without real hardware.
+var commandContext = exec.CommandContext
+
 // Metrics samples live utilization. It is cheap enough to run every few
 // seconds. Each *_measured flag is set only when the platform produced a
 // real measurement this cycle; unmeasured fields stay zero and must not
@@ -39,7 +44,7 @@ func Metrics(ctx context.Context, active int, loaded []string) contracts.Metrics
 func sampleGPU(ctx context.Context) (util float64, vram uint64, utilOK, vramOK bool) {
 	ctx2, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx2, "nvidia-smi",
+	out, err := commandContext(ctx2, "nvidia-smi",
 		"--query-gpu=utilization.gpu,memory.used",
 		"--format=csv,noheader,nounits").Output()
 	if err != nil {
