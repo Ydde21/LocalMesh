@@ -115,6 +115,26 @@ func (s *Server) Start(ctx context.Context) error {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
+	// /readyz verifies the dependencies the server actually needs —
+	// Postgres. Unlike /healthz it fails when the pool is dead, so
+	// orchestrators can distinguish "process up" from "serving".
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		pctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		if err := s.st.Pool.Ping(pctx); err != nil {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ready"))
+	})
+	// Unauthenticated build/protocol info — agents and dashboards use it
+	// to check compatibility before/while connecting. Nothing sensitive.
+	mux.HandleFunc("GET /api/v1/version", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"server_version":%q,"protocol":%d,"min_agent_protocol":%d}`,
+			nodehub.Version(), contracts.ProtocolVersion, contracts.MinAgentProtocolVersion)
+	})
 
 	handler := cors(s.cfg.CORSOrigins, rateLimit(s.cfg.TrustProxy, logRequests(s.log, mux)))
 	s.httpSrv = &http.Server{

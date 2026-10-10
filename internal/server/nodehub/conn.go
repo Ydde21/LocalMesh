@@ -17,6 +17,10 @@ func newID() string { return uuid.NewString() }
 
 func version() string { return buildVersion }
 
+// Version exposes the stamped build version to other packages (e.g.
+// the /api/v1/version endpoint).
+func Version() string { return buildVersion }
+
 // buildVersion is stamped via -ldflags "-X ...nodehub.buildVersion=..."
 // for releases; "dev" otherwise.
 var buildVersion = "dev"
