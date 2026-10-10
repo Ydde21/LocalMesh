@@ -25,9 +25,28 @@ import (
 //	parallel   — batch_size concurrent, continues past failures and
 //	             reports failed at the end
 //
+// The canary gate is durable: ApproveNextBatch stamps
+// rollouts.approved_by/approved_at in the same guarded UPDATE that
+// flips the rollout back to 'running', so a control-plane restart or
+// standby promotion sees an approved canary — never a re-parked one.
+// approved_at IS NULL is the authoritative "still gated" bit.
+//
+// RolloutPaused ('paused') freezes a campaign: no claims, no re-park,
+// no auto-halt, not even the all-terminal tally — ResumeRollout hands
+// it back to the machine. In-flight updates still report and finish
+// under their own timeouts: pausing gates NEW dispatch, it does not
+// abort work already on the nodes.
+//
 // "Halt" cancels every still-cancellable live update (installing+ are
 // left to report naturally) and lands the rollout 'failed'.
 // ---------------------------------------------------------------------------
+
+// RolloutPaused is the updateplane-local 'paused' rollout state. It is
+// declared here rather than in store on purpose: the store keeps the
+// state column generic (SetRolloutState guards only the terminal
+// states), while the meaning of 'paused' — frozen advancement, live
+// updates untouched — is engine semantics.
+const RolloutPaused = "paused"
 
 // CreateRollout validates and persists a campaign plus one pending
 // update row per target node. Validation happens up-front so a bad
@@ -166,7 +185,8 @@ func (m *Manager) validateUpdateTarget(ctx context.Context, rel *store.Release, 
 // advanceRollouts walks every non-terminal rollout and pushes it one
 // step: claim newly-eligible pending updates, park finished canaries on
 // approval, halt halt-family rollouts on failure, and land fully-terminal
-// rollouts.
+// rollouts. Paused rollouts are swept too — advanceRollout's early
+// return is what freezes them.
 func (m *Manager) advanceRollouts(ctx context.Context) {
 	rollouts, err := m.st.ListRollouts(ctx, 200)
 	if err != nil {
@@ -175,13 +195,17 @@ func (m *Manager) advanceRollouts(ctx context.Context) {
 	}
 	for _, r := range rollouts {
 		switch r.State {
-		case store.RolloutPending, store.RolloutRunning, store.RolloutAwaitingApproval:
+		case store.RolloutPending, store.RolloutRunning,
+			store.RolloutAwaitingApproval, RolloutPaused:
 			m.advanceRollout(ctx, r)
 		}
 	}
 }
 
 func (m *Manager) advanceRollout(ctx context.Context, r *store.Rollout) {
+	if r.State == RolloutPaused {
+		return // frozen: no claims, no state changes, no auto-halt
+	}
 	updates, err := m.st.ListAgentUpdates(ctx, r.ID, "", "", 500)
 	if err != nil {
 		m.log.Debug("list rollout updates", "rollout", r.ID, "err", err)
@@ -240,14 +264,15 @@ func (m *Manager) advanceRollout(ctx context.Context, r *store.Rollout) {
 	free := limit - len(active)
 	if r.Strategy == StrategyCanary {
 		started := len(updates) - len(pend) // active + terminal
-		if !m.isCanaryApproved(r.ID) && started <= r.CanaryCount {
+		if r.ApprovedAt == nil && started <= r.CanaryCount {
 			// Canary stage: the cohort is the first canary_count updates
 			// ever started (a finished slot is NOT refilled — the whole
 			// cohort must land before any post-canary work). When all
 			// started updates are terminal and more nodes wait, park for
-			// operator approval. canaryOK (set by ApproveNextBatch) keeps
-			// an approved rollout from re-parking while its post-canary
-			// batch is still being claimed.
+			// operator approval. approved_at IS NULL is the durable
+			// "still gated" bit — once ApproveNextBatch stamps it the
+			// rollout runs plain batch semantics forever, across
+			// restarts and standby promotions.
 			if started == r.CanaryCount && len(active) == 0 && len(pend) > 0 {
 				m.setRolloutState(ctx, r.ID, store.RolloutAwaitingApproval, "")
 				return
@@ -280,52 +305,184 @@ func (m *Manager) haltRollout(ctx context.Context, r *store.Rollout, updates []*
 			cause.ID, cause.NodeID, cause.Phase, cause.Error))
 }
 
-func (m *Manager) setRolloutState(ctx context.Context, id, state, errStr string) {
+// setRolloutState writes one guarded rollout transition, then logs,
+// emits the rollout event, and kicks the loop. Returns whether the
+// write landed (false = the row went terminal behind our back).
+func (m *Manager) setRolloutState(ctx context.Context, id, state, errStr string) bool {
 	ok, err := m.st.SetRolloutState(ctx, id, state, errStr)
 	if err != nil {
 		m.log.Debug("set rollout state", "rollout", id, "state", state, "err", err)
-		return
+		return false
 	}
 	if ok {
 		m.log.Info("rollout state", "rollout", id, "state", state, "error", errStr)
 		m.emitRollout(ctx, id)
-		if state == store.RolloutSucceeded || state == store.RolloutFailed ||
-			state == store.RolloutCancelled {
-			m.mu.Lock()
-			delete(m.canaryOK, id)
-			m.mu.Unlock()
-		}
 		m.kick()
 	}
-}
-
-// isCanaryApproved reports whether a canary rollout was released past
-// its approval gate by ApproveNextBatch (in-memory; see Manager.canaryOK).
-func (m *Manager) isCanaryApproved(id string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.canaryOK[id]
+	return ok
 }
 
 // ---------------------------------------------------------------------------
 // admin-facing rollout operations
 // ---------------------------------------------------------------------------
 
-// ApproveNextBatch releases a canary rollout parked in
-// awaiting_approval: remaining pending updates proceed batch_size at a
-// time.
-func (m *Manager) ApproveNextBatch(ctx context.Context, rolloutID string) (*store.Rollout, error) {
+// ApproveNextBatch releases a canary rollout parked at its approval
+// gate: rollouts.approved_by/approved_at are stamped in the same
+// guarded UPDATE that flips the rollout back to 'running'
+// (store.ApproveRollout), so the decision survives restarts and
+// standby promotions — an approved canary never re-parks. The actor
+// is the approving admin's principal name, recorded in approved_by.
+// Remaining pending updates then proceed batch_size at a time.
+//
+// A PAUSED rollout may also be approved — approval persists and the
+// rollout stays paused until ResumeRollout (see approvePaused).
+//
+// store.ErrNotFound → 404; ErrNotAwaitingApproval → 409 when the
+// rollout isn't at the gate (running, terminal, or a second approve
+// that raced the first).
+func (m *Manager) ApproveNextBatch(ctx context.Context, rolloutID, actor string) (*store.Rollout, error) {
 	r, err := m.st.GetRollout(ctx, rolloutID)
 	if err != nil {
 		return nil, err // ErrNotFound → 404
 	}
+	if r.State == RolloutPaused {
+		return m.approvePaused(ctx, r, actor)
+	}
 	if r.State != store.RolloutAwaitingApproval {
 		return nil, fmt.Errorf("rollout is %s: %w", r.State, ErrNotAwaitingApproval)
 	}
-	m.mu.Lock()
-	m.canaryOK[r.ID] = true
-	m.mu.Unlock()
-	m.setRolloutState(ctx, r.ID, store.RolloutRunning, "")
+	ok, err := m.st.ApproveRollout(ctx, rolloutID, actor)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		// The row left awaiting_approval between the read and the
+		// guarded write — a second approval, or a cancel/terminal
+		// landing won the race.
+		return nil, fmt.Errorf("rollout is %s: %w", r.State, ErrNotAwaitingApproval)
+	}
+	m.log.Info("rollout approved", "rollout", r.ID, "actor", actor)
+	m.emitRollout(ctx, r.ID)
+	m.kick()
+	return m.st.GetRollout(ctx, r.ID)
+}
+
+// approvePaused records a canary approval while the rollout stays
+// paused — "approval persists, paused stays paused". ResumeRollout
+// then sends it straight to 'running' (approved_at IS NOT NULL skips
+// the gate for good).
+//
+// The store's atomic approver only fires from awaiting_approval and
+// lands the row 'running', so the paused path round-trips the state
+// through guarded writes:
+//
+//	paused → awaiting_approval → [ApproveRollout: stamp + running] → paused
+//
+// Every hop is guarded, so a crash mid-sequence still lands in a
+// consistent state — parked-unapproved (approve again) or
+// running-approved (the pause is lost but the approval holds; never
+// approved-but-unpersisted). The committed 'running' window between
+// the last two writes is the width of two UPDATEs — we don't emit or
+// kick until 'paused' lands again, and the worst a tick landing inside
+// the window can do is claim one pending update, which then rides out
+// the pause as ordinary in-flight work.
+//
+// Only an unapproved canary has a gate to release from; anything else
+// (non-canary, or already approved) is ErrNotAwaitingApproval. A
+// canary paused BEFORE reaching the gate may be approved early — the
+// stamp simply means the gate never engages once the cohort lands.
+func (m *Manager) approvePaused(ctx context.Context, r *store.Rollout, actor string) (*store.Rollout, error) {
+	if r.Strategy != StrategyCanary || r.ApprovedAt != nil {
+		return nil, fmt.Errorf("rollout is %s: %w", r.State, ErrNotAwaitingApproval)
+	}
+	if ok, err := m.st.SetRolloutState(ctx, r.ID, store.RolloutAwaitingApproval, ""); err != nil {
+		return nil, err
+	} else if !ok {
+		// Went terminal between the read and the write.
+		return nil, fmt.Errorf("rollout is %s: %w", r.State, ErrNotAwaitingApproval)
+	}
+	ok, err := m.st.ApproveRollout(ctx, r.ID, actor)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		// Another writer moved it out of awaiting_approval mid-
+		// sequence (concurrent approve, resume, or cancel). Restore
+		// the pause best-effort; the approval, if it landed at all,
+		// was recorded by the racer.
+		m.repause(ctx, r.ID)
+		return nil, fmt.Errorf("rollout is %s: %w", r.State, ErrNotAwaitingApproval)
+	}
+	m.repause(ctx, r.ID)
+	m.log.Info("rollout approved while paused", "rollout", r.ID, "actor", actor)
+	m.emitRollout(ctx, r.ID)
+	m.kick()
+	return m.st.GetRollout(ctx, r.ID)
+}
+
+// repause best-effort returns a rollout to 'paused' — the terminal
+// guard in SetRolloutState makes it a no-op if the row went terminal.
+func (m *Manager) repause(ctx context.Context, id string) {
+	if _, err := m.st.SetRolloutState(ctx, id, RolloutPaused, ""); err != nil {
+		m.log.Debug("re-pause after paused-approve", "rollout", id, "err", err)
+	}
+}
+
+// PauseRollout freezes a live rollout: pending updates stop being
+// claimed and the engine makes no further state changes — no
+// advancement, no re-park, no auto-halt, no final tally — until
+// ResumeRollout. Pausing does NOT abort in-flight work: updates
+// already claimed or dispatched to agents keep running and report
+// normally; a pending update inside a paused rollout simply waits.
+//
+// Pausable states are 'running' and 'awaiting_approval'. Terminal
+// rollouts, already-paused rollouts, and still-'pending' (not yet
+// evaluated) ones refuse ErrNotPausable → 409.
+func (m *Manager) PauseRollout(ctx context.Context, rolloutID string) (*store.Rollout, error) {
+	r, err := m.st.GetRollout(ctx, rolloutID)
+	if err != nil {
+		return nil, err // ErrNotFound → 404
+	}
+	switch r.State {
+	case store.RolloutRunning, store.RolloutAwaitingApproval:
+		// pausable
+	default:
+		return nil, fmt.Errorf("rollout is %s: %w", r.State, ErrNotPausable)
+	}
+	if !m.setRolloutState(ctx, r.ID, RolloutPaused, "") {
+		// Raced a terminal landing between the read and the write.
+		fresh, gerr := m.st.GetRollout(ctx, r.ID)
+		if gerr != nil {
+			return nil, gerr
+		}
+		return nil, fmt.Errorf("rollout is %s: %w", fresh.State, ErrNotPausable)
+	}
+	return m.st.GetRollout(ctx, r.ID)
+}
+
+// ResumeRollout unfreezes a paused rollout back to 'running'. The
+// correct resting state is recomputed by the next advance pass rather
+// than remembered: an unapproved canary whose cohort has landed
+// re-parks at awaiting_approval (approved_at IS NULL keeps the gate
+// live), a canary still mid-cohort just keeps claiming its cohort
+// slots, and everything else runs plain batch semantics. A rollout
+// that isn't paused refuses ErrNotPaused → 409.
+func (m *Manager) ResumeRollout(ctx context.Context, rolloutID string) (*store.Rollout, error) {
+	r, err := m.st.GetRollout(ctx, rolloutID)
+	if err != nil {
+		return nil, err // ErrNotFound → 404
+	}
+	if r.State != RolloutPaused {
+		return nil, fmt.Errorf("rollout is %s: %w", r.State, ErrNotPaused)
+	}
+	if !m.setRolloutState(ctx, r.ID, store.RolloutRunning, "") {
+		// Raced a terminal landing between the read and the write.
+		fresh, gerr := m.st.GetRollout(ctx, r.ID)
+		if gerr != nil {
+			return nil, gerr
+		}
+		return nil, fmt.Errorf("rollout is %s: %w", fresh.State, ErrNotPaused)
+	}
 	return m.st.GetRollout(ctx, r.ID)
 }
 

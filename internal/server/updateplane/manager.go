@@ -153,6 +153,13 @@ var (
 	// ErrNotAwaitingApproval — ApproveNextBatch on a rollout not in
 	// awaiting_approval; caller → 409.
 	ErrNotAwaitingApproval = errors.New("rollout is not awaiting approval")
+	// ErrNotPausable — PauseRollout on a rollout that is terminal,
+	// already paused, or still 'pending' (not yet evaluated);
+	// caller → 409.
+	ErrNotPausable = errors.New("rollout cannot be paused in its current state")
+	// ErrNotPaused — ResumeRollout on a rollout that isn't paused;
+	// caller → 409.
+	ErrNotPaused = errors.New("rollout is not paused")
 )
 
 // maintReasonPrefix marks node maintenance_reason values this
@@ -204,14 +211,6 @@ type Manager struct {
 	online map[string]bool // last observed connectivity per node with live updates
 	epoch  int64           // control-plane fencing token; claims need it
 
-	// canaryOK records canary rollouts released by ApproveNextBatch so a
-	// 'running' rollout isn't re-parked at awaiting_approval while its
-	// post-canary batch is still claiming. In-memory only: a control-
-	// plane restart inside the approved-but-unclaimed window re-parks
-	// the rollout — conservative (no unapproved work dispatches) and the
-	// operator simply approves again.
-	canaryOK map[string]bool
-
 	wake chan struct{} // event-driven nudge (capacity 1)
 }
 
@@ -224,14 +223,13 @@ func New(st *store.DB, disp Dispatcher, cfg Config, log *slog.Logger) *Manager {
 		log = slog.Default()
 	}
 	return &Manager{
-		st:       st,
-		disp:     disp,
-		cfg:      cfg.withDefaults(),
-		log:      log.With("component", "updateplane"),
-		online:   map[string]bool{},
-		canaryOK: map[string]bool{},
-		epoch:    -1, // unfenced until SetEpoch — claims will simply miss
-		wake:     make(chan struct{}, 1),
+		st:     st,
+		disp:   disp,
+		cfg:    cfg.withDefaults(),
+		log:    log.With("component", "updateplane"),
+		online: map[string]bool{},
+		epoch:  -1, // unfenced until SetEpoch — claims will simply miss
+		wake:   make(chan struct{}, 1),
 	}
 }
 
@@ -354,6 +352,17 @@ func (m *Manager) Run(ctx context.Context) {
 //   - draining rows keep their phase and resume drain checks next tick
 //     (dispatching immediately when the node is already drained);
 //   - pending rows claim naturally.
+//
+// Rollout rows need no repair — every rollout state is durable and the
+// advance pass resumes it exactly where it stands:
+//   - 'pending'/'running' → advance and claim normally;
+//   - 'awaiting_approval' with approved_at IS NULL → stays parked;
+//   - 'running' with approved_at set → an approved canary keeps going,
+//     it can never re-park;
+//   - 'paused' (RolloutPaused) → advanceRollout early-returns; its live
+//     updates still get the connectivity verdicts above (pause gates
+//     new dispatch, not in-flight work);
+//   - terminal → untouched.
 func (m *Manager) Reconcile(ctx context.Context) error {
 	live, err := m.st.LiveUpdatesByPhase(ctx, livePhases...)
 	if err != nil {

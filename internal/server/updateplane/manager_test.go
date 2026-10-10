@@ -113,11 +113,14 @@ func (f *fakeDisp) abortedFor(opID string) bool {
 }
 
 // env bundles a real store, the manager, and the fake dispatcher.
+// cancel stops the Run loop early — restart tests kill the "process"
+// before standing up a fresh Manager over the same DB.
 type env struct {
 	st      *store.DB
 	m       *Manager
 	disp    *fakeDisp
 	ctx     context.Context
+	cancel  context.CancelFunc
 	notifMu sync.Mutex
 	events  []string
 }
@@ -167,10 +170,37 @@ func newEnv(t *testing.T, cfg Config, run bool) *env {
 	})
 	if run {
 		rctx, cancel := context.WithCancel(ctx)
+		e.cancel = cancel
 		go e.m.Run(rctx)
 		t.Cleanup(cancel)
 	}
 	return e
+}
+
+// stopLoop kills the manager's Run goroutine and lets any in-flight
+// tick settle — simulating a control-plane crash. The store and the
+// scripted dispatcher survive; a fresh Manager can then be stood up
+// over them (see promote).
+func (e *env) stopLoop() {
+	e.cancel()
+	time.Sleep(120 * time.Millisecond)
+}
+
+// promote stands up a NEW Manager over the same DB under a bumped
+// fencing epoch — the standby-promotion path. The returned manager is
+// running; its loop stops at test cleanup.
+func (e *env) promote(t *testing.T, epoch int64) *Manager {
+	t.Helper()
+	if _, err := e.st.Pool.Exec(e.ctx,
+		`UPDATE control_plane_lock SET epoch=$1 WHERE id=1`, epoch); err != nil {
+		t.Fatalf("bump epoch: %v", err)
+	}
+	m2 := New(e.st, e.disp, fastCfg(), testLog())
+	m2.SetEpoch(epoch)
+	rctx, cancel := context.WithCancel(e.ctx)
+	t.Cleanup(cancel)
+	go m2.Run(rctx)
+	return m2
 }
 
 // node creates an approved node row and scripts its dispatcher state.
@@ -788,13 +818,24 @@ func TestCanaryGate(t *testing.T) {
 	// Finish the canary → awaiting_approval.
 	e.finishOK(t, inFlight[0].NodeID, inFlight[0].ID, "0.7.0")
 	e.waitRolloutState(t, r.ID, store.RolloutAwaitingApproval)
-	// Approving releases the remaining nodes (batch_size 2 → both).
-	r2, err := e.m.ApproveNextBatch(e.ctx, r.ID)
+	// Approving releases the remaining nodes (batch_size 2 → both) and
+	// stamps the durable approval (approved_by/approved_at).
+	r2, err := e.m.ApproveNextBatch(e.ctx, r.ID, "admin-1")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	if r2.State != store.RolloutRunning {
 		t.Fatalf("post-approve state = %s", r2.State)
+	}
+	if r2.ApprovedBy != "admin-1" || r2.ApprovedAt == nil {
+		t.Fatalf("approval not stamped: by=%q at=%v", r2.ApprovedBy, r2.ApprovedAt)
+	}
+	if got := e.getRollout(t, r.ID); got.ApprovedBy != "admin-1" || got.ApprovedAt == nil {
+		t.Fatalf("persisted approval by=%q at=%v", got.ApprovedBy, got.ApprovedAt)
+	}
+	// A second approve is a clean no-op — the rollout is running now.
+	if _, err := e.m.ApproveNextBatch(e.ctx, r.ID, "admin-2"); !errors.Is(err, ErrNotAwaitingApproval) {
+		t.Fatalf("double approve = %v, want ErrNotAwaitingApproval", err)
 	}
 	rest := e.waitInFlight(t, r.ID, 2)
 	for _, u := range rest {
@@ -946,8 +987,274 @@ func TestApproveWrongState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := e.m.ApproveNextBatch(e.ctx, r.ID); !errors.Is(err, ErrNotAwaitingApproval) {
+	if _, err := e.m.ApproveNextBatch(e.ctx, r.ID, "admin"); !errors.Is(err, ErrNotAwaitingApproval) {
 		t.Fatalf("approve = %v, want ErrNotAwaitingApproval", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// durable canary approval (restart/promotion safety)
+// ---------------------------------------------------------------------------
+
+// TestCanaryApprovalSurvivesRestart is the durability contract: a
+// canary approved just before a control-plane crash resumes under a
+// fresh Manager (restart/standby promotion) WITHOUT a second approval
+// and WITHOUT re-parking at awaiting_approval. The old in-memory
+// canaryOK bit lost this exact window — approved_at IS NOT NULL is now
+// the gate.
+func TestCanaryApprovalSurvivesRestart(t *testing.T) {
+	e := newEnv(t, fastCfg(), true)
+	rel := e.release(t, "0.7.0")
+	n1 := e.node(t, "n1", "0.6.0", true, true)
+	n2 := e.node(t, "n2", "0.6.0", true, true)
+	n3 := e.node(t, "n3", "0.6.0", true, true)
+
+	r, err := e.m.CreateRollout(e.ctx, rel.ID, StrategyCanary, []string{n1, n2, n3}, 1, 2, "test")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	canary := e.waitInFlight(t, r.ID, 1)[0]
+	e.finishOK(t, canary.NodeID, canary.ID, "0.7.0")
+	e.waitRolloutState(t, r.ID, store.RolloutAwaitingApproval)
+
+	// Crash the control plane, THEN land the approval: the commit
+	// flips state to 'running' and stamps approved_*, but no advance
+	// pass runs before the process is gone — the exact window that
+	// used to re-park.
+	e.stopLoop()
+	if _, err := e.m.ApproveNextBatch(e.ctx, r.ID, "admin-1"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if got := e.getRollout(t, r.ID); got.State != store.RolloutRunning ||
+		got.ApprovedBy != "admin-1" || got.ApprovedAt == nil {
+		t.Fatalf("post-approve row = %+v", got)
+	}
+	for _, u := range e.updatesFor(t, r.ID) {
+		if u.ID != canary.ID && u.Phase != store.UpdPending {
+			t.Fatalf("follower %s already %s before restart", u.ID, u.Phase)
+		}
+	}
+
+	// Standby promotes: new Manager, same DB, bumped epoch.
+	e.promote(t, 8)
+
+	// No second approval: the followers must be claimed and the rollout
+	// must never return to awaiting_approval.
+	rest := e.waitInFlight(t, r.ID, 2)
+	if got := e.getRollout(t, r.ID); got.State == store.RolloutAwaitingApproval {
+		t.Fatal("approved canary re-parked after restart")
+	}
+	if got := e.getRollout(t, r.ID); got.ApprovedBy != "admin-1" || got.ApprovedAt == nil {
+		t.Fatalf("approval lost across restart: %+v", got)
+	}
+	for _, u := range rest {
+		e.finishOK(t, u.NodeID, u.ID, "0.7.0")
+	}
+	e.waitRolloutState(t, r.ID, store.RolloutSucceeded)
+}
+
+// TestCanaryUnapprovedRestartStaysParked: a canary parked at the gate
+// without approval stays parked through a restart — no claims, no
+// implicit release. approved_at IS NULL keeps the gate live.
+func TestCanaryUnapprovedRestartStaysParked(t *testing.T) {
+	e := newEnv(t, fastCfg(), true)
+	rel := e.release(t, "0.7.0")
+	n1 := e.node(t, "n1", "0.6.0", true, true)
+	n2 := e.node(t, "n2", "0.6.0", true, true)
+	n3 := e.node(t, "n3", "0.6.0", true, true)
+
+	r, err := e.m.CreateRollout(e.ctx, rel.ID, StrategyCanary, []string{n1, n2, n3}, 1, 2, "test")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	canary := e.waitInFlight(t, r.ID, 1)[0]
+	e.finishOK(t, canary.NodeID, canary.ID, "0.7.0")
+	e.waitRolloutState(t, r.ID, store.RolloutAwaitingApproval)
+
+	e.stopLoop()
+	e.promote(t, 8)
+
+	// Give the promoted manager many ticks: nothing may advance.
+	time.Sleep(300 * time.Millisecond)
+	if got := e.getRollout(t, r.ID).State; got != store.RolloutAwaitingApproval {
+		t.Fatalf("unapproved canary after restart = %s, want awaiting_approval", got)
+	}
+	for _, u := range e.updatesFor(t, r.ID) {
+		if u.ID != canary.ID && u.Phase != store.UpdPending {
+			t.Fatalf("post-canary update %s = %s under unapproved canary", u.ID, u.Phase)
+		}
+	}
+	if e.disp.sentCount() != 1 {
+		t.Fatalf("sends = %d, want exactly the canary frame", e.disp.sentCount())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// pause / resume
+// ---------------------------------------------------------------------------
+
+// TestPauseResumeRollout: pausing gates NEW dispatch — pendings wait
+// unclaimed — while an update already on a node keeps reporting and
+// finishing under the pause. Resume restarts dispatch.
+func TestPauseResumeRollout(t *testing.T) {
+	e := newEnv(t, fastCfg(), true)
+	rel := e.release(t, "0.7.0")
+	n1 := e.node(t, "n1", "0.6.0", true, true)
+	n2 := e.node(t, "n2", "0.6.0", false, false) // offline: stays pending
+
+	r, err := e.m.CreateRollout(e.ctx, rel.ID, StrategySelected, []string{n1, n2}, 0, 2, "test")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	u1 := e.waitInFlight(t, r.ID, 1)[0]
+	e.waitPhase(t, u1.ID, store.UpdDispatched)
+
+	p, err := e.m.PauseRollout(e.ctx, r.ID)
+	if err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if p.State != RolloutPaused {
+		t.Fatalf("paused state = %s", p.State)
+	}
+	// Already-paused refuses again.
+	if _, err := e.m.PauseRollout(e.ctx, r.ID); !errors.Is(err, ErrNotPausable) {
+		t.Fatalf("second pause = %v, want ErrNotPausable", err)
+	}
+	// In-flight work is NOT aborted: the dispatched update finishes
+	// under the pause...
+	e.finishOK(t, u1.NodeID, u1.ID, "0.7.0")
+	// ...but the still-pending sibling is never claimed, even with the
+	// node now online.
+	e.disp.set(n2, true, true, "0.6.0")
+	time.Sleep(250 * time.Millisecond) // many ticks
+	if got := e.getUpdate(t, e.updateForNode(t, r.ID, n2).ID).Phase; got != store.UpdPending {
+		t.Fatalf("pending update advanced to %s under pause", got)
+	}
+	if got := e.getRollout(t, r.ID).State; got != RolloutPaused {
+		t.Fatalf("rollout state = %s under pause", got)
+	}
+	if e.disp.sentCount() != 1 {
+		t.Fatalf("sends = %d while paused, want 1", e.disp.sentCount())
+	}
+
+	// Resume → the sibling dispatches and the rollout lands.
+	res, err := e.m.ResumeRollout(e.ctx, r.ID)
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if res.State != store.RolloutRunning {
+		t.Fatalf("resumed state = %s", res.State)
+	}
+	u2 := e.updateForNode(t, r.ID, n2)
+	e.waitPhase(t, u2.ID, store.UpdDispatched)
+	e.finishOK(t, u2.NodeID, u2.ID, "0.7.0")
+	e.waitRolloutState(t, r.ID, store.RolloutSucceeded)
+	// Terminal now: resume refuses.
+	if _, err := e.m.ResumeRollout(e.ctx, r.ID); !errors.Is(err, ErrNotPaused) {
+		t.Fatalf("resume terminal = %v, want ErrNotPaused", err)
+	}
+}
+
+// TestApprovePausedRollout: approving a canary that was paused at the
+// gate records the approval but keeps the rollout paused ("approval
+// persists, paused stays paused"); resuming then runs it straight
+// through — approved_at IS NOT NULL, the gate never re-engages.
+func TestApprovePausedRollout(t *testing.T) {
+	e := newEnv(t, fastCfg(), true)
+	rel := e.release(t, "0.7.0")
+	n1 := e.node(t, "n1", "0.6.0", true, true)
+	n2 := e.node(t, "n2", "0.6.0", true, true)
+	n3 := e.node(t, "n3", "0.6.0", true, true)
+
+	r, err := e.m.CreateRollout(e.ctx, rel.ID, StrategyCanary, []string{n1, n2, n3}, 1, 2, "test")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	canary := e.waitInFlight(t, r.ID, 1)[0]
+	e.finishOK(t, canary.NodeID, canary.ID, "0.7.0")
+	e.waitRolloutState(t, r.ID, store.RolloutAwaitingApproval)
+
+	if _, err := e.m.PauseRollout(e.ctx, r.ID); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	// Kill the loop so the approve's internal running-window can't be
+	// ticked on — the assert below stays deterministic.
+	e.stopLoop()
+
+	ap, err := e.m.ApproveNextBatch(e.ctx, r.ID, "admin-1")
+	if err != nil {
+		t.Fatalf("approve paused rollout: %v", err)
+	}
+	if ap.State != RolloutPaused {
+		t.Fatalf("approve unpaused the rollout: %s", ap.State)
+	}
+	if ap.ApprovedBy != "admin-1" || ap.ApprovedAt == nil {
+		t.Fatalf("approval not stamped while paused: %+v", ap)
+	}
+	for _, u := range e.updatesFor(t, r.ID) {
+		if u.ID != canary.ID && u.Phase != store.UpdPending {
+			t.Fatalf("follower %s advanced to %s while paused", u.ID, u.Phase)
+		}
+	}
+	// Approved-but-paused is not at the gate: a second approve refuses.
+	if _, err := e.m.ApproveNextBatch(e.ctx, r.ID, "admin-2"); !errors.Is(err, ErrNotAwaitingApproval) {
+		t.Fatalf("second approve = %v, want ErrNotAwaitingApproval", err)
+	}
+
+	// Restart: paused + approved survives promotion untouched.
+	m2 := e.promote(t, 8)
+	time.Sleep(200 * time.Millisecond)
+	if got := e.getRollout(t, r.ID).State; got != RolloutPaused {
+		t.Fatalf("paused rollout after restart = %s", got)
+	}
+
+	// Resume under the new manager → straight to running, followers
+	// claim, no re-park at the gate.
+	if _, err := m2.ResumeRollout(e.ctx, r.ID); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	rest := e.waitInFlight(t, r.ID, 2)
+	for _, u := range rest {
+		e.finishOK(t, u.NodeID, u.ID, "0.7.0")
+	}
+	e.waitRolloutState(t, r.ID, store.RolloutSucceeded)
+}
+
+// TestPauseResumeGuards: pending, paused, and terminal rollouts refuse
+// pause; anything not paused refuses resume; unknown ids 404.
+func TestPauseResumeGuards(t *testing.T) {
+	e := newEnv(t, fastCfg(), false)
+	rel := e.release(t, "0.7.0")
+	n := e.node(t, "n1", "0.6.0", false, false)
+
+	r, err := e.m.CreateRollout(e.ctx, rel.ID, StrategySequential, []string{n}, 0, 0, "test")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Still 'pending' (loop stopped): not yet evaluated → not pausable.
+	if _, err := e.m.PauseRollout(e.ctx, r.ID); !errors.Is(err, ErrNotPausable) {
+		t.Fatalf("pause pending = %v, want ErrNotPausable", err)
+	}
+	if _, err := e.m.ResumeRollout(e.ctx, r.ID); !errors.Is(err, ErrNotPaused) {
+		t.Fatalf("resume pending = %v, want ErrNotPaused", err)
+	}
+	// Terminal: refuses both.
+	if err := e.m.CancelRollout(e.ctx, r.ID); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if _, err := e.m.PauseRollout(e.ctx, r.ID); !errors.Is(err, ErrNotPausable) {
+		t.Fatalf("pause cancelled = %v, want ErrNotPausable", err)
+	}
+	if _, err := e.m.ResumeRollout(e.ctx, r.ID); !errors.Is(err, ErrNotPaused) {
+		t.Fatalf("resume cancelled = %v, want ErrNotPaused", err)
+	}
+	// Unknown id → ErrNotFound.
+	missing := "00000000-0000-0000-0000-000000000000"
+	if _, err := e.m.PauseRollout(e.ctx, missing); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("pause missing = %v, want ErrNotFound", err)
+	}
+	if _, err := e.m.ResumeRollout(e.ctx, missing); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("resume missing = %v, want ErrNotFound", err)
 	}
 }
 
