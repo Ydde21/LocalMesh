@@ -96,6 +96,10 @@ type Rollout struct {
 	CreatedBy   string    `json:"created_by"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	// Canary approval, durable since migration 0013: set atomically with
+	// the awaiting_approval→running transition by ApproveRollout.
+	ApprovedBy string     `json:"approved_by,omitempty"`
+	ApprovedAt *time.Time `json:"approved_at,omitempty"`
 	// Counts populated by loadRolloutCounts.
 	Total     int `json:"total"`
 	Succeeded int `json:"succeeded"`
@@ -295,12 +299,13 @@ func (d *DB) LiveUpdatesByPhase(ctx context.Context, phases ...string) ([]*Agent
 // ---------------------------------------------------------------------------
 
 const rolloutCols = `id,release_id,strategy,state,canary_count,batch_size,
-	error,created_by,created_at,updated_at`
+	error,created_by,created_at,updated_at,approved_by,approved_at`
 
 func scanRollout(row pgx.Row) (*Rollout, error) {
 	var r Rollout
 	err := row.Scan(&r.ID, &r.ReleaseID, &r.Strategy, &r.State, &r.CanaryCount,
-		&r.BatchSize, &r.Error, &r.CreatedBy, &r.CreatedAt, &r.UpdatedAt)
+		&r.BatchSize, &r.Error, &r.CreatedBy, &r.CreatedAt, &r.UpdatedAt,
+		&r.ApprovedBy, &r.ApprovedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -385,6 +390,23 @@ func (d *DB) SetRolloutState(ctx context.Context, id, state, errStr string) (boo
 		`UPDATE rollouts SET state=$2, error=$3, updated_at=now()
 		 WHERE id=$1 AND state NOT IN ('succeeded','failed','cancelled')`,
 		id, state, errStr)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// ApproveRollout is the durable canary gate: one UPDATE stamps the
+// approval (actor + timestamp) and releases the rollout back to
+// 'running'. False means the row wasn't parked — a second approval, or
+// an approve racing a terminal transition, is a clean no-op rather than
+// a double-release.
+func (d *DB) ApproveRollout(ctx context.Context, id, actor string) (bool, error) {
+	tag, err := d.Pool.Exec(ctx,
+		`UPDATE rollouts
+		 SET state='running', approved_by=$2, approved_at=now(), updated_at=now()
+		 WHERE id=$1 AND state='awaiting_approval'`,
+		id, actor)
 	if err != nil {
 		return false, err
 	}
