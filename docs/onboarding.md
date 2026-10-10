@@ -87,6 +87,8 @@ Flags:
 
 - `-name <name>` — display name (default: hostname)
 - `-ca-fingerprint sha256:<fp>` — pin the cluster CA; skip the TOFU warning
+- `-update-pubkey <file>` — pin the release signing public key so this
+  agent can take managed upgrades later (see *Keeping agents current*)
 - `-ollama-url <url>` — non-default Ollama endpoint
 - `-config <path>` — alternate config path (default `~/.localmesh/agent.json`)
 - `-wait 30m` — how long to poll for approval
@@ -144,6 +146,24 @@ localmesh-agent service uninstall
 - **Windows** — `sc.exe`-registered service running under SCM
 
 Details and per-OS notes: [docs/services.md](services.md).
+
+## Keeping agents current
+
+Two paths, same signature verification:
+
+- **Managed (v0.7+)** — the control plane dispatches a registered signed
+  release to the node; the agent verifies it against a release public
+  key pinned in its own config (`join -update-pubkey` above, or
+  `localmesh-agent update-key <file>` on an enrolled device), swaps the
+  binary, and rolls back automatically on a failed health check. Runbook:
+  [docs/updates-orchestration.md](updates-orchestration.md).
+- **Manual** — `localmesh-agent update -release <dir|URL> -pubkey
+  <keyfile>` run on the device, or the file-copy runbook in
+  [docs/agent-updates.md](agent-updates.md). The only path for pre-v0.7
+  agents and unsigned dev builds.
+
+Either way: upgrade the **control plane first**, then agents — the
+protocol gate refuses an agent newer than its server.
 
 ## Diagnosing connectivity
 

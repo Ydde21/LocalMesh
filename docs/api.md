@@ -26,8 +26,12 @@ Auth: `inference`, `admin`.
 
 ### `GET /v1/models`
 
-Lists models installed on at least one approved node, in the OpenAI
-`{"object": "list", "data": [...]}` shape.
+Lists models installed on at least one **eligible** node — online,
+approved, and not in maintenance — in the OpenAI
+`{"object": "list", "data": [...]}` shape. A model whose only hosts are
+offline or under maintenance is absent here (it's unschedulable, so
+advertising it would just fail at dispatch); the admin
+`GET /api/v1/models` view reports it with its availability status.
 
 ### `POST /v1/chat/completions`
 
@@ -109,6 +113,7 @@ Auth: `admin` for writes; `readonly`+ for `GET`s. Prefix `/api/v1`.
 | GET    | `/settings`         | all settings (scheduling config etc.) |
 | PUT    | `/settings/{key}`   | replace a setting — body is the raw JSON value; keys: `scheduling`, `privacy`, `cluster`, `modelops` |
 | GET    | `/discovery/status` | mDNS announce state: `{enabled, advertising, cluster_name, ca_fingerprint}` |
+| GET    | `/control-plane`    | single-active ownership view: `{role, epoch, started_at, heartbeat_at}` plus promotion history from `ownership_events` (`acquired`/`lost`/`promoted` transitions) — see `docs/ha-design.md` |
 
 Mutable `scheduling` keys include `queue_timeout_ms` (1–300000),
 `max_attempts` (1–10), `heartbeat_timeout_seconds` (10–600 — live-tunes
@@ -134,13 +139,15 @@ live-reloaded on PUT):
 | DELETE | `/nodes/{id}`          | delete node record |
 | POST   | `/nodes/{id}/revoke`   | revoke — disconnects the agent and refuses reconnects |
 | POST   | `/nodes/{id}/reinstate`| undo a revoke |
+| POST   | `/nodes/{id}/maintenance` | `{reason}` — drain the node: state `draining` → `maintenance`; no new work is scheduled (the scheduler reports it filtered with the maintenance reason) while in-flight requests finish |
+| POST   | `/nodes/{id}/resume`   | leave maintenance and return the node to scheduling eligibility |
 | GET    | `/nodes/{id}/events`   | connection history, newest first (`?limit=`, max 500). Rows: `{id, node_id, event, reason, agent_version, created_at}` where `event` is `connected`/`disconnected` and `reason` explains the drop (`replaced by new connection`, `control plane shutting down`, `connection closed by agent`, a revoke reason). |
 
 ### Diagnostics
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/diagnostics` | Redacted operational snapshot for troubleshooting (readonly scope): `{generated_at, server_version, protocol, min_agent_protocol, uptime_seconds, cluster_name, discovery, control_plane, database, tls, nodes, modelops_config, modelops_recent_status, model_operations, recent_audit}`. `control_plane` carries the single-active ownership row (`epoch` is the fencing token — see `docs/reliability.md`); `tls` carries CA + serving-cert expiry. No credential material is ever serialized — credentials exist only as SHA-256 hashes at rest. |
+| GET | `/diagnostics` | Redacted operational snapshot for troubleshooting (readonly scope): `{generated_at, server_version, protocol, min_agent_protocol, uptime_seconds, cluster_name, discovery, control_plane, database, tls, nodes, modelops_config, modelops_recent_status, model_operations, updates, rollouts, recent_audit}`. `control_plane` carries the single-active ownership row (`epoch` is the fencing token — see `docs/reliability.md`); `tls` carries CA + serving-cert expiry; `updates`/`rollouts` summarize in-flight and recent agent-update activity. No credential material is ever serialized — credentials exist only as SHA-256 hashes at rest. |
 
 All responses also echo `X-Request-ID` (or mint one when the caller
 doesn't send it) — it appears in server logs as `req=<id>`.
@@ -160,7 +167,7 @@ doesn't send it) — it appears in server logs as `req=<id>`.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET    | `/models`             | cluster-wide model inventory (`node_ids`, `node_names`, `loaded_on`) |
+| GET    | `/models`             | cluster-wide model inventory (`node_ids`, `node_names`, `loaded_on`) plus per-model `availability`: `available` (on ≥1 eligible node), `loaded` (resident on ≥1 eligible node), `offline_only` (only offline/maintenance hosts), `unavailable` (recorded nowhere reachable); `eligible_nodes`/`loaded_nodes` counts explain it |
 | GET    | `/models/placement`   | per-model placement view (see below) |
 | POST   | `/models/pull`        | `{model, node_ids?, priority?}` — enqueue pull for selected or all eligible online nodes |
 | POST   | `/models/delete`      | `{model, node_ids?, force?, priority?}` — same for deletion; see last-replica guard below |
@@ -262,6 +269,29 @@ survive both control-plane and web-process restarts.
 | GET    | `/workloads?status=&limit=` | workload history (metadata only — never prompts); `status` ∈ `queued`, `running`, `completed`, `failed`, `cancelled` |
 | GET    | `/workloads/{id}`           | detail incl. the full routing decision (`candidates`, scores, reasons, `queued_ms`) |
 
+### Releases & agent upgrades (v0.7)
+
+Managed upgrades — the full runbook is `docs/updates-orchestration.md`.
+All writes are `admin`-only; GETs are `readonly`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET    | `/release-keys`              | list trusted release-signing keys (`key_id`, `kind` = `minisign`\|`openssl`, `comment`, `revoked_at`) |
+| POST   | `/release-keys`              | register `{key_id, kind, public_key, comment?}` |
+| POST   | `/release-keys/{id}/revoke`  | retire a key — it can no longer admit releases |
+| GET    | `/releases`                  | list registered releases (`version`, `channel`, `platforms`, `status`) |
+| POST   | `/releases`                  | register `{base_url, channel?, manifest, sums, signatures, notes?}` — signatures are verified against a registered key **at admission**; unsigned releases are rejected outright. `base_url` must be `https` (loopback http exempt for mirrors). `(version, channel)` unique → `409` |
+| GET    | `/releases/{id}`             | release detail incl. manifest, protocol window, signer `key_id` |
+| POST   | `/releases/{id}/revoke`      | pull a release — no new rollouts against it |
+| GET    | `/rollouts`                  | list rollout campaigns (`strategy`, `state`, per-state node counts) |
+| POST   | `/rollouts`                  | create `{release_id, strategy, node_ids?, canary_count?, batch_size?}` — strategies `single`\|`selected`\|`sequential`\|`canary`\|`parallel` |
+| GET    | `/rollouts/{id}`             | campaign detail: `pending`→`running`→`awaiting_approval`→`succeeded`\|`failed`\|`cancelled` |
+| POST   | `/rollouts/{id}/approve`     | resume a `canary` rollout parked in `awaiting_approval` |
+| POST   | `/rollouts/{id}/cancel`      | stop the campaign — undispatched rows cancel; dispatched agents get `upgrade_abort` (honored pre-install only) |
+| GET    | `/agent-updates?rollout_id=&node_id=` | per-node update rows: `phase` ∈ `pending`, `draining`, `dispatched`, `verifying`, `downloading`, `staging`, `installing`, `restarting`, `verify_health`, `succeeded`, `failed`, `rolled_back`, `cancelled`, `interrupted`, plus `attempt`, `error`, `from_version`, `to_version`, fencing `epoch` |
+| GET    | `/agent-updates/{id}`        | one update's detail |
+| POST   | `/agent-updates/{id}/cancel` | cancel one in-flight update (pre-install only) |
+
 ### API keys
 
 | Method | Path | Description |
@@ -276,6 +306,17 @@ survive both control-plane and web-process restarts.
 `Authorization: Bearer <node credential>` (the `lmn_` token); the node
 identifies itself in the first `hello` frame. Speaks the frame protocol
 in `internal/contracts`.
+
+### Release-file proxy (node credential)
+
+`GET /api/v1/agent-releases/{release_id}/files/{name}` — serves
+registered release files to agents whose dispatch source is
+`localmesh://releases/<id>` (air-gapped nodes with no route to the
+release `base_url`). Authenticated by the node credential, **not** API
+keys. `name` is whitelisted to files the registered manifest/sums
+actually name — anything else is 404. Size caps: 8 MiB metadata /
+4 GiB artifacts. Agents still verify signatures locally; the proxy
+moves bytes, not trust.
 
 ### Health
 

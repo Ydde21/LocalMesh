@@ -48,6 +48,12 @@ hardware.
 - **Full model management** — install/remove models on remote nodes from
   the dashboard or API, with real download progress, cancellation,
   deduplication, and persisted operation history.
+- **Managed agent upgrades + standby mode** — signed releases registered
+  with the control plane roll out to the fleet by strategy (canary,
+  sequential, parallel) with per-node progress and automatic `.bak`
+  rollback; agents verify signatures against operator-pinned keys, never
+  server-sent ones. An optional `LOCALMESH_STANDBY=1` second instance
+  waits on the Postgres advisory lock and promotes on primary loss.
 - **Verified against real Ollama** — the gateway, streaming, cancellation,
   model ops, and engine-failure recovery are exercised against an actual
   Ollama runtime, not just test doubles.
@@ -204,7 +210,11 @@ make release                      # cross-compile agents → dist/
 - [docs/testing.md](docs/testing.md) — test infrastructure and cleanup contract
 - [docs/ci.md](docs/ci.md) — CI matrix: what each job proves
 - [docs/agent-updates.md](docs/agent-updates.md) — release + update security model
-- [docs/ha-design.md](docs/ha-design.md) — active-standby design (future, not built)
+- [docs/updates-orchestration.md](docs/updates-orchestration.md) — managed-upgrade runbook (release keys, rollouts, canaries, air-gap proxy)
+- [docs/ha-design.md](docs/ha-design.md) — active-standby design + deployment recipe
+- [docs/compatibility.md](docs/compatibility.md) — version/platform/Postgres floors
+- [docs/troubleshooting.md](docs/troubleshooting.md) — symptom → cause → fix
+- [SECURITY.md](SECURITY.md) — vulnerability reporting + scope
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## License

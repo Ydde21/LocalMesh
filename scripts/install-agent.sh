@@ -29,6 +29,19 @@ SERVICE=0
 log()  { printf '%s\n' "  $*"; }
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+# sha256_of prints the lowercase hex digest of $1. sha256sum on
+# GNU/coreutils, shasum on perl/BSD — if neither exists we cannot verify
+# the download and must fail loudly rather than install unverified.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    fail "no SHA-256 tool found (need sha256sum or shasum) — cannot verify the download"
+  fi
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --server) SERVER="$2"; shift 2 ;;
@@ -97,7 +110,7 @@ else
   if [ -n "$mf" ] && [ -s "$mf" ]; then
     want="$(tr -d '\n\t ' < "$mf" | grep -o "\"${artifact}\"[^}]*" | grep -o '"sha256":"[a-f0-9]*"' | grep -o '[a-f0-9]\{64\}')"
     if [ -n "$want" ]; then
-      got="$(shasum -a 256 "$src" | awk '{print $1}')"
+      got="$(sha256_of "$src")"
       [ "$got" = "$want" ] || fail "checksum mismatch for $artifact ($got != $want) — aborting"
       log "checksum verified against release manifest"
     fi
@@ -111,7 +124,8 @@ else
       minisign -Vm "$sums" -P "$(cat "$LOCALMESH_RELEASE_PUBKEY")" >/dev/null 2>&1 \
         || minisign -V -x "$sig" -m "$sums" -P "$(cat "$LOCALMESH_RELEASE_PUBKEY")" \
         || fail "signature verification failed — refusing to install"
-      grep -q "$(shasum -a 256 "$src" | awk '{print $1}')  \*\?$artifact" "$sums" \
+      srcsum="$(sha256_of "$src")"
+      grep -q "${srcsum}  \*\?$artifact" "$sums" \
         || log "note: artifact not in signed SHA256SUMS (manifest checksum already verified)"
       log "release signature verified"
     fi
