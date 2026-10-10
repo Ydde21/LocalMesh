@@ -194,6 +194,9 @@ make release                      # cross-compile agents → dist/
 - [docs/api.md](docs/api.md) — gateway + admin API reference
 - [docs/onboarding.md](docs/onboarding.md) — installing agents, enrollment, approvals
 - [docs/security.md](docs/security.md) — trust model, credentials, privacy
+- [docs/reliability.md](docs/reliability.md) — failure semantics: restarts, crashes, blips
+- [docs/backup-recovery.md](docs/backup-recovery.md) — backup/restore runbook
+- [docs/ha-design.md](docs/ha-design.md) — active-standby design (future, not built)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## License
