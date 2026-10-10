@@ -209,12 +209,12 @@ type Envelope struct {
 
 // Message types, agent -> server.
 const (
-	MsgHello      = "hello"             // first message after connect
-	MsgCapability = "capability"        // hardware/engines/models report
-	MsgHeartbeat  = "heartbeat"         // periodic metrics
-	MsgInferChunk = "infer_chunk"       // one streamed token batch (reply)
-	MsgInferEnd   = "infer_end"         // stream finished (reply)
-	MsgInferError = "infer_error"       // stream failed (reply)
+	MsgHello        = "hello"             // first message after connect
+	MsgCapability   = "capability"        // hardware/engines/models report
+	MsgHeartbeat    = "heartbeat"         // periodic metrics
+	MsgInferChunk   = "infer_chunk"       // one streamed token batch (reply)
+	MsgInferEnd     = "infer_end"         // stream finished (reply)
+	MsgInferError   = "infer_error"       // stream failed (reply)
 	MsgOpProgress   = "model_op_progress" // pull/delete progress
 	MsgOpDone       = "model_op_done"     // pull/delete finished
 	MsgUpgradeState = "upgrade_state"     // agent upgrade progress/result
@@ -360,9 +360,9 @@ type AgentUpgrade struct {
 	// Protocol bounds from the manifest — the agent double-checks these
 	// itself after verifying the signature; these fields let it reject
 	// an incompatible dispatch before downloading anything.
-	ProtocolVersion    int `json:"protocol_version"`
-	MinAgentProtocol   int `json:"min_agent_protocol"`
-	AllowInsecureHTTP  bool `json:"allow_insecure_http,omitempty"` // loopback mirror only
+	ProtocolVersion   int  `json:"protocol_version"`
+	MinAgentProtocol  int  `json:"min_agent_protocol"`
+	AllowInsecureHTTP bool `json:"allow_insecure_http,omitempty"` // loopback mirror only
 }
 
 // UpgradeState is the agent's report on an upgrade operation. Terminal
