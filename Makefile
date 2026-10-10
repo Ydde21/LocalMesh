@@ -2,11 +2,12 @@
 
 BINARY_SERVER := localmesh-server
 BINARY_AGENT  := localmesh-agent
+BINARY_ROUTER := localmesh-router
 BIN           := bin
 VERSION       ?= dev
 LDFLAGS       := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build test vet tidy clean clean-test-resources bench release dashboard dev-up dev-down verify verify-fast
+.PHONY: all build test vet tidy clean clean-test-resources bench release dashboard dev-up dev-down verify verify-fast chaos-test
 
 all: build
 
@@ -14,6 +15,7 @@ build:
 	@mkdir -p $(BIN)
 	go build -ldflags '$(LDFLAGS)' -o $(BIN)/$(BINARY_SERVER) ./cmd/localmesh-server
 	go build -ldflags '$(LDFLAGS)' -o $(BIN)/$(BINARY_AGENT)  ./cmd/localmesh-agent
+	go build -ldflags '$(LDFLAGS)' -o $(BIN)/$(BINARY_ROUTER) ./cmd/localmesh-router
 
 test:
 	go test ./...
@@ -62,6 +64,13 @@ clean-test-resources:
 # ~2-3 min. Override: BENCHTIME=500ms COUNT=2 make bench
 bench:
 	@bash scripts/bench.sh
+
+# Distributed-failure suite: build-tagged chaos tests (connection drops,
+# fencing violations, postgres restart, promotion races, interrupted
+# updates). Heavy — real postgres containers, kills mid-flight. Isolated
+# from the default `go test ./...` run.
+chaos-test:
+	@bash scripts/ci-chaos.sh
 
 # Versioned release: all 5 agent targets + server binaries, SHA256SUMS,
 # manifest, signature. Requires LOCALMESH_SIGNING_KEY (minisign secret

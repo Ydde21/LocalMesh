@@ -11,11 +11,13 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/localmesh-server ./cmd/localmesh-server
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/localmesh-router ./cmd/localmesh-router
 
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates && adduser -D -u 10001 localmesh \
     && mkdir -p /data && chown localmesh:localmesh /data
 COPY --from=build /out/localmesh-server /usr/local/bin/localmesh-server
+COPY --from=build /out/localmesh-router /usr/local/bin/localmesh-router
 USER localmesh
 VOLUME /data
 ENV LOCALMESH_DATA_DIR=/data LOCALMESH_LISTEN=0.0.0.0:8443

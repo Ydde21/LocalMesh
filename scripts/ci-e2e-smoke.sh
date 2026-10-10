@@ -298,12 +298,14 @@ done
 [ "$sb" -eq 1 ] || bad "standby never answered /api/v1/standby"
 [ "$(jget "$tmp/sb.json" '{j[role]}')" = "standby" ] \
   || bad "standby role: $(cat "$tmp/sb.json")"
+code="$(curl -s -o /dev/null -w '%{http_code}' "$SBASE/readyz")"
+[ "$code" = "503" ] || bad "standby /readyz → $code, want 503"
 code="$(curl -s -o /dev/null -w '%{http_code}' "$SBASE/healthz")"
-[ "$code" = "503" ] || bad "standby /healthz → $code, want 503"
+[ "$code" = "200" ] || bad "standby /healthz → $code, want 200 (alive, not routable)"
 code="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ADMIN" \
   "$SBASE/api/v1/nodes")"
 [ "$code" = "503" ] || bad "standby /api/v1/nodes → $code, want 503"
-pass "standby waits: role=standby, /healthz 503, API 503"
+pass "standby waits: role=standby, /healthz 200 (live), /readyz 503 (not routable), API 503"
 
 # Kill the primary without a clean shutdown — the crash shape: the lock
 # session dies with the process, the standby must claim the next epoch.
@@ -314,7 +316,7 @@ promoted=0
 for _ in $(seq 60); do
   wait_pid_or_bad "$standby_pid" "standby localmesh-server (promotion)"
   code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 \
-    "$SBASE/healthz" || true)"
+    "$SBASE/readyz" || true)"
   [ "$code" = "200" ] && { promoted=1; break; }
   sleep 1
 done

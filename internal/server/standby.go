@@ -43,15 +43,18 @@ func writeStandbyUnavailable(w http.ResponseWriter) {
 }
 
 // standbyHandler is the whole standby surface. Deliberately tiny:
-// healthz/readyz report NOT healthy (a router probing them excludes the
-// standby from the stable endpoint automatically), /api/v1/standby
-// gives operators the incumbent owner + wait duration, and
-// /api/v1/version keeps agent compatibility checks working. Everything
-// else — especially anything that mutates or dispatches — is 503.
+// /healthz reports liveness (the standby process is alive — a liveness
+// probe must not restart it), while /readyz reports NOT ready so a
+// router or LB health check excludes it from the stable endpoint until
+// promotion flips it 200. /api/v1/standby gives operators the incumbent
+// owner + wait duration, and /api/v1/version keeps agent compatibility
+// checks working. Everything else — especially anything that mutates or
+// dispatches — is 503.
 func standbyHandler(st *store.DB, waitingSince time.Time) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "standby", http.StatusServiceUnavailable)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"role": "standby", "live": true})
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "standby", http.StatusServiceUnavailable)

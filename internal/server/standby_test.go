@@ -96,6 +96,15 @@ func healthCode(e *testEnv) int {
 	return resp.StatusCode
 }
 
+func readyCode(e *testEnv) int {
+	resp, err := http.Get(e.base + "/readyz")
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
 func TestStandbyWaitsThenPromotes(t *testing.T) {
 	ol := fakeollama.New(
 		fakeollama.Model{Name: "m1:latest", Family: "m", Parameter: "1B", Size: 1 << 30},
@@ -107,7 +116,8 @@ func TestStandbyWaitsThenPromotes(t *testing.T) {
 	standby := startStandby(t, dsn)
 
 	// While the active holds the lock the standby reports itself and
-	// refuses service: /healthz 503, privileged API 503.
+	// refuses traffic: /healthz 200 (alive — liveness must not restart a
+	// healthy standby), /readyz 503 (excluded from routing), API 503.
 	info := standbyInfo(t, standby)
 	if info["role"] != "standby" {
 		t.Fatalf("standby role = %v", info["role"])
@@ -116,8 +126,11 @@ func TestStandbyWaitsThenPromotes(t *testing.T) {
 	if owner == nil || owner["epoch"].(float64) != 1 {
 		t.Fatalf("standby should see owner epoch 1: %v", info)
 	}
-	if c := healthCode(standby); c != 503 {
-		t.Fatalf("standby /healthz = %d, want 503", c)
+	if c := healthCode(standby); c != 200 {
+		t.Fatalf("standby /healthz = %d, want 200 (live but not ready)", c)
+	}
+	if c := readyCode(standby); c != 503 {
+		t.Fatalf("standby /readyz = %d, want 503", c)
 	}
 	code, _, _ := standby.adminReq(t, "GET", "/api/v1/nodes", nil)
 	if code != 503 {
@@ -133,12 +146,12 @@ func TestStandbyWaitsThenPromotes(t *testing.T) {
 	active.cancel()
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if healthCode(standby) == 200 {
+		if readyCode(standby) == 200 {
 			break
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	if healthCode(standby) != 200 {
+	if readyCode(standby) != 200 {
 		t.Fatal("standby never promoted")
 	}
 
@@ -197,11 +210,12 @@ func TestStandbyContentionRace(t *testing.T) {
 	s1 := startStandby(t, dsn)
 	s2 := startStandby(t, dsn)
 
-	// Poll both until exactly one serves /healthz 200.
+	// Poll both until exactly one serves /readyz 200 (promoted =
+	// routable; /healthz is liveness and stays 200 on a waiting standby).
 	deadline := time.Now().Add(30 * time.Second)
 	var winner *testEnv
 	for time.Now().Before(deadline) && winner == nil {
-		c1, c2 := healthCode(s1), healthCode(s2)
+		c1, c2 := readyCode(s1), readyCode(s2)
 		switch {
 		case c1 == 200 && c2 == 200:
 			t.Fatal("both standbys promoted — split brain")
@@ -221,7 +235,7 @@ func TestStandbyContentionRace(t *testing.T) {
 	if winner == s1 {
 		loser = s2
 	}
-	if healthCode(loser) == 200 {
+	if readyCode(loser) == 200 {
 		t.Fatal("second standby promoted while first is active")
 	}
 	code, cp, _ := winner.adminReq(t, "GET", "/api/v1/control-plane", nil)
@@ -268,12 +282,12 @@ func TestStandbyPromotesOnCrash(t *testing.T) {
 	// standby must promote on epoch 2.
 	deadline = time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if healthCode(standby) == 200 {
+		if readyCode(standby) == 200 {
 			break
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	if healthCode(standby) != 200 {
+	if readyCode(standby) != 200 {
 		t.Fatal("standby did not promote after incumbent crash")
 	}
 	code, cp, _ := standby.adminReq(t, "GET", "/api/v1/control-plane", nil)
