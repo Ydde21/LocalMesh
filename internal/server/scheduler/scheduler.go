@@ -228,6 +228,20 @@ func filterReason(v *nodehub.View, req Request, cfg Config, residency map[string
 	if n.Status != contracts.NodeStatusApproved {
 		return "node is not approved"
 	}
+	// Maintenance of any flavor (draining/maintenance/updating) blocks
+	// NEW dispatches. In-flight work is untouched — this check runs at
+	// pick time, so a request already dispatched continues on the node.
+	switch n.Maintenance {
+	case store.MaintDraining:
+		return "node is draining for maintenance"
+	case store.MaintMode:
+		return "node is in maintenance"
+	case store.MaintUpdating:
+		return "node is updating"
+	case store.MaintNone:
+	default:
+		return "node is under maintenance (" + n.Maintenance + ")"
+	}
 	if !v.Online {
 		return "node is offline"
 	}

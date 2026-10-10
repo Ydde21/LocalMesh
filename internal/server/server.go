@@ -145,6 +145,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.log.Warn("marked interrupted model operations failed", "count", n)
 	}
 	go s.reconcileLoop(ctx)
+	go s.drainLoop(ctx)
 
 	if err := s.bootstrapAdminKey(ctx); err != nil {
 		return err
@@ -301,6 +302,51 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 		// again — sweep keeps the table small.
 		if err := s.st.SweepSessionRevocations(ctx); err != nil {
 			s.log.Warn("session revocation sweep failed", "err", err)
+		}
+	}
+}
+
+// drainLoop promotes 'draining' nodes to 'maintenance' once they hold
+// no in-flight work — inference dispatches (hub) plus queued/dispatched
+// model ops (store). Runs on a short ticker; the transition is a
+// one-row UPDATE so repeated passes are cheap and idempotent. A node
+// that goes offline mid-drain is promoted immediately: nothing can be
+// executing on a dead connection.
+func (s *Server) drainLoop(ctx context.Context) {
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		nodes, err := s.st.ListNodesInMaintenance(ctx, store.MaintDraining)
+		if err != nil {
+			s.log.Warn("drain watcher: list failed", "err", err)
+			continue
+		}
+		if len(nodes) == 0 {
+			continue
+		}
+		opCounts, err := s.st.ModelOpsActiveByNode(ctx)
+		if err != nil {
+			s.log.Warn("drain watcher: op counts failed", "err", err)
+			continue
+		}
+		for _, n := range nodes {
+			drained := !s.hub.Online(n.ID) ||
+				(s.hub.InFlight(n.ID) == 0 && opCounts[n.ID] == 0)
+			if !drained {
+				continue
+			}
+			if err := s.st.SetMaintenance(ctx, n.ID, store.MaintMode, n.MaintenanceReason); err != nil {
+				s.log.Warn("drain watcher: promote failed", "node", n.ID, "err", err)
+				continue
+			}
+			s.log.Info("node drained, now under maintenance", "node", n.ID)
+			s.st.Audit(ctx, "control-plane", "node.drained", n.ID, nil)
+			s.ev.Publish("node.maintenance", map[string]string{"id": n.ID, "state": store.MaintMode})
 		}
 	}
 }

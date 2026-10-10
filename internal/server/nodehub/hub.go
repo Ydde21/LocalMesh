@@ -51,10 +51,11 @@ func DefaultConfig() Config {
 // View is the scheduler-facing snapshot of one node.
 type View struct {
 	Node      *store.Node
-	Online    bool
+	Online    bool    // currently connected
 	InFlight  int     // dispatches currently executing
 	LatencyMS float64 // measured ws ping RTT
 	StaleBeat bool    // heartbeat overdue
+	AgentVer  string  // hello-reported agent build stamp ("" if unset)
 }
 
 // Hub owns all live agent connections.
@@ -77,11 +78,27 @@ type Hub struct {
 	// opQueue receives lifecycle + op-frame callbacks when the modelops
 	// queue is installed (server.go). Nil in tests that build a bare hub.
 	opQueue *modelops.Queue
+
+	// updates receives agent-upgrade state frames + connect lifecycle
+	// callbacks when the update orchestrator is installed (server.go).
+	updates updateReporter
+}
+
+// updateReporter is the hub→updateplane callback surface, defined here
+// (not as updateplane import) to keep a one-way dep edge.
+type updateReporter interface {
+	OnUpgradeState(ctx context.Context, nodeID string, s contracts.UpgradeState)
+	OnNodeConnected(nodeID, agentVersion string)
+	OnNodeDisconnected(nodeID string)
 }
 
 // SetModelOpsQueue wires the persistent model-op queue into the hub's
 // conn lifecycle and op-frame handling.
 func (h *Hub) SetModelOpsQueue(q *modelops.Queue) { h.opQueue = q }
+
+// SetUpdateReporter wires the update orchestrator into conn lifecycle +
+// upgrade_state frames.
+func (h *Hub) SetUpdateReporter(r updateReporter) { h.updates = r }
 
 func New(st *store.DB, ev *events.Broker, cfg Config, log *slog.Logger) *Hub {
 	h := &Hub{
@@ -157,6 +174,7 @@ func (h *Hub) Snapshot(ctx context.Context) ([]View, error) {
 			v.InFlight = c.inFlight()
 			v.LatencyMS = c.latencyMS()
 			v.StaleBeat = time.Since(c.lastBeat()) > time.Duration(h.beatTimeout.Load())
+			v.AgentVer = c.agentVer
 		}
 		out = append(out, v)
 	}
@@ -260,6 +278,9 @@ func (h *Hub) register(id string, nc *conn) {
 	if h.opQueue != nil {
 		h.opQueue.OnNodeConnected(id)
 	}
+	if h.updates != nil {
+		h.updates.OnNodeConnected(id, nc.agentVer)
+	}
 	h.notify()
 }
 
@@ -355,6 +376,9 @@ func (h *Hub) unregister(id string, nc *conn) {
 		// InterruptNodeModelOps is status-guarded and idempotent vs the
 		// direct call above.
 		h.opQueue.OnNodeDisconnected(id)
+	}
+	if h.updates != nil {
+		h.updates.OnNodeDisconnected(id)
 	}
 	h.notify()
 }
@@ -490,6 +514,17 @@ func (h *Hub) handleFrame(ctx context.Context, nc *conn, env contracts.Envelope)
 		})
 		// Model inventory likely changed; ask the agent to re-report.
 		h.notify()
+
+	case contracts.MsgUpgradeState:
+		// Agent update progress/terminal report — forwarded to the
+		// update orchestrator. Unknown ops are ignored there.
+		var u contracts.UpgradeState
+		if env.Decode(&u) != nil {
+			return
+		}
+		if h.updates != nil {
+			h.updates.OnUpgradeState(ctx, nc.node.ID, u)
+		}
 	}
 }
 

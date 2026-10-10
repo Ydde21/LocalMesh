@@ -88,6 +88,8 @@ func (a *API) Register(mux *http.ServeMux, mwAdmin, mwRead func(http.Handler) ht
 	mux.Handle("DELETE /api/v1/nodes/{id}", mwAdmin(http.HandlerFunc(a.handleNodeDelete)))
 	mux.Handle("POST /api/v1/nodes/{id}/revoke", mwAdmin(http.HandlerFunc(a.handleNodeRevoke)))
 	mux.Handle("POST /api/v1/nodes/{id}/reinstate", mwAdmin(http.HandlerFunc(a.handleNodeReinstate)))
+	mux.Handle("POST /api/v1/nodes/{id}/maintenance", mwAdmin(http.HandlerFunc(a.handleNodeMaintenance)))
+	mux.Handle("POST /api/v1/nodes/{id}/resume", mwAdmin(http.HandlerFunc(a.handleNodeResume)))
 
 	mux.Handle("GET /api/v1/enrollment-tokens", mwRead(http.HandlerFunc(a.handleListEnrollTokens)))
 	mux.Handle("POST /api/v1/enrollment-tokens", mwAdmin(http.HandlerFunc(a.handleCreateEnrollToken)))
@@ -376,8 +378,10 @@ func nodeJSON(v nodehub.View) map[string]any {
 		"hardware": n.Hardware, "engines": n.Engines, "models": n.Models,
 		"metrics": n.Metrics, "labels": n.Labels,
 		"max_concurrent": n.MaxConcurrent, "in_flight": v.InFlight,
-		"latency_ms":   v.LatencyMS,
-		"last_seen_at": n.LastSeenAt, "created_at": n.CreatedAt,
+		"latency_ms":  v.LatencyMS,
+		"maintenance": n.Maintenance, "maintenance_reason": n.MaintenanceReason,
+		"agent_version": v.AgentVer,
+		"last_seen_at":  n.LastSeenAt, "created_at": n.CreatedAt,
 	}
 }
 
@@ -499,6 +503,86 @@ func (a *API) handleNodeRevoke(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleNodeMaintenance starts a drain: the node stops receiving new
+// inference and model-op work immediately (scheduler + claim queries
+// exclude non-empty maintenance). When the node has no in-flight work
+// it transitions straight to 'maintenance'; the server's drain watcher
+// completes the transition once in-flight work finishes.
+func (a *API) handleNodeMaintenance(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req)
+	if len(req.Reason) > 200 {
+		writeErr(w, http.StatusBadRequest, "reason too long (max 200 chars)")
+		return
+	}
+	node, err := a.st.GetNode(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "node not found")
+		return
+	}
+	if node.Status != contracts.NodeStatusApproved {
+		writeErr(w, http.StatusConflict, "node is not in service (status "+string(node.Status)+")")
+		return
+	}
+	if node.Maintenance == store.MaintUpdating {
+		writeErr(w, http.StatusConflict, "node is mid-update — cancel the update instead")
+		return
+	}
+	state := store.MaintDraining
+	if !a.hub.Online(id) || a.hub.InFlight(id) == 0 && a.nodeOpsIdle(id) {
+		state = store.MaintMode // nothing to drain
+	}
+	if err := a.st.SetMaintenance(r.Context(), id, state, req.Reason); err != nil {
+		a.internalErr(w, r, err)
+		return
+	}
+	principal, _ := auth.PrincipalFrom(r.Context())
+	a.st.Audit(r.Context(), principal.Name, "node.maintenance", id,
+		map[string]string{"state": state, "reason": req.Reason})
+	a.ev.Publish("node.maintenance", map[string]string{"id": id, "state": state})
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "maintenance": state})
+}
+
+// handleNodeResume returns a node to service: clears the maintenance
+// state so the scheduler and op queue consider it again.
+func (a *API) handleNodeResume(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	node, err := a.st.GetNode(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "node not found")
+		return
+	}
+	if node.Maintenance == store.MaintNone {
+		writeErr(w, http.StatusConflict, "node is not under maintenance")
+		return
+	}
+	if node.Maintenance == store.MaintUpdating {
+		writeErr(w, http.StatusConflict, "node is mid-update — cancel the update instead")
+		return
+	}
+	if err := a.st.SetMaintenance(r.Context(), id, store.MaintNone, ""); err != nil {
+		a.internalErr(w, r, err)
+		return
+	}
+	principal, _ := auth.PrincipalFrom(r.Context())
+	a.st.Audit(r.Context(), principal.Name, "node.resume", id, nil)
+	a.ev.Publish("node.maintenance", map[string]string{"id": id, "state": ""})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// nodeOpsIdle reports whether the node has no dispatched/running model
+// operations — half of the drain predicate (inference is InFlight).
+func (a *API) nodeOpsIdle(nodeID string) bool {
+	ops, err := a.st.ModelOpsActiveByNode(context.Background())
+	if err != nil {
+		return false // unsure → keep draining, the watcher retries
+	}
+	return ops[nodeID] == 0
+}
+
 func (a *API) handleNodeReinstate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := a.st.SetNodeStatus(r.Context(), id, contracts.NodeStatusApproved); err != nil {
@@ -541,19 +625,37 @@ type clusterModel struct {
 	NodeNames   []string `json:"node_names"`
 	LoadedOn    []string `json:"loaded_on"`
 	Nodes       int      `json:"nodes"`
+	// v0.7 availability rollup: what inference clients can actually
+	// use right now. 'loaded' = resident on ≥1 eligible node,
+	// 'available' = served by ≥1 eligible node (cold ok),
+	// 'offline_only' = installed only on offline/stale/maintenance
+	// nodes, 'unavailable' = approved-node inventory only.
+	Availability  string `json:"availability"`
+	EligibleNodes int    `json:"eligible_nodes"`
+	LoadedNodes   int    `json:"loaded_nodes"`
+}
+
+// nodeEligibleForInference mirrors the scheduler's cheap gates so the
+// inventory's availability matches what dispatch would decide: approved,
+// connected, fresh heartbeat, not under maintenance.
+func nodeEligible(v nodehub.View) bool {
+	return v.Online && !v.StaleBeat &&
+		v.Node.Status == contracts.NodeStatusApproved && v.Node.Maintenance == store.MaintNone
 }
 
 func (a *API) handleModels(w http.ResponseWriter, r *http.Request) {
-	nodes, err := a.st.ListNodes(r.Context())
+	views, err := a.hub.Snapshot(r.Context())
 	if err != nil {
 		a.internalErr(w, r, err)
 		return
 	}
 	idx := map[string]*clusterModel{}
-	for _, n := range nodes {
+	for _, v := range views {
+		n := v.Node
 		if n.Status != contracts.NodeStatusApproved {
 			continue
 		}
+		eligible := nodeEligible(v)
 		for _, m := range n.Models {
 			cm, ok := idx[m.Name]
 			if !ok {
@@ -564,13 +666,27 @@ func (a *API) handleModels(w http.ResponseWriter, r *http.Request) {
 			cm.NodeIDs = append(cm.NodeIDs, n.ID)
 			cm.NodeNames = append(cm.NodeNames, n.Name)
 			cm.Nodes++
-			if m.Loaded {
-				cm.LoadedOn = append(cm.LoadedOn, n.ID)
+			if eligible {
+				cm.EligibleNodes++
+				if m.Loaded {
+					cm.LoadedNodes++
+					cm.LoadedOn = append(cm.LoadedOn, n.ID)
+				}
 			}
 		}
 	}
 	out := []clusterModel{}
 	for _, cm := range idx {
+		switch {
+		case cm.LoadedNodes > 0:
+			cm.Availability = "loaded"
+		case cm.EligibleNodes > 0:
+			cm.Availability = "available"
+		case cm.Nodes > 0:
+			cm.Availability = "offline_only"
+		default:
+			cm.Availability = "unavailable"
+		}
 		out = append(out, *cm)
 	}
 	writeJSON(w, http.StatusOK, out)

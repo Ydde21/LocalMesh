@@ -164,18 +164,22 @@ func (d *DB) ModelOpWorkNodes(ctx context.Context) ([]string, error) {
 // control_plane_lock.epoch equals it — a process that lost ownership
 // cannot claim work even before it notices. epoch < 0 disables the
 // check (standalone/test use with no ownership session).
+//
+// Nodes in any maintenance state (draining/maintenance/updating) are
+// never due — their queued ops wait until the node resumes service.
 func (d *DB) ClaimDueModelOps(ctx context.Context, epoch int64, nodeIDs []string, perNode, limit int) ([]*OpState, error) {
 	if len(nodeIDs) == 0 || limit <= 0 || perNode <= 0 {
 		return nil, nil
 	}
 	rows, err := d.Pool.Query(ctx,
 		`WITH due AS (
-			SELECT id, node_id,
-				ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY priority DESC, created_at) AS rn
-			FROM model_operations
-			WHERE status='queued'
-			  AND (next_attempt_at IS NULL OR next_attempt_at <= now())
-			  AND node_id = ANY($1::uuid[])
+			SELECT o.id, o.node_id,
+				ROW_NUMBER() OVER (PARTITION BY o.node_id ORDER BY o.priority DESC, o.created_at) AS rn
+			FROM model_operations o
+			JOIN nodes n ON n.id = o.node_id AND n.maintenance = ''
+			WHERE o.status='queued'
+			  AND (o.next_attempt_at IS NULL OR o.next_attempt_at <= now())
+			  AND o.node_id = ANY($1::uuid[])
 			  AND ($4::bigint < 0 OR
 			       (SELECT epoch FROM control_plane_lock WHERE id = 1) = $4)
 		),

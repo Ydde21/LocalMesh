@@ -64,16 +64,25 @@ type oaiModel struct {
 	OwnedBy string `json:"owned_by"`
 }
 
+// handleModels lists models an inference request could be dispatched to
+// RIGHT NOW: at least one approved, online, fresh-heartbeat node not
+// under maintenance reports the model installed. This is a point-in-time
+// advertisement — dispatch still re-checks eligibility per request (a
+// node can drop between list and schedule). The admin inventory
+// (/api/v1/models) is the full installed view including offline-only
+// models.
 func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
-	nodes, err := g.st.ListNodes(r.Context())
+	views, err := g.hub.Snapshot(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
 	seen := map[string]bool{}
 	var out []oaiModel
-	for _, n := range nodes {
-		if n.Status != contracts.NodeStatusApproved {
+	for _, v := range views {
+		n := v.Node
+		if n.Status != contracts.NodeStatusApproved || !v.Online || v.StaleBeat ||
+			n.Maintenance != "" {
 			continue
 		}
 		for _, m := range n.Models {

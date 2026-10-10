@@ -43,3 +43,23 @@ func (d *DB) SetMaintenance(ctx context.Context, nodeID, state, reason string) e
 	}
 	return nil
 }
+
+// ListNodesInMaintenance returns every node whose maintenance column
+// equals the given state (” lists in-service nodes).
+func (d *DB) ListNodesInMaintenance(ctx context.Context, state string) ([]*Node, error) {
+	rows, err := d.Pool.Query(ctx,
+		`SELECT `+nodeCols+` FROM nodes WHERE maintenance=$1 ORDER BY created_at`, state)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Node
+	for rows.Next() {
+		n, err := scanNode(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
