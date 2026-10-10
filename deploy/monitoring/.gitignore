@@ -1,0 +1,4 @@
+# The real scrape credential lives here, untracked — an lmk_ readonly
+# API key minted via POST /api/v1/api-keys (see docs/observability.md).
+# Compose reads it through the `localmesh_scrape_token` secret.
+scrape-token

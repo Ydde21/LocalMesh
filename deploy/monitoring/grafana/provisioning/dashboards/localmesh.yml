@@ -1,0 +1,17 @@
+# Loads every dashboard JSON under /var/lib/grafana/dashboards (the
+# deploy/monitoring/grafana/dashboards dir, bind-mounted read-only).
+apiVersion: 1
+
+providers:
+  - name: localmesh
+    orgId: 1
+    folder: LocalMesh
+    folderUid: localmesh
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    # NOTE: folder/folderUid and foldersFromFilesStructure are mutually
+    # exclusive — flat dir of JSONs here, so the named folder is used.
+    options:
+      path: /var/lib/grafana/dashboards

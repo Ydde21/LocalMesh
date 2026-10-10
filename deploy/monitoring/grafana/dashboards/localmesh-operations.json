@@ -1,0 +1,192 @@
+{
+  "uid": "localmesh-operations",
+  "title": "LocalMesh — Model Ops & Updates",
+  "description": "Model pull/delete operations, agent-update campaigns, rollouts and release registry. Metrics inventory and semantics: docs/observability.md.",
+  "tags": ["localmesh"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "annotations": {"list": []},
+  "templating": {"list": []},
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Model operations",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Terminal outcomes",
+      "description": "Model ops reaching a terminal status: succeeded | failed | cancelled | interrupted (node vanished mid-op — retryable pulls resume to queued).",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 1},
+      "fieldConfig": {
+        "defaults": {"unit": "ops", "min": 0, "custom": {"drawStyle": "line", "fillOpacity": 15, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (status) (rate(localmesh_model_operation_events_total{status=~\"succeeded|failed|cancelled|interrupted\"}[5m]))", "legendFormat": "{{status}}"}]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Queue entries & dispatches",
+      "description": "status=queued counts enqueue/requeue events; status=dispatched counts sends to agents. Retries re-emit both, so these are event counts, not distinct operations.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 1},
+      "fieldConfig": {
+        "defaults": {"unit": "ops", "min": 0, "custom": {"drawStyle": "line", "fillOpacity": 15, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (status) (rate(localmesh_model_operation_events_total{status=~\"queued|dispatched\"}[5m]))", "legendFormat": "{{status}}"}]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Progress ticks (status=running)",
+      "description": "status=running is emitted once per agent progress frame — a measure of transfer activity, NOT of distinct operations. A flat zero during a large pull means no progress is arriving.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 1},
+      "fieldConfig": {
+        "defaults": {"unit": "ops", "min": 0, "custom": {"drawStyle": "line", "fillOpacity": 15, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum(rate(localmesh_model_operation_events_total{status=\"running\"}[5m]))", "legendFormat": "progress events"}]
+    },
+    {
+      "id": 5,
+      "type": "row",
+      "title": "Agent updates",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 9},
+      "panels": []
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "In-flight updates by phase",
+      "description": "localmesh_agent_updates_live — live gauge of update rows not yet terminal: pending | draining | dispatched | verifying | downloading | staging | installing | restarting | verify_health.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 10},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "min": 0, "decimals": 0, "custom": {"drawStyle": "line", "fillOpacity": 25, "showPoints": "never", "stacking": {"mode": "normal", "group": "A"}}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (phase) (localmesh_agent_updates_live)", "legendFormat": "{{phase}}"}]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Finished updates by terminal phase",
+      "description": "localmesh_agent_updates_finished_total — deduplicated per update id: succeeded | failed | rolled_back | cancelled | interrupted.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "min": 0, "custom": {"drawStyle": "bars", "fillOpacity": 50, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (phase) (increase(localmesh_agent_updates_finished_total[15m]))", "legendFormat": "{{phase}}"}]
+    },
+    {
+      "id": 8,
+      "type": "row",
+      "title": "Rollouts & releases",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 18},
+      "panels": []
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Releases registered (24h)",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 19},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": null}]}
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "none", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"refId": "A", "expr": "sum(increase(localmesh_releases_registered_total[24h]))", "instant": true}]
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Releases revoked (24h)",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 19},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": null}, {"color": "orange", "value": 1}]}
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"refId": "A", "expr": "sum(increase(localmesh_releases_revoked_total[24h]))", "instant": true}]
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Signing keys registered (24h)",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 19},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": null}]}
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "none", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"refId": "A", "expr": "sum(increase(localmesh_release_keys_registered_total[24h]))", "instant": true}]
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Signing keys revoked (24h)",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 19},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": null}, {"color": "orange", "value": 1}]}
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"refId": "A", "expr": "sum(increase(localmesh_release_keys_revoked_total[24h]))", "instant": true}]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Rollout state transitions",
+      "description": "localmesh_rollout_transitions_total — deduplicated per rollout id (the orchestrator republishes the row per child update, raw counting would inflate): pending | running | awaiting_approval | succeeded | failed | cancelled.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 23},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "min": 0, "custom": {"drawStyle": "bars", "fillOpacity": 50, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (state) (increase(localmesh_rollout_transitions_total[15m]))", "legendFormat": "{{state}}"}]
+    }
+  ]
+}

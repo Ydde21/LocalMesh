@@ -1,0 +1,15 @@
+# Auto-provisioned Grafana datasource — the co-deployed Prometheus.
+# `uid` is fixed so the provisioned dashboards can reference it without
+# knowing the numeric id Grafana assigns at runtime.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: localmesh-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
