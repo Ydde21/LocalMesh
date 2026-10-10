@@ -182,7 +182,7 @@ func (m *Manager) advanceRollouts(ctx context.Context) {
 }
 
 func (m *Manager) advanceRollout(ctx context.Context, r *store.Rollout) {
-	updates, err := m.st.ListAgentUpdates(ctx, r.ID, "", 500)
+	updates, err := m.st.ListAgentUpdates(ctx, r.ID, "", "", 500)
 	if err != nil {
 		m.log.Debug("list rollout updates", "rollout", r.ID, "err", err)
 		return
@@ -347,7 +347,7 @@ func (m *Manager) CancelRollout(ctx context.Context, rolloutID string) error {
 	// parking first keeps an all-terminal tally from marking the rollout
 	// 'failed' ahead of (or over) our cancel.
 	m.setRolloutState(ctx, r.ID, store.RolloutCancelled, "")
-	updates, err := m.st.ListAgentUpdates(ctx, r.ID, "", 500)
+	updates, err := m.st.ListAgentUpdates(ctx, r.ID, "", "", 500)
 	if err != nil {
 		return err
 	}

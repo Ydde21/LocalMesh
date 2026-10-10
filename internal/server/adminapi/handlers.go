@@ -23,6 +23,7 @@ import (
 	"github.com/localmesh/localmesh/internal/server/nodehub"
 	"github.com/localmesh/localmesh/internal/server/scheduler"
 	"github.com/localmesh/localmesh/internal/server/store"
+	"github.com/localmesh/localmesh/internal/server/updateplane"
 )
 
 type API struct {
@@ -49,6 +50,11 @@ type API struct {
 	diag func(ctx context.Context) (map[string]any, error)
 	// controlPlane builds the ownership/role status payload; nil → 404.
 	controlPlane func(ctx context.Context) (map[string]any, error)
+
+	// updates is the agent-update orchestrator; nil in bare-API tests →
+	// the release/rollout/update routes are not registered.
+	updates   *updateplane.Manager
+	artifacts artifactStore
 }
 
 // SetDiscoveryStatus wires the server's announce-state provider.
@@ -65,6 +71,13 @@ func (a *API) SetModelOps(q *modelops.Queue, reload func(ctx context.Context)) {
 // GET /api/v1/control-plane.
 func (a *API) SetControlPlaneStatus(fn func(ctx context.Context) (map[string]any, error)) {
 	a.controlPlane = fn
+}
+
+// SetUpdatePlane wires the update orchestrator + artifact store; when
+// set, the release-registry/rollout/agent-update routes are mounted.
+func (a *API) SetUpdatePlane(mgr *updateplane.Manager, as artifactStore) {
+	a.updates = mgr
+	a.artifacts = as
 }
 
 func New(st *store.DB, hub *nodehub.Hub, sched *scheduler.Scheduler, ev *events.Broker, caPEM []byte, log *slog.Logger) *API {
@@ -127,6 +140,10 @@ func (a *API) Register(mux *http.ServeMux, mwAdmin, mwRead func(http.Handler) ht
 
 	mux.Handle("GET /api/v1/settings", mwRead(http.HandlerFunc(a.handleGetSettings)))
 	mux.Handle("PUT /api/v1/settings/{key}", mwAdmin(http.HandlerFunc(a.handlePutSetting)))
+
+	if a.updates != nil {
+		a.registerReleases(mux, mwAdmin, mwRead)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -561,7 +578,12 @@ func (a *API) handleNodeMaintenance(w http.ResponseWriter, r *http.Request) {
 	if a.hub.Drained(id) {
 		state = store.MaintMode // nothing to drain
 	}
-	if err := a.st.SetMaintenance(r.Context(), id, state, req.Reason); err != nil {
+	if a.updates != nil {
+		err = a.updates.SetNodeMaintenance(r.Context(), id, state, req.Reason)
+	} else {
+		err = a.st.SetMaintenance(r.Context(), id, state, req.Reason)
+	}
+	if err != nil {
 		a.internalErr(w, r, err)
 		return
 	}
@@ -586,10 +608,24 @@ func (a *API) handleNodeResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if node.Maintenance == store.MaintUpdating {
-		writeErr(w, http.StatusConflict, "node is mid-update — cancel the update instead")
-		return
+		// A stale 'updating' marker whose update already finished is
+		// resumable (repair path) — the manager decides via the live-
+		// update lookup. Bare-API tests have no manager: refuse.
+		if a.updates == nil {
+			writeErr(w, http.StatusConflict, "node is mid-update — cancel the update instead")
+			return
+		}
 	}
-	if err := a.st.SetMaintenance(r.Context(), id, store.MaintNone, ""); err != nil {
+	if a.updates != nil {
+		err = a.updates.ResumeNode(r.Context(), id)
+	} else {
+		err = a.st.SetMaintenance(r.Context(), id, store.MaintNone, "")
+	}
+	if err != nil {
+		if errors.Is(err, store.ErrActiveUpdate) {
+			writeErr(w, http.StatusConflict, "node is mid-update — cancel the update instead")
+			return
+		}
 		a.internalErr(w, r, err)
 		return
 	}

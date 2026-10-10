@@ -293,7 +293,7 @@ func (e *env) waitRolloutState(t *testing.T, id string, want ...string) string {
 // updatesFor returns the rollout's updates in creation order.
 func (e *env) updatesFor(t *testing.T, rolloutID string) []*store.AgentUpdate {
 	t.Helper()
-	us, err := e.st.ListAgentUpdates(e.ctx, rolloutID, "", 50)
+	us, err := e.st.ListAgentUpdates(e.ctx, rolloutID, "", "", 50)
 	if err != nil {
 		t.Fatalf("list updates: %v", err)
 	}

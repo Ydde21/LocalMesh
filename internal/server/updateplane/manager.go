@@ -818,10 +818,10 @@ func (m *Manager) GetUpdate(ctx context.Context, id string) (*store.AgentUpdate,
 	return m.st.GetAgentUpdate(ctx, id)
 }
 
-// ListUpdates lists update rows, newest first; optional rollout and
-// phase filters (limit clamps to [1,500]).
-func (m *Manager) ListUpdates(ctx context.Context, rolloutID, phase string, limit int) ([]*store.AgentUpdate, error) {
-	return m.st.ListAgentUpdates(ctx, rolloutID, phase, limit)
+// ListUpdates lists update rows, newest first; optional rollout,
+// node, and phase filters (limit clamps to [1,500]).
+func (m *Manager) ListUpdates(ctx context.Context, rolloutID, nodeID, phase string, limit int) ([]*store.AgentUpdate, error) {
+	return m.st.ListAgentUpdates(ctx, rolloutID, nodeID, phase, limit)
 }
 
 // LiveUpdateForNode returns the node's unfinished update, or

@@ -30,6 +30,7 @@ import (
 	"github.com/localmesh/localmesh/internal/server/scheduler"
 	"github.com/localmesh/localmesh/internal/server/store"
 	"github.com/localmesh/localmesh/internal/server/tlsx"
+	"github.com/localmesh/localmesh/internal/server/updateplane"
 	"github.com/localmesh/localmesh/internal/wsjson"
 )
 
@@ -48,6 +49,7 @@ type Server struct {
 	httpSrv   *http.Server
 	announcer *discovery.Announcer
 	modelOps  *modelops.Queue
+	updateMgr *updateplane.Manager
 	owner     *Ownership
 	startedAt time.Time
 	// promoted is true when this instance began as standby and claimed
@@ -200,11 +202,19 @@ func (s *Server) Start(ctx context.Context) error {
 	s.modelOps.SetNotifier(s.ev.Publish)
 	s.modelOps.SetEpoch(own.Epoch())
 	s.hub.SetModelOpsQueue(s.modelOps)
+	// Agent-update orchestrator — claims are epoch-fenced so a demoted
+	// or stale active can't dispatch upgrades.
+	s.updateMgr = updateplane.New(st, nodehub.NewUpgradeDispatcher(s.hub, st),
+		updateplane.Config{}, s.log)
+	s.updateMgr.SetNotifier(s.ev.Publish)
+	s.updateMgr.SetEpoch(own.Epoch())
+	s.hub.SetUpdateReporter(s.updateMgr)
 	// Queue gets its own cancel: on ownership loss we stop dispatch
 	// immediately rather than riding the caller's ctx.
 	qctx, qcancel := context.WithCancel(ctx)
 	defer qcancel()
 	go s.modelOps.Run(qctx)
+	go s.updateMgr.Run(qctx)
 
 	if !s.cfg.Standby {
 		var err error
@@ -219,6 +229,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.admin.SetDiscoveryStatus(s.DiscoveryStatus)
 	s.admin.SetDiagnostics(s.buildDiagnostics)
 	s.admin.SetControlPlaneStatus(s.controlPlaneStatus)
+	s.admin.SetUpdatePlane(s.updateMgr, NewArtifactStore(s.cfg.DataDir))
 	s.startedAt = time.Now()
 
 	// A restart abandons all in-flight work: connections, capacity
