@@ -1,0 +1,45 @@
+name: CI Runtime
+
+# Runtime-executable CI: the agent binary is built NATIVELY on each OS
+# (no cross-compile) and executed — version format, per-subcommand -h,
+# unenrolled status/doctor degradation, config round-trip, argument
+# contracts, a bounded `run` against a dead control plane, and a real
+# engine leg against the repo's fakeollama (built natively as well).
+#
+# Honest scope: this is NOT physical fleet validation. Hosted runners
+# are homogeneous cloud VMs — one provider's network, no GPUs, no
+# cross-machine paths. The checks here are the repeatable floor; the
+# ceiling is docs/fleet-validation.md run on real hardware. The
+# higher-fidelity single-OS gate (real server + postgres + enroll +
+# inference) already lives in ci.yml's agent-integration job and is
+# not duplicated here.
+#
+# Each step degrades explicitly: capabilities that can't work on a
+# given runner (elevated service ops, mDNS multicast) are SKIP lines
+# naming the missing capability, never faked passes. Anything that can
+# run must pass.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  agent-runtime:
+    name: agent-runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: native build + runtime-executable checks (version, help, doctor, run, fakeollama leg)
+        # bash resolves to Git Bash on windows runners.
+        shell: bash
+        run: bash scripts/ci-agent-runtime.sh
