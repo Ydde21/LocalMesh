@@ -14,6 +14,6 @@ func serviceAction(string, string, io.Writer) error {
 	return fmt.Errorf("service management is not supported on %s", runtime.GOOS)
 }
 
-func runUnderService(context.Context, *Config, *slog.Logger) (bool, error) {
+func runUnderService(context.Context, *Config, *slog.Logger, string) (bool, error) {
 	return false, nil
 }

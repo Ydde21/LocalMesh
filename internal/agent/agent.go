@@ -35,6 +35,14 @@ type Agent struct {
 	cancels   sync.Map // requestID -> context.CancelFunc
 	opCancels sync.Map // operationID -> context.CancelFunc
 	opAborted sync.Map // operationID -> struct{} (admin-invoked aborts)
+
+	// Centralized-update state (upgrade.go / upconfirm.go).
+	cfgPath      string                  // where agent.json lives — update markers go beside it
+	serverProtoN atomic.Int32            // protocol the connected server advertised in hello_ack
+	upgMu        sync.Mutex              // guards upg
+	upg          *upgradeJob             // the single in-flight upgrade (nil when idle)
+	bootReport   *contracts.UpgradeState // boot-time verdict queued for the first session
+	updTarget    string                  // test seam: binary target override for updates
 }
 
 func New(cfg *Config, log *slog.Logger) *Agent {
@@ -92,6 +100,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.log.Info("hardware detected",
 		"cpu", a.hw.CPUModel, "cores", a.hw.CPUCores,
 		"mem_gb", a.hw.MemoryBytes/(1<<30), "gpus", len(a.hw.GPUs))
+
+	// A pending-update marker survives restarts — evaluate it before
+	// the first session so crash/reject cycles converge on the
+	// attempts budget.
+	a.upgradeBootCheck()
 
 	backoff := reconnectMinDelay
 	authRejects := 0
@@ -204,6 +217,9 @@ func (a *Agent) session(ctx context.Context) error {
 	heartbeat, err := a.handshake(hctx, c)
 	hcancel()
 	if err != nil {
+		// A protocol rejection with a pending update means the new
+		// binary is the problem — restore the rollback copy first.
+		a.rollbackPendingUpdate(c, err)
 		return err
 	}
 	a.log.Info("connected to control plane", "server", a.cfg.ServerURL,
@@ -211,6 +227,10 @@ func (a *Agent) session(ctx context.Context) error {
 
 	// Initial capability report (also the post-reconnect re-report).
 	a.reportCapabilities(ctx, c)
+
+	// Post-restart update resolution: confirm the new binary is live
+	// (verify_health) or report that an old binary came back up.
+	a.postHelloUpgradeCheck(c)
 
 	// Heartbeat loop.
 	hbDone := make(chan struct{})
@@ -257,6 +277,10 @@ func (a *Agent) handshake(ctx context.Context, c *wsjson.Conn) (time.Duration, e
 	}
 	var ack contracts.HelloAck
 	env.Decode(&ack)
+	// The server's protocol is the authoritative bound for dispatch
+	// checks: a release whose agents speak newer than this gets
+	// rejected at install time instead of failing at the next hello.
+	a.serverProtoN.Store(int32(ack.ProtocolVersion))
 	heartbeat := time.Duration(ack.HeartbeatSeconds) * time.Second
 	if heartbeat <= 0 {
 		heartbeat = 10 * time.Second
@@ -435,6 +459,12 @@ func (a *Agent) handle(ctx context.Context, c *wsjson.Conn, env contracts.Envelo
 			a.opAborted.Store(ab.OperationID, struct{}{})
 			cancel.(context.CancelFunc)()
 		}
+
+	case contracts.MsgAgentUpgrade:
+		a.handleAgentUpgrade(ctx, c, env)
+
+	case contracts.MsgUpgradeAbort:
+		a.handleUpgradeAbort(ctx, c, env)
 
 	case contracts.MsgPing:
 		var p contracts.Ping

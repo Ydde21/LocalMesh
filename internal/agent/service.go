@@ -30,9 +30,10 @@ func Service(action, cfgPath string, out io.Writer) error {
 // RunUnderService hands the process to the OS service manager when the
 // binary was launched as a service (Windows SCM). handled=true means the
 // call owns the process lifecycle; on other platforms it returns false
-// immediately.
-func RunUnderService(ctx context.Context, cfg *Config, log *slog.Logger) (handled bool, err error) {
-	return runUnderService(ctx, cfg, log)
+// immediately. cfgPath is forwarded so update state files sit beside
+// the config the service was started with.
+func RunUnderService(ctx context.Context, cfg *Config, log *slog.Logger, cfgPath string) (handled bool, err error) {
+	return runUnderService(ctx, cfg, log, cfgPath)
 }
 
 // run prints the command being executed and returns its combined output —

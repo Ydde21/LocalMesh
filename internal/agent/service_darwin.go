@@ -45,7 +45,7 @@ func serviceAction(action, cfgPath string, out io.Writer) error {
 	return nil
 }
 
-func runUnderService(context.Context, *Config, *slog.Logger) (bool, error) {
+func runUnderService(context.Context, *Config, *slog.Logger, string) (bool, error) {
 	return false, nil
 }
 

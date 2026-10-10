@@ -13,6 +13,7 @@
 package update
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -26,15 +27,20 @@ import (
 
 // Options configures one update check/apply run.
 type Options struct {
-	Release string       // -release: directory or https base URL
-	PubKey  []byte       // contents of -pubkey (required)
-	Target  string       // binary to replace; empty → the running executable
-	Apply   bool         // --apply: perform the swap (default is dry-run)
-	Force   bool         // -force: allow a release whose protocol exceeds this build's
-	GOOS    string       // target platform; empty → runtime.GOOS (test hook)
-	GOARCH  string       // empty → runtime.GOARCH
-	Client  *http.Client // http client for URL sources (test hook)
-	Out     io.Writer    // report output; nil → os.Stdout
+	Release string          // -release: directory or https base URL
+	PubKey  []byte          // contents of -pubkey (required)
+	Target  string          // binary to replace; empty → the running executable
+	Apply   bool            // --apply: perform the swap (default is dry-run)
+	Force   bool            // -force: allow a release whose protocol exceeds this build's
+	GOOS    string          // target platform; empty → runtime.GOOS (test hook)
+	GOARCH  string          // empty → runtime.GOARCH
+	Client  *http.Client    // http client for URL sources (test hook)
+	Out     io.Writer       // report output; nil → os.Stdout
+	Ctx     context.Context // bounds remote source fetches; nil → Background
+	// Source is a pre-resolved release source (e.g. the control-plane
+	// release proxy). When set it takes precedence over Release and
+	// Client; the caller owns its fetch policy.
+	Source Source
 }
 
 // Plan is the verified result of inspecting a release — everything the
@@ -87,9 +93,16 @@ func Verify(opts Options) (*Plan, error) {
 	if goarch == "" {
 		goarch = runtime.GOARCH
 	}
-	src, err := OpenSource(opts.Release, opts.Client)
-	if err != nil {
-		return nil, err
+	ctx := opts.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	src := opts.Source
+	if src == nil {
+		src, err = openSourceCtx(ctx, opts.Release, opts.Client)
+		if err != nil {
+			return nil, err
+		}
 	}
 	plan := &Plan{Source: src, Apply: opts.Apply}
 
