@@ -112,14 +112,19 @@ Repeat with `"label":"fleet-device-2"`. (Dashboard equivalent:
 
 ## 3. Preflight each device
 
-Copy `scripts/fleet-check.sh` and `ca.pem` to each device, then run:
+Copy `scripts/fleet-check.sh`, `scripts/fleet-report.sh`, and `ca.pem`
+to each device, then run:
 
 ```bash
 ./fleet-check.sh https://<control-plane-host>:8443 ca.pem
+./fleet-report.sh > fleet-report-preflight.txt
 ```
 
-Expected: `PASS` on tcp, ca, ca-pin, tls, healthz; `PASS` on ollama if it
-is installed locally. Any `FAIL` — fix before joining; the script prints a
+`fleet-check.sh` proves the control plane is reachable; `fleet-report.sh`
+captures the device baseline — platform/CPU/RAM, OS version, local engine
+state, config presence — as a paste-able bundle. Expected: `PASS` on tcp,
+ca, ca-pin, tls, healthz from fleet-check; `PASS` on ollama if it is
+installed locally. Any `FAIL` — fix before joining; the scripts print a
 hint per failure.
 
 ## 4. Join device 1 (macOS)
@@ -220,13 +225,21 @@ Expected — **two** entries, and for each:
 Capture: save the JSON — `... > nodes.json`. Dashboard cross-check:
 **Devices** page shows both nodes with live CPU/RAM meters.
 
-Agent-side sanity on each device (new in this release):
+Agent-side sanity on each device:
 
 ```bash
 localmesh-agent doctor
 # PASS/WARN/FAIL lines: config, identity, dns, tcp, cert + tls (incl.
 # explicit SAN coverage), ca fingerprint, healthz, websocket upgrade,
 # engine, models, disk, hardware/memory/metrics coverage
+
+localmesh-agent report -json > report-device.json
+# Redacted machine-readable bundle: OS/arch, agent+protocol version,
+# CPU/GPU/memory, CA fingerprint, enrollment state, per-probe latency,
+# engine reachability + model inventory. No credentials, no prompts —
+# safe to attach to the run results. Add -self-test for one bounded
+# real inference through the local engine (result records status,
+# latency, token counts — never content).
 ```
 
 ## 8. Pull a real model to each node
@@ -533,10 +546,32 @@ Deleting the node record removes it entirely — the device would have to
 re-enroll. (Delete with a live agent is fine: the socket is dropped and
 its credential is dead.)
 
+## Evidence to collect per device
+
+Attach these artifacts to the run results — one set per physical device.
+Everything listed here is redacted by construction (no credentials,
+tokens, prompts, or completions; paths are ~-collapsed):
+
+| Artifact | How to collect | What it proves |
+|---|---|---|
+| `fleet-report-<device>.txt` | `bash scripts/fleet-report.sh > fleet-report-<device>.txt` | platform/CPU/RAM/OS, engine reachability, doctor output, config presence — one paste-able bundle |
+| `report-<device>.json` | `localmesh-agent report -json > report-<device>.json` | machine-readable snapshot: version+protocol, hardware, CA fingerprint, per-probe latency, enrollment + connectivity state |
+| `report -json -self-test` | `localmesh-agent report -json -self-test` | one bounded real inference through the local engine — status/latency/token counts only |
+| `nodes.json` | step 7 | server-side view of both devices (independence check) |
+| workload distribution | step 9 `uniq -c` output | requests actually routed to both machines |
+| agent logs | the `run` terminal / service logs | session lifecycle, reconnects |
+
+`fleet-report.sh` degrades gracefully (SKIP lines, never a crash) and
+finds the agent binary from `./bin`, PATH, or install paths; pass the
+binary path explicitly when needed (`fleet-report.sh /path/to/agent`).
+The `report` subcommand mirrors the same contract inside the agent —
+use it when the device is offline from your shell collector but the
+agent binary is on hand.
+
 ## Results
 
 Fill in during the run. Attach `nodes.json`, the workload distribution
-output, and agent logs from each device.
+output, the per-device evidence above, and agent logs from each device.
 
 | Field | Device 1 | Device 2 |
 |---|---|---|
@@ -551,10 +586,16 @@ output, and agent logs from each device.
 | Revoke → socket dropped immediately | yes / no | — |
 | Reinstate → reconnected, same credential | yes / no | — |
 | `doctor` all-PASS | yes / no | yes / no |
+| `fleet-report.sh` bundle collected | yes / no | yes / no |
+| `report -json` attached, no credential material | yes / no | yes / no |
+| `report -self-test` real inference passed | yes / no / skipped | yes / no / skipped |
 | Placement view correct (replicas, candidates, est_mem_mb) | yes / no | — |
 | Last-replica delete → 409, `force:true` → 202 | yes / no | — |
 | Routing decision shows est./measured memory need | yes / no | — |
 | Session revoke → check survives CP restart | yes / no | — |
+| Network path used | LAN / Tailscale / Headscale | LAN / Tailscale / Headscale |
+| Overlay leg verified (join + infer over tailnet) | yes / no / n/a | yes / no / n/a |
+
 | **Verdict** | PHYSICAL FLEET VERIFIED / SIMULATED / FAILED | |
 
 ## Network variants
@@ -604,6 +645,24 @@ localmesh-agent join -server https://<machine>.<tailnet>.ts.net:8443 -token lme_
 No port needs to leave the tailnet — this satisfies the "don't expose 8443
 to the internet" rule in `docs/security.md`.
 
+**Headscale** (self-hosted Tailscale coordination) exercises the
+identical leg: devices join the headscale tailnet, the control plane's
+`<machine>.<tailnet>` name goes into `LOCALMESH_HOSTNAMES`, and the same
+fleet-check/join flow applies — the agent can't tell the difference.
+Record which overlay was used in the results table.
+
+Overlay-leg checklist (record per device):
+
+- `tailscale ip -4` (or `headscale` node list on the coordinator) shows
+  the device on the tailnet — `fleet-report.sh` captures this
+  automatically when `tailscale` is installed.
+- `fleet-check.sh` over the tailnet name: all PASS before joining.
+- After join: `report -json` shows `ws_upgrade: "ok_101"` — proof the
+  node credential authenticated over the overlay path, not loopback.
+- One inference request lands on the overlay-joined node (step 9 check).
+- `fleet-report.sh` SKIP on `tailscale` is itself valid evidence — it
+  means that leg was LAN, not overlay; mark the table accordingly.
+
 ### Port
 
 Compose publishes `${LOCALMESH_PORT:-8443}:8443`. If machine C runs
@@ -626,4 +685,6 @@ localmesh-agent.exe run -config "$env:USERPROFILE\.localmesh\agent.json"
 - `scripts/install-agent.ps1` installs to `%LOCALAPPDATA%\LocalMesh` and
   adds it to your user PATH.
 - `fleet-check.sh` runs under Git Bash on Windows (curl + openssl ship
-  with it).
+  with it). `fleet-report.sh` runs there too, with reduced platform
+  probes (no lscpu/sysctl — the agent's own `report`/`doctor` sections
+  still carry the hardware detail).
