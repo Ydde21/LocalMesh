@@ -75,6 +75,27 @@ export function agentVersion(n: { agent_version?: string; hardware?: { agent_ver
   return n.agent_version || n.hardware?.agent_version || "";
 }
 
+// Best-effort semver-ish parse: "v0.7.0", "0.7.0-dev+sha", "0.7" →
+// [0,7,0]; non-version strings ("dev", "") → null.
+function parseVersion(v?: string): [number, number, number] | null {
+  if (!v) return null;
+  const m = v.trim().match(/^v?(\d+)\.(\d+)(?:\.(\d+))?/);
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)];
+}
+
+// Is `a` a strictly newer version than `b`? Returns false when either
+// side can't be parsed — never claim an upgrade path we can't verify.
+export function versionGt(a?: string, b?: string): boolean {
+  const pa = parseVersion(a);
+  const pb = parseVersion(b);
+  if (!pa || !pb) return false;
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] !== pb[i]) return pa[i] > pb[i];
+  }
+  return false;
+}
+
 export function osLabel(os: string): string {
   return os === "darwin" ? "macOS" : os;
 }

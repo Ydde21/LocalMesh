@@ -1,14 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useOverview, useNodes, useWorkloads, useModelOps } from "@/lib/api";
-import { fmtBytes, fmtAgo, osLabel } from "@/lib/format";
+import { useOverview, useNodes, useWorkloads, useModelOps, useControlPlane } from "@/lib/api";
+import { fmtBytes, fmtAgo, osLabel, fmtVersion, agentVersion } from "@/lib/format";
 import { Panel, Stat, Meter, Empty } from "@/components/ui";
 import { NodeBadge } from "@/components/status";
 import { ActivityFeed } from "@/components/activity-feed";
 import { MetricsChart } from "@/components/metrics-chart";
 import { OnboardingChecklist } from "@/components/onboarding";
 import { ArrowRight } from "lucide-react";
+import type { Node } from "@/lib/types";
 
 export default function OverviewPage() {
   const { data: ov } = useOverview();
@@ -84,6 +85,9 @@ export default function OverviewPage() {
         )}
       </div>
 
+      {/* Fleet health: maintenance breakdown + agent-version spread */}
+      {(nodes ?? []).length > 0 && <FleetHealthStrip nodes={nodes!} />}
+
       {/* Live utilization */}
       <Panel className="fade-up mt-3">
         <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: "var(--color-border)" }}>
@@ -101,15 +105,18 @@ export default function OverviewPage() {
 
       {/* Mid row: compute + activity */}
       <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-3">
-        <Panel className="fade-up col-span-1 px-4 py-4 lg:col-span-1">
-          <div className="label mb-3">Compute</div>
-          <div className="space-y-3">
-            <Row label="CPU cores" value={String(ov?.cpu_cores_total ?? 0)} />
-            <Row label="GPUs" value={String(ov?.gpu_count ?? 0)} />
-            <Row label="VRAM (dedicated)" value={fmtBytes(ov?.vram_bytes)} />
-            <Row label="Inference slots busy" value={String(ov?.active_requests ?? 0)} />
-          </div>
-        </Panel>
+        <div className="fade-up col-span-1 space-y-3 lg:col-span-1">
+          <Panel className="px-4 py-4">
+            <div className="label mb-3">Compute</div>
+            <div className="space-y-3">
+              <Row label="CPU cores" value={String(ov?.cpu_cores_total ?? 0)} />
+              <Row label="GPUs" value={String(ov?.gpu_count ?? 0)} />
+              <Row label="VRAM (dedicated)" value={fmtBytes(ov?.vram_bytes)} />
+              <Row label="Inference slots busy" value={String(ov?.active_requests ?? 0)} />
+            </div>
+          </Panel>
+          <ControlPlanePanel />
+        </div>
 
         {/* Running workloads */}
         <Panel className="fade-up lg:col-span-1">
@@ -193,6 +200,114 @@ export default function OverviewPage() {
         )}
       </Panel>
     </div>
+  );
+}
+
+// Slim fleet-health strip: online/total plus counts by maintenance state
+// and the top agent versions across the fleet (v0.7+ fields are optional —
+// the chips just don't render when absent).
+function FleetHealthStrip({ nodes }: { nodes: Node[] }) {
+  const approved = nodes.filter((n) => n.status === "approved");
+  const online = approved.filter((n) => n.online).length;
+  const offline = approved.length - online;
+  const byMaint = (s: Node["maintenance"]) =>
+    approved.filter((n) => n.maintenance === s).length;
+  const draining = byMaint("draining");
+  const maint = byMaint("maintenance");
+  const updating = byMaint("updating");
+
+  // Top-3 agent versions by node count ("legacy" = pre-version agents).
+  const verCount = new Map<string, number>();
+  for (const n of approved) {
+    const v = agentVersion(n) || "legacy";
+    verCount.set(v, (verCount.get(v) ?? 0) + 1);
+  }
+  const vers = [...verCount.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+
+  return (
+    <Panel className="fade-up mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2.5">
+      <span className="label shrink-0">Fleet</span>
+      <span className="badge badge-ok">
+        <span className="dot" />
+        {online}/{approved.length} online
+      </span>
+      {offline > 0 && (
+        <span className="badge badge-danger">
+          <span className="dot" />
+          {offline} offline
+        </span>
+      )}
+      {draining > 0 && (
+        <span className="badge badge-warn">
+          <span className="dot pulse" />
+          {draining} draining
+        </span>
+      )}
+      {maint > 0 && (
+        <span className="badge badge-neutral">
+          <span className="dot" />
+          {maint} maintenance
+        </span>
+      )}
+      {updating > 0 && (
+        <span className="badge badge-accent">
+          <span className="dot pulse" />
+          {updating} updating
+        </span>
+      )}
+      <span className="ml-auto flex flex-wrap items-center gap-1.5">
+        {vers.map(([v, c]) => (
+          <span
+            key={v}
+            className="badge badge-neutral mono !px-1.5 !py-0"
+            title={`${c} node${c === 1 ? "" : "s"} on agent ${v}`}
+          >
+            {fmtVersion(v)} ×{c}
+          </span>
+        ))}
+      </span>
+    </Panel>
+  );
+}
+
+// Single-active ownership / HA state (v0.7+). The endpoint 404s on older
+// servers — the whole panel stays hidden then.
+function ControlPlanePanel() {
+  const { data: cp } = useControlPlane();
+  if (!cp) return null;
+  const last = (cp.promotions ?? [])[0]; // newest first
+  return (
+    <Panel className="px-4 py-4">
+      <div className="label mb-3">Control plane</div>
+      <div className="space-y-3">
+        <div className="flex items-baseline justify-between">
+          <span className="text-[12px] text-[var(--color-text-dim)]">Role</span>
+          {cp.role === "active" ? (
+            <span className="badge badge-ok"><span className="dot" />active</span>
+          ) : cp.role === "standby" ? (
+            <span className="badge badge-neutral"><span className="dot" />standby</span>
+          ) : (
+            <span className="badge badge-neutral"><span className="dot" />{cp.role || "unknown"}</span>
+          )}
+        </div>
+        <Row label="Epoch" value={String(cp.epoch)} />
+        {cp.owner_started_at && (
+          <Row label="Owner since" value={fmtAgo(cp.owner_started_at)} />
+        )}
+        {cp.heartbeat_at && <Row label="Heartbeat" value={fmtAgo(cp.heartbeat_at)} />}
+        {last && (
+          <div className="flex items-baseline justify-between">
+            <span className="text-[12px] text-[var(--color-text-dim)]">Last event</span>
+            <span
+              className="mono text-[12px] font-medium"
+              title={`${last.event} · epoch ${last.epoch}${last.detail ? ` — ${last.detail}` : ""}`}
+            >
+              {last.event} · {fmtAgo(last.at)}
+            </span>
+          </div>
+        )}
+      </div>
+    </Panel>
   );
 }
 

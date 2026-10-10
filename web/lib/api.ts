@@ -174,3 +174,72 @@ export function useAudit() {
     refreshInterval: 8000,
   });
 }
+
+// ---- v0.7+ releases / rollouts / control plane -----------------------------
+// All of these 404 on older servers — no retries, consumers gate UI on
+// `data` being present (same contract as useNodeEvents/useDiagnostics).
+
+// Signed releases accepted into the registry.
+export function useReleases() {
+  return useSWR<T.Release[]>("/releases", fetcher, {
+    shouldRetryOnError: false,
+    errorRetryCount: 0,
+    refreshInterval: 15000,
+  });
+}
+
+// Trusted release-signing public keys.
+export function useReleaseKeys() {
+  return useSWR<T.ReleaseKey[]>("/release-keys", fetcher, {
+    shouldRetryOnError: false,
+    errorRetryCount: 0,
+    refreshInterval: 15000,
+  });
+}
+
+// Agent-update rollout campaigns (with per-node counters).
+export function useRollouts() {
+  return useSWR<T.Rollout[]>("/rollouts", fetcher, {
+    shouldRetryOnError: false,
+    errorRetryCount: 0,
+    refreshInterval: 4000,
+  });
+}
+
+// Single rollout — some servers only ship the list endpoint, so callers
+// should fall back to `useRollouts().find(r => r.id === id)`.
+export function useRollout(id: string | null) {
+  return useSWR<T.Rollout>(id ? `/rollouts/${id}` : null, fetcher, {
+    shouldRetryOnError: false,
+    errorRetryCount: 0,
+    refreshInterval: 3000,
+  });
+}
+
+// Per-node agent update rows. `filter` maps to query params (node_id,
+// rollout_id, limit) — each distinct filter is its own SWR key.
+export function useAgentUpdates(filter?: {
+  node_id?: string;
+  rollout_id?: string;
+  limit?: number;
+}) {
+  const q = new URLSearchParams();
+  if (filter?.node_id) q.set("node_id", filter.node_id);
+  if (filter?.rollout_id) q.set("rollout_id", filter.rollout_id);
+  if (filter?.limit) q.set("limit", String(filter.limit));
+  const qs = q.toString();
+  return useSWR<T.AgentUpdate[]>(`/agent-updates${qs ? `?${qs}` : ""}`, fetcher, {
+    shouldRetryOnError: false,
+    errorRetryCount: 0,
+    refreshInterval: 4000,
+  });
+}
+
+// Single-active ownership / HA status. 404 on older servers.
+export function useControlPlane() {
+  return useSWR<T.ControlPlaneStatus>("/control-plane", fetcher, {
+    shouldRetryOnError: false,
+    errorRetryCount: 0,
+    refreshInterval: 8000,
+  });
+}

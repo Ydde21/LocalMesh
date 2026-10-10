@@ -85,6 +85,15 @@ export interface Node {
   latency_ms?: number;
   last_seen_at?: string;
   created_at: string;
+  // v0.7+ maintenance/drain state. Absent on older servers — the field's
+  // presence is the capability probe for the maintenance endpoints.
+  //   ''           in service
+  //   'draining'   no new work, in-flight requests finishing
+  //   'maintenance' drained — admin may act on the node
+  //   'updating'   set by the rollout orchestrator during agent upgrades
+  maintenance?: "" | "draining" | "maintenance" | "updating";
+  maintenance_reason?: string;
+  maintenance_since?: string;
 }
 
 export interface Overview {
@@ -120,6 +129,10 @@ export interface ClusterModel {
   node_names: string[] | null;
   loaded_on: string[] | null;
   nodes: number;
+  // v0.7+ availability rollup — absent on older servers; render as today.
+  availability?: "available" | "loaded" | "offline_only" | "unavailable";
+  eligible_nodes?: number;
+  loaded_nodes?: number;
 }
 
 // GET /models/placement — cluster-wide placement view per model.
@@ -317,6 +330,131 @@ export interface NodeEvent {
   reason: string;
   agent_version: string;
   created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// v0.7+ release registry & agent update orchestration. All of these
+// endpoints 404 on older servers — hooks use shouldRetryOnError:false
+// and consumers gate UI on data presence.
+// ---------------------------------------------------------------------------
+
+// A signed agent release accepted into the registry. Registration verifies
+// the detached signature against a registered release key server-side —
+// unsigned releases can never enter the registry.
+export interface Release {
+  id: string;
+  version: string;
+  channel: string;
+  base_url: string;
+  manifest_sha256: string;
+  signer_key_id: string;
+  protocol_version: number;
+  min_agent_protocol: number;
+  platforms: string[];
+  notes: string;
+  status: "approved" | "revoked";
+  created_by: string;
+  created_at: string;
+}
+
+// A trusted release-signing public key (minisign or openssl PEM).
+export interface ReleaseKey {
+  id: string;
+  key_id: string;
+  kind: string; // minisign | openssl
+  public_key: string;
+  comment: string;
+  created_at: string;
+  revoked_at?: string;
+}
+
+export type RolloutState =
+  | "pending"
+  | "running"
+  | "awaiting_approval" // canary finished; next batch needs admin OK
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export type RolloutStrategy =
+  | "single"
+  | "selected"
+  | "sequential"
+  | "canary"
+  | "parallel";
+
+// One rollout campaign. total/succeeded/failed/pending are the per-node
+// agent_update counters, populated server-side.
+export interface Rollout {
+  id: string;
+  release_id: string;
+  release_version?: string;
+  strategy: RolloutStrategy | string;
+  state: RolloutState;
+  canary_count: number;
+  batch_size: number;
+  error?: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  total: number;
+  succeeded: number;
+  failed: number;
+  pending: number;
+}
+
+// Agent update phases — one node moving to one release. Phases before the
+// terminal five are "live" (finished_at unset).
+export type AgentUpdatePhase =
+  | "pending"
+  | "draining"
+  | "dispatched"
+  | "verifying"
+  | "downloading"
+  | "staging"
+  | "installing"
+  | "restarting"
+  | "verify_health"
+  | "succeeded"
+  | "failed"
+  | "rolled_back"
+  | "cancelled"
+  | "interrupted";
+
+export interface AgentUpdate {
+  id: string;
+  rollout_id?: string;
+  release_id: string;
+  release_version?: string;
+  node_id: string;
+  node_name?: string;
+  phase: AgentUpdatePhase | string;
+  attempt: number;
+  error?: string;
+  detail?: string;
+  from_version?: string;
+  to_version?: string;
+  created_at: string;
+  dispatched_at?: string;
+  updated_at: string;
+  finished_at?: string;
+}
+
+// GET /control-plane — single-active ownership/HA status. 404 on older
+// servers. `promotions` is the recent ownership-event history (newest
+// first); Go nil slices serialize as null.
+export interface ControlPlaneStatus {
+  role: "active" | "standby" | "unknown";
+  epoch: number;
+  owner_started_at?: string;
+  heartbeat_at?: string;
+  standby?: boolean;
+  promotions?: {
+    event: string; // acquired|released|lost|promoted|refused
+    epoch: number;
+    detail: string;
+    at: string;
+  }[] | null;
 }
 
 // Node summary inside the diagnostics bundle — same fields the hub

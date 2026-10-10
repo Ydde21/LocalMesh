@@ -22,6 +22,14 @@ const LABELS: Record<string, string> = {
   "api_key.created": "API key created",
   "api_key.revoked": "API key revoked",
   "settings.updated": "Settings updated",
+  "node.maintenance": "Maintenance changed",
+  "agent.update": "Agent update",
+  "rollout": "Rollout",
+  "release.registered": "Release registered",
+  "release.revoked": "Release revoked",
+  "release_key.registered": "Signing key registered",
+  "release_key.revoked": "Signing key revoked",
+  "control-plane": "Control-plane event",
 };
 
 export function ActivityFeed() {
