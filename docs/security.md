@@ -137,15 +137,72 @@ admin key out of browsers:
 ## Command safety
 
 The agent's remote surface is deliberately narrow. Over the WebSocket the
-server can ask for exactly four things: run an inference request against
-an installed engine, cancel it, pull a model, delete a model. There is no
-shell, no arbitrary process execution, no file access — an attacker who
-seizes the control plane can schedule inference on your nodes but cannot
-run commands on them.
+server can ask for exactly six things: run an inference request against
+an installed engine, cancel it, pull a model, delete a model, install an
+admin-approved signed release (`agent.upgrade`, v0.7), and abort a
+not-yet-installed upgrade. There is no shell, no arbitrary process
+execution, no file access — an attacker who seizes the control plane can
+schedule inference on your nodes but cannot run commands on them. The
+upgrade op is the one that *sounds* like code execution; the section
+below is why it isn't.
 
 Agents also verify the server: the pinned cluster CA means a hostile
 look-alike control plane cannot impersonate the real one and harvest
 node credentials.
+
+## Update trust model (v0.7)
+
+Managed agent upgrades give the control plane the ability to tell an
+agent *which signed release to install* — deliberately not *what bytes
+to trust*. The trust rules:
+
+- **The registry only stores verified releases.** Registering a release
+  uploads `release-manifest.json`, `SHA256SUMS`, and their detached
+  signatures; the control plane verifies the signatures against a
+  `release_keys` row **at admission** and refuses unsigned or badly
+  signed material outright. A release row cannot exist without a
+  signature that checked out — so a rollout can never dispatch one.
+- **Agents hold independently-provisioned keys.** The release public
+  key lands in the agent's own config via `localmesh-agent update-key`
+  or `join -update-pubkey` — provisioned by the operator on the device,
+  never by the control plane. A dispatch names the expected signer
+  `key_id` only; key material inside a dispatch frame (or anywhere
+  server-sent) is refused by design. Rotation is an operator action on
+  each device, not an API call.
+- **Verification is agent-local.** The agent re-verifies the manifest
+  and sums signatures against its pinned key, then the artifact digest
+  against the *signed* sums, then platform + protocol bounds — before
+  staging anything. A compromised control plane can lie about which
+  release exists or which key signed it, schedule an upgrade at a bad
+  time, or withhold updates entirely — a denial-of-service on patching
+  — but it **cannot push code**: nothing it sends is trusted past the
+  signature check.
+- **Update ops are admin-only.** Release-key and release registration,
+  rollout creation/approval/cancellation, and per-update cancellation
+  all require an `admin`-scoped API key; readonly principals see status
+  only. Every action lands in the audit log.
+- **Cancellation closes at install.** `upgrade_abort` is honored while
+  the update is still verifying, downloading, or staging; once the
+  binary is swapped the only back-out is rollback.
+- **Rollback is a file copy, and automatic on the dangerous failure.**
+  The staged binary installs via rename with the previous binary kept
+  as `<name>.bak`. If the restarted agent fails its post-upgrade
+  health check — or the server rejects it on protocol grounds — the
+  agent restores the `.bak` and reports `rolled_back`. Downgrades are
+  ordinary signed releases; nothing special-cases them.
+- **The release proxy is a whitelist, not a fetch.** For air-gapped
+  agents the control plane serves
+  `GET /api/v1/agent-releases/{release_id}/files/{name}` authenticated
+  by the node credential — and only for file names present in that
+  release's registered manifest/sums (no paths, no arbitrary names).
+  The same caps the agent enforces on remote sources apply throughout
+  the path: 8 MiB for metadata (manifest, sums, signatures), 4 GiB for
+  artifacts, `https`-only base URLs (loopback http exempt for local
+  mirrors). A node credential can read release files for an approved
+  release — nothing else.
+
+Same story as enrollment, restated: the server can *schedule* but never
+*sign* — trust enters the fleet from the operator's key on each device.
 
 ## Privacy
 

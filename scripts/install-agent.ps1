@@ -16,10 +16,45 @@ param(
   [string]$Version = "latest",
   [string]$Repo = "localmesh/localmesh",
   [switch]$NoJoin,
-  [switch]$Service
+  [switch]$Service,
+  [switch]$Help
 )
 
+if ($Help) {
+  Write-Host @"
+LocalMesh agent installer for Windows (PowerShell).
+
+  powershell -ExecutionPolicy Bypass -File install-agent.ps1 ``
+      -Server https://mesh.local:8443 -Token lme_...
+
+Parameters:
+  -Server <url>   control plane URL (joins after install when -Token also given)
+  -Token <lme_>   enrollment token
+  -Name <name>    node display name
+  -Version <tag>  release tag (default: latest)
+  -Repo <owner/repo>  GitHub repo to download from
+  -NoJoin         install only, do not join
+  -Service        register and start the Windows service (elevated)
+  -Help           show this text
+"@
+  exit 0
+}
+
 $ErrorActionPreference = "Stop"
+
+# SHA-256 via Get-FileHash, falling back to certutil.exe — if neither
+# exists the download cannot be verified and we must not install it.
+function Get-Sha256([string]$Path) {
+  if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
+    return (Get-FileHash $Path -Algorithm SHA256).Hash.ToLower()
+  }
+  if (Get-Command certutil.exe -ErrorAction SilentlyContinue) {
+    $hashLine = certutil.exe -hashfile $Path SHA256 |
+      Where-Object { ($_ -replace ' ', '') -match '^[0-9a-fA-F]{64}$' } | Select-Object -First 1
+    if ($hashLine) { return ($hashLine -replace ' ', '').ToLower() }
+  }
+  throw "no SHA-256 tool available (need Get-FileHash or certutil.exe) — cannot verify the download"
+}
 
 $dest = Join-Path $env:LOCALAPPDATA "LocalMesh"
 $bin  = Join-Path $dest "localmesh-agent.exe"
@@ -47,7 +82,7 @@ if ($env:LOCALMESH_AGENT_BIN -and (Test-Path $env:LOCALMESH_AGENT_BIN)) {
   # Verify checksum against the release manifest (never trust transport alone).
   $want = ($mf.artifacts | Where-Object { $_.file -eq $artifact }).sha256
   if ($want) {
-    $got = (Get-FileHash $bin -Algorithm SHA256).Hash.ToLower()
+    $got = Get-Sha256 $bin
     if ($got -ne $want) { throw "checksum mismatch for $artifact ($got != $want) — aborting" }
     Write-Host "  checksum verified against release manifest"
   }

@@ -1,7 +1,10 @@
 # Upgrading the agent
 
 Agents upgrade **deliberately** — there is no automatic or self-triggered
-update path, by design (see *Signed updates* below). The flow is the same
+update path, by design. Nothing polls, nothing updates unattended; an
+operator either runs `localmesh-agent update` on the device or launches
+a signed rollout from the control plane (v0.7 managed upgrades —
+`docs/updates-orchestration.md`). The flow is the same
 on every OS: check the version, fetch the matching release artifact,
 verify its signature/checksum, stop the agent, swap the binary, start it,
 confirm with `doctor`. Keep the previous binary until the new one is
@@ -125,7 +128,7 @@ reconnect. Nothing else to restore.
 
 ---
 
-## Signed updates — IMPLEMENTED (opt-in, v0.6)
+## Signed updates — IMPLEMENTED (opt-in v0.6, fleet-managed v0.7)
 
 The signed-release foundation and the safe manual update path are real
 (`scripts/release.sh`, `scripts/verify-release.sh`,
@@ -147,15 +150,24 @@ The signed-release foundation and the safe manual update path are real
   a `.bak` for rollback. It never executes the downloaded artifact.
 - **Explicit, never self-triggered.** There is no polling and no
   automatic update path — an operator runs `update` deliberately, per
-  machine. A compromised release channel alone cannot push code.
+  machine, or launches a rollout deliberately, per campaign. A
+  compromised release channel alone cannot push code.
 
-### Still design-only
+### Shipped in v0.7 — managed upgrades
 
-- **Admin-dispatched `agent.upgrade` wire op** — fleet-wide coordinated
-  rollout from the dashboard (per-node or per-cohort approval inside
-  the cluster's trust boundary) is NOT implemented. The manual
-  `localmesh-agent update` runbook above is the current contract.
-- **Pinned release key in enrolled config** — today the pubkey travels
-  with the operator (`-pubkey` flag), not in `agent.json`.
-- Open questions: release-key rotation, staged-rollout semantics, and
-  whether `agent.upgrade` should carry a per-target nonce.
+The two items that used to be design-only are now real
+(`docs/updates-orchestration.md` is the operator runbook):
+
+- **Admin-dispatched `agent.upgrade` wire op** — the control plane
+  dispatches registered, signature-verified releases to v0.7+ agents
+  through rollouts (`single`/`selected`/`sequential`/`canary`/
+  `parallel`), with per-node `agent_updates` phase tracking and
+  `.bak`-restore automatic rollback.
+- **Pinned release key in enrolled config** — `join -update-pubkey` or
+  `localmesh-agent update-key` stores the public key in `agent.json`;
+  a dispatch names the expected signer `key_id` only. The `-pubkey`
+  flag path above still works for the manual flow.
+
+Still open by design: release-key rotation UX (today it's re-running
+`update-key` on each device), and whether a future release channel
+deserves per-target nonces on dispatch.

@@ -1,16 +1,22 @@
 # Control-plane HA: active-standby design
 
-**Status: partially built (v0.6).** The leader-lease half of this design
-**is implemented**: a dedicated session holds `pg_advisory_lock`, the
-owner stamps a fencing `epoch` into `control_plane_lock`, model-op
-claims are gated on that epoch, heartbeat loss fences the process into
-shutdown, and a second instance on the same database is refused with an
-actionable error — see `docs/reliability.md` § control-plane ownership
-and `internal/server/ownership.go`. What remains **design only** is the
-standby machinery below: a hot second instance that polls for the lock
-and promotes itself into a full boot. Today "failover" = the
-orchestrator restarting the container (agents reconnect in seconds —
-live-verified).
+**Status: standby mode shipped (v0.7).** A second server process started
+with `LOCALMESH_STANDBY=1` now waits on the Postgres advisory lock
+instead of refusing to boot: it serves a minimal standby mux (everything
+answers `503 {"role":"standby"}`, including agent connects) and promotes
+itself through the normal `Server.Start` boot path the moment it
+acquires the lock — typically ~1s after the primary's lock session dies.
+The lease half shipped in v0.6: fencing `epoch` in
+`control_plane_lock`, epoch-gated model-op claims, heartbeat-loss
+self-fencing — see `docs/reliability.md` § control-plane ownership and
+`internal/server/ownership.go`. What remains **design only**:
+
+- **Health-checked auto-rejoin of a demoted instance** — today a fenced
+  primary exits and a supervisor (or you) restarts it back into standby;
+  in-process demotion→standby transition is not built.
+- **LB/VIP failover automation** — shifting the stable frontend address
+  is the operator's reverse proxy / DNS / VIP; there is no built-in
+  health-checked traffic mover and no documented reference config yet.
 
 The control plane stays deliberately single-writer. There is no
 consensus protocol, no etcd, no Raft — PostgreSQL is already the only
@@ -72,39 +78,82 @@ lock gives for free. Row lease stays the fallback if advisory locks
 ever conflict with connection poolers (PgBouncer transaction mode —
 which this project does not use).
 
-### Standby serving mode
+### Standby serving mode (shipped: port-held)
 
-Two viable shapes; pick per deployment:
+v0.7 ships the **port-held** shape: `LOCALMESH_STANDBY=1` binds the
+listen address and serves a minimal mux that answers `503
+{"role":"standby"}` to everything — agent connects included — until the
+advisory lock is acquired, at which point the process promotes through
+the normal boot path and the same listener starts serving for real. The
+standby runs **no hub, no reconciler, no scheduler, no writes** — the
+lock gates all leader duties.
 
-- **Passive (preferred when an LB exists).** Standby does not bind the
-  port. An external health check (`/healthz`, or a `/readyz` that
-  reports lease role — see below) shifts traffic. Simplest semantics:
-  one listener ever.
-- **Port-held.** Standby binds the same service address (e.g. the
-  stable DNS name) on its own host and returns `503` on
-  `/api/v1/agent/connect`, `/v1/*`, and mutating admin routes; read-only
-  admin GETs may safely serve — they only read Postgres. This keeps a
-  fixed agent URL without a load balancer, at the cost of both
-  instances exposing a surface.
+The **passive** shape (standby doesn't bind; an external health check
+shifts traffic) remains a valid deployment choice — point your LB at
+`/readyz` and don't publish the standby's port — but nothing requires
+it: a 503-answering standby is safe for agents to reach directly
+because they retry with backoff regardless.
 
-Either way the standby runs **no hub, no reconciler, no scheduler** —
-those are leader duties and the lock gates them.
+### Deployment recipe
+
+Two server processes, one Postgres, identical data-dir provisioning, one
+stable address:
+
+1. **Same database.** Both instances get the same
+   `LOCALMESH_DATABASE_URL`. The advisory lock is the arbiter — there is
+   nothing else to configure for election.
+2. **Identical `LOCALMESH_DATA_DIR` contents.** Both instances must
+   present the same cluster CA and secrets or failover breaks every
+   pinned agent. Copy — or better, mount one shared volume — for:
+   `ca.pem`, `ca-key.pem`, `server.pem`, `server-key.pem`,
+   `session.key`, `bootstrap-admin.key`, `bootstrap-dashboard.password`.
+   The standby **refuses to create a fresh CA**: a data dir missing
+   `ca.pem`/`ca-key.pem` fails the boot rather than minting a cluster
+   agents would reject. Provision it once from the primary's data dir.
+3. **Run both.** Primary starts normally; standby with
+   `LOCALMESH_STANDBY=1`. Give the standby its own host (or at least its
+   own port/pid); it answers 503s until promoted.
+4. **One stable frontend address.** Agents, dashboard, and clients
+   point at a single DNS name or reverse proxy that fronts *both*
+   instances — or accept that agents retry whichever they reach; the
+   standby's 503 is harmless and the next retry lands wherever is
+   leader. `GET /api/v1/control-plane` reports `role`, `epoch`, and
+   promotion history if you want to check which instance won.
+
+**On primary loss:** the lock session dies with the process, the
+standby's blocking acquire returns in ~1s, it promotes through the same
+boot path a restart runs (migrations, orphan sweep, settings reload).
+Agent sockets were severed with the primary — agents backoff-redial
+(first retry ≈1s) and are accepted by the new leader. In-flight
+inference fails to clients exactly as it does on a plain restart;
+`agent_updates` dispatched mid-flight land `interrupted`/`failed` and
+are reconciled. Expect seconds, not minutes.
+
+**Explicit non-goals:**
+
+- **No active-active.** One writer, ever. Two promoted primaries is the
+  split-brain the fencing epoch exists to prevent.
+- **No database HA.** Postgres remains a single point of failure — the
+  standby can't take the lock without it. HA the database separately
+  (managed Postgres, Patroni, etc.) if that's in your blast radius.
+- **No connection migration.** Live sockets, SSE subscriptions, and
+  in-flight work die with the primary; clients and agents rebuild them.
 
 ### Failover timeline
 
 ```
 A dies (SIGKILL/host loss)
   └─ advisory-lock session dies → lock released
-B's poll acquires the lock
+B's blocking acquire returns (standby waits on the lock, ~1s poll internally)
   └─ Server.Start boot path:
        migrations (idempotent) → FailOrphanedWorkloads/ModelOps
        (A's in-flight rows → 'failed'/'interrupted') →
-       reloadSchedulerSettings → bind listener
+       reloadSchedulerSettings → same listener starts serving for real
 agents' sockets were severed with A → backoff redial → B accepts
   └─ capability re-report → schedulable; inference resumes
 ```
 
-RTO ≈ standby poll interval + boot time (sub-second in tests) + one
+RTO ≈ lock-release detection + boot time (sub-second in tests) + one
 agent backoff tick (≈1s first retry). Seconds, not minutes.
 
 ### Split-brain window
@@ -126,13 +175,16 @@ Agent TLS pins the cluster CA (`LOCALMESH_DATA_DIR`: `ca.pem`,
 `ca-key.pem`, server cert, `session.key`, bootstrap files). Two
 instances need *the same* CA or failover breaks every pinned agent:
 
-- **v1 (interim):** shared/replicated volume for the data dir —
-  the compose deployment already mounts `localmesh-data`.
-- **v2 (proper):** store CA PEM + server cert material in Postgres
-  (settings-style row); `tlsx.LoadOrCreate` reads DB first, filesystem
-  as cache. One artifact to back up, no shared FS requirement.
-  `session.key` belongs there too — dashboard cookies then survive
-  failover, not just restart.
+- **Shipped (v0.7):** shared/replicated volume, or an identical manual
+  copy of the data dir — the deployment recipe above lists the files.
+  The standby refuses to boot into a *fresh* CA; missing key material
+  is a boot failure, not a new cluster.
+- **Still design-only:** store CA PEM + server cert material in
+  Postgres (settings-style row); `tlsx.LoadOrCreate` reads DB first,
+  filesystem as cache. One artifact to back up, no shared FS
+  requirement. `session.key` belongs there too — dashboard cookies then
+  survive failover, not just restart (they already do when
+  `session.key` is shared per the recipe).
 
 ### What failover does and does not save
 
@@ -140,7 +192,7 @@ instances need *the same* CA or failover breaks every pinned agent:
 |---|---|
 | nodes, credentials, enrollment requests (incl. pending), API keys, settings, session revocations, audit log, workload/op history, dashboard sessions (shared `session.key`) | in-flight inference streams (clients retry), queued workloads (`queued` rows are failed at boot by design), `dispatched`/`running` model ops (marked `interrupted`; re-issue the pull), live SSE subscriptions, current-metrics freshness, rate-limit counters |
 
-## v0.5 status vs this design
+## Status vs this design (v0.7)
 
 | Piece | Status |
 |---|---|
@@ -149,10 +201,13 @@ instances need *the same* CA or failover breaks every pinned agent:
 | Agent reconnect w/ backoff across restart | shipped, tested |
 | Settings/credentials/revocation/node state across restart | shipped, tested |
 | Idempotent boot over existing schema+data dir | shipped, tested |
-| Advisory-lock leader lease + fencing check | designed, not built |
-| Standby serving mode (503 or passive) | designed, not built |
-| `/readyz` reporting lease role / DB liveness | designed, not built |
+| Advisory-lock leader lease + fencing check | shipped (v0.6) |
+| Standby mode: blocking lock acquire + promote-on-acquire + 503 standby mux | shipped (v0.7) |
+| `GET /api/v1/control-plane` role/epoch/promotion history | shipped (v0.7) |
+| `/readyz` DB-liveness check | shipped (v0.6); reports `role":"standby"` while unpromoted (v0.7) |
 | CA + secrets in Postgres | designed, not built |
+| Auto-rejoin of a demoted instance back into standby | designed, not built — supervisor restart is the path |
+| LB/VIP failover automation docs | designed, not built |
 | `hub.CloseAll` in the graceful shutdown path | gap found by tests — proposed diff below |
 | Consensus, multi-writer, conn migration | **non-goal** |
 
@@ -180,12 +235,10 @@ instances need *the same* CA or failover breaks every pinned agent:
    for the sweep keeps it from silently no-op'ing when `shCtx` already
    expired (observed in `TestGracefulRestartDefersInFlightWork`).
 
-2. **No readiness endpoint.** `/healthz` returns 200 once the listener
-   exists — it doesn't check Postgres and can't express "standby."
-   Proposed `/readyz`: 200 only when (a) migrations applied, (b) DB
-   ping succeeds, (c) in HA mode, lease held. Non-leader → `503
-   {"role":"standby"}`. Load balancers and `docker compose` healthchecks
-   get a real signal instead of "port is open."
+2. ~~**No readiness endpoint.**~~ Resolved: `/readyz` shipped in v0.6
+   (200 only while Postgres answers; 503 when the DB is unreachable),
+   and in v0.7 a standby mux answers non-leader requests `503
+   {"role":"standby"}` — the LB signal this gap wanted.
 
 3. **`reconcileLoop` timings are compile-time constants** (30s tick,
    90s grace). Boot reconcile covers restart cases, so this only
