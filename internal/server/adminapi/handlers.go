@@ -558,7 +558,7 @@ func (a *API) handleNodeMaintenance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state := store.MaintDraining
-	if !a.hub.Online(id) || a.hub.InFlight(id) == 0 && a.nodeOpsIdle(id) {
+	if a.hub.Drained(id) {
 		state = store.MaintMode // nothing to drain
 	}
 	if err := a.st.SetMaintenance(r.Context(), id, state, req.Reason); err != nil {
@@ -597,16 +597,6 @@ func (a *API) handleNodeResume(w http.ResponseWriter, r *http.Request) {
 	a.st.Audit(r.Context(), principal.Name, "node.resume", id, nil)
 	a.ev.Publish("node.maintenance", map[string]string{"id": id, "state": ""})
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// nodeOpsIdle reports whether the node has no dispatched/running model
-// operations — half of the drain predicate (inference is InFlight).
-func (a *API) nodeOpsIdle(nodeID string) bool {
-	ops, err := a.st.ModelOpsActiveByNode(context.Background())
-	if err != nil {
-		return false // unsure → keep draining, the watcher retries
-	}
-	return ops[nodeID] == 0
 }
 
 func (a *API) handleNodeReinstate(w http.ResponseWriter, r *http.Request) {

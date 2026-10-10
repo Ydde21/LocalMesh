@@ -147,6 +147,27 @@ func (h *Hub) Online(nodeID string) bool {
 	return ok
 }
 
+// Drained reports whether a node holds no active work: zero in-flight
+// inference dispatches AND zero dispatched/running model operations.
+// The op count comes from the store (a claimed op that hasn't reached
+// pendingOps still occupies the node — the durable source). An offline
+// node is trivially drained: nothing executes on a dead connection.
+// This is the maintenance/update precondition everywhere it's needed —
+// admin drain gate, server drain watcher, update orchestrator.
+func (h *Hub) Drained(nodeID string) bool {
+	h.mu.RLock()
+	nc, ok := h.conns[nodeID]
+	h.mu.RUnlock()
+	if ok && nc.inFlight() > 0 {
+		return false
+	}
+	ops, err := h.st.ModelOpsActiveByNode(context.Background())
+	if err != nil {
+		return false // unsure → not drained; callers retry
+	}
+	return ops[nodeID] == 0
+}
+
 // InFlight returns the number of in-flight dispatches on a node.
 func (h *Hub) InFlight(nodeID string) int {
 	h.mu.RLock()

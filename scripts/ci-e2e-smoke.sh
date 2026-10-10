@@ -46,17 +46,19 @@ jget() {
 tmp="$(mktemp -d)"
 pg_name=""
 server_pid=""
+standby_pid=""
 agent_pid=""
 fake_pid=""
 join_pid=""
 
 cleanup() {
-  for p in "$agent_pid" "$fake_pid" "$server_pid" "$join_pid"; do
+  for p in "$agent_pid" "$fake_pid" "$server_pid" "$standby_pid" "$join_pid"; do
     [ -n "$p" ] && kill "$p" >/dev/null 2>&1 || true
   done
   [ -n "$pg_name" ] && docker rm -f "$pg_name" >/dev/null 2>&1 || true
   if [ "${E2E_KEPT:-0}" != "1" ]; then rm -rf "$tmp"; else echo "kept $tmp"; fi
   echo "--- server log (tail) ---"; tail -n 15 "$tmp/server.log" 2>/dev/null || true
+  echo "--- standby log (tail) ---"; tail -n 15 "$tmp/standby.log" 2>/dev/null || true
   echo "--- agent log (tail) ---"; tail -n 15 "$tmp/agent.log" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -268,6 +270,64 @@ code="$(curl -s -o "$tmp/resp.json" -w '%{http_code}' \
 wl="$(jget "$tmp/resp.json" '{j[0][status]}')"
 [ "$wl" = "completed" ] || bad "latest workload status '$wl', want completed: $(cat "$tmp/resp.json")"
 pass "workload row recorded as completed (metadata only — no prompt persisted)"
+
+# --- standby promotion --------------------------------------------------------
+step "standby promotion"
+S2PORT="$(free_port)"
+SBASE="http://127.0.0.1:$S2PORT"
+LOCALMESH_DEV_INSECURE_HTTP=1 \
+LOCALMESH_DATABASE_URL="$DSN" \
+LOCALMESH_DATA_DIR="$tmp/data-sb" \
+LOCALMESH_LISTEN="127.0.0.1:$S2PORT" \
+LOCALMESH_ADMIN_KEY="$ADMIN" \
+LOCALMESH_DISCOVERY=0 \
+LOCALMESH_ROLE=standby \
+  "$tmp/localmesh-server" >"$tmp/standby.log" 2>&1 &
+standby_pid=$!
+
+# While the primary owns the cluster the standby reports itself and
+# refuses every authoritative surface.
+sb=0
+for _ in $(seq 60); do
+  wait_pid_or_bad "$standby_pid" "standby localmesh-server"
+  code="$(curl -s -o "$tmp/sb.json" -w '%{http_code}' --connect-timeout 2 \
+    "$SBASE/api/v1/standby" || true)"
+  [ "$code" = "200" ] && { sb=1; break; }
+  sleep 1
+done
+[ "$sb" -eq 1 ] || bad "standby never answered /api/v1/standby"
+[ "$(jget "$tmp/sb.json" '{j[role]}')" = "standby" ] \
+  || bad "standby role: $(cat "$tmp/sb.json")"
+code="$(curl -s -o /dev/null -w '%{http_code}' "$SBASE/healthz")"
+[ "$code" = "503" ] || bad "standby /healthz → $code, want 503"
+code="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ADMIN" \
+  "$SBASE/api/v1/nodes")"
+[ "$code" = "503" ] || bad "standby /api/v1/nodes → $code, want 503"
+pass "standby waits: role=standby, /healthz 503, API 503"
+
+# Kill the primary without a clean shutdown — the crash shape: the lock
+# session dies with the process, the standby must claim the next epoch.
+kill -9 "$server_pid" 2>/dev/null || true
+server_pid=""
+
+promoted=0
+for _ in $(seq 60); do
+  wait_pid_or_bad "$standby_pid" "standby localmesh-server (promotion)"
+  code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 \
+    "$SBASE/healthz" || true)"
+  [ "$code" = "200" ] && { promoted=1; break; }
+  sleep 1
+done
+[ "$promoted" -eq 1 ] || bad "standby never promoted after primary crash"
+
+code="$(curl -s -o "$tmp/cp.json" -w '%{http_code}' -H "Authorization: Bearer $ADMIN" \
+  "$SBASE/api/v1/control-plane")"
+[ "$code" = "200" ] || bad "promoted /api/v1/control-plane → $code"
+[ "$(jget "$tmp/cp.json" '{j[epoch]}')" = "2" ] \
+  || bad "promoted epoch: $(cat "$tmp/cp.json")"
+[ "$(jget "$tmp/cp.json" '{j[promoted_from_standby]}')" = "True" ] \
+  || bad "promoted_from_standby unset: $(cat "$tmp/cp.json")"
+pass "standby promoted on primary crash — epoch 2, full API serving"
 
 step "ci-e2e-smoke: PASS"
 echo "enroll → approve → connect → capability → infer all verified on real binaries"

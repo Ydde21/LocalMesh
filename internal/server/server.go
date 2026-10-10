@@ -424,18 +424,10 @@ func (s *Server) drainLoop(ctx context.Context) {
 			s.log.Warn("drain watcher: list failed", "err", err)
 			continue
 		}
-		if len(nodes) == 0 {
-			continue
-		}
-		opCounts, err := s.st.ModelOpsActiveByNode(ctx)
-		if err != nil {
-			s.log.Warn("drain watcher: op counts failed", "err", err)
-			continue
-		}
 		for _, n := range nodes {
-			drained := !s.hub.Online(n.ID) ||
-				(s.hub.InFlight(n.ID) == 0 && opCounts[n.ID] == 0)
-			if !drained {
+			// Hub.Drained = zero in-flight inference AND zero
+			// dispatched/running model ops; offline ⇒ trivially drained.
+			if !s.hub.Drained(n.ID) {
 				continue
 			}
 			if err := s.st.SetMaintenance(ctx, n.ID, store.MaintMode, n.MaintenanceReason); err != nil {
