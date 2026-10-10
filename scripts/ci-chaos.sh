@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # ci-chaos.sh — distributed-failure (chaos) suite for LocalMesh.
 #
-# Runs the build-tagged tests in internal/server/chaos_test.go against
-# real postgres containers, real agent websockets, and a fake engine:
+# Runs the build-tagged tests in internal/server/chaos_test.go (v0.8
+# wave) and internal/server/chaos2_*_test.go (v0.9 wave: pool freeze,
+# lock-session loss + event audit, standby promotion across a postgres
+# restart, client-cancel semantics, crash reconcile, node-drop
+# isolation, model-pull/update/rollout-approval failover) against real
+# postgres containers, real agent websockets, and a fake engine:
 #
-#   go test -tags chaos -count=1 -run 'TestChaos|TestFailure' -v ./internal/server/
+#   go test -tags chaos -count=1 -run 'TestChaos|TestChaos2|TestFailure' -v ./internal/server/
+#
+# ('TestChaos' already substring-matches the TestChaos2* names; the
+# explicit alternation documents that BOTH waves are in scope.)
 #
 # Docker contract (docs/testing.md):
 #   * every container the suite starts is labeled localmesh.test=1;
@@ -39,8 +46,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-step "chaos suite: go test -tags chaos"
-if go test -tags chaos -count=1 -run 'TestChaos|TestFailure' -v ./internal/server/; then
+step "chaos suite: go test -tags chaos (v0.8 + v0.9 waves)"
+if go test -tags chaos -count=1 -run 'TestChaos|TestChaos2|TestFailure' -v ./internal/server/; then
   pass "ci-chaos"
 else
   bad "chaos suite failed"
