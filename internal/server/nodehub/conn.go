@@ -3,6 +3,7 @@ package nodehub
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -35,6 +36,14 @@ type conn struct {
 	pending   map[string]*pendingReq
 	lastBeatT time.Time
 	latency   float64
+
+	// agentVer is the agent's self-reported version from hello — logged
+	// on node_events for connection-history/compat debugging.
+	agentVer string
+	// closeReason records WHY close() was invoked — agent-initiated EOF
+	// leaves it empty, so unregister can distinguish "client dropped"
+	// from "we kicked them".
+	closeReason atomic.Value // string
 }
 
 type pendingReq struct {
@@ -187,6 +196,7 @@ func (c *conn) inFlight() int {
 }
 
 func (c *conn) close(code websocket.StatusCode, reason string) {
+	c.closeReason.Store(reason)
 	c.ws.Close(code, reason)
 }
 

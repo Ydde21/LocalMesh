@@ -202,6 +202,7 @@ func (h *Hub) HandleConnection(ctx context.Context, c *wsjson.Conn, node *store.
 	}
 
 	nc := newConn(node, c, h)
+	nc.agentVer = hello.AgentVersion
 	ack := contracts.HelloAck{
 		NodeID:           node.ID,
 		ProtocolVersion:  contracts.ProtocolVersion,
@@ -246,6 +247,9 @@ func (h *Hub) register(id string, nc *conn) {
 	}
 	h.conns[id] = nc
 	h.mu.Unlock()
+	if err := h.st.AddNodeEvent(context.Background(), id, "connected", "", nc.agentVer); err != nil {
+		h.log.Debug("record connect event", "node", id, "err", err)
+	}
 	h.ev.Publish("node.connected", map[string]string{"id": id, "name": nc.node.Name})
 	if h.opQueue != nil {
 		h.opQueue.OnNodeConnected(id)
@@ -328,7 +332,14 @@ func (h *Hub) unregister(id string, nc *conn) {
 		}
 	}
 
-	h.log.Info("node disconnected", "node", nc.node.Name, "id", id)
+	reason, _ := nc.closeReason.Load().(string)
+	if reason == "" {
+		reason = "connection closed by agent"
+	}
+	if err := h.st.AddNodeEvent(context.Background(), id, "disconnected", reason, nc.agentVer); err != nil {
+		h.log.Debug("record disconnect event", "node", id, "err", err)
+	}
+	h.log.Info("node disconnected", "node", nc.node.Name, "id", id, "reason", reason)
 	h.ev.Publish("node.disconnected", map[string]string{"id": id, "name": nc.node.Name})
 	if h.opQueue != nil {
 		// Queue owns interruption + retry-resume bookkeeping; its

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/localmesh/localmesh/internal/contracts"
 	"github.com/localmesh/localmesh/internal/creds"
@@ -46,6 +49,7 @@ type Server struct {
 	announcer *discovery.Announcer
 	modelOps  *modelops.Queue
 	owner     *Ownership
+	startedAt time.Time
 }
 
 func New(cfg Config, log *slog.Logger) *Server {
@@ -128,6 +132,8 @@ func (s *Server) Start(ctx context.Context) error {
 	s.admin = adminapi.New(st, s.hub, s.sched, s.ev, caPEM, s.log)
 	s.admin.SetModelOps(s.modelOps, s.ReloadModelOpsConfig)
 	s.admin.SetDiscoveryStatus(s.DiscoveryStatus)
+	s.admin.SetDiagnostics(s.buildDiagnostics)
+	s.startedAt = time.Now()
 
 	// A restart abandons all in-flight work: connections, capacity
 	// reservations and streaming goroutines are gone. Fail those rows so
@@ -546,6 +552,91 @@ func caFP(ca *tlsx.CA) string {
 	return ca.Fingerprint()
 }
 
+// buildDiagnostics assembles the redacted troubleshooting bundle for
+// GET /diagnostics. Contents are deliberately limited to data already
+// exposed to readonly principals (nodes, ops, audit, settings knobs)
+// plus health metadata — no credential material exists in any of these
+// structures to begin with (only hashes at rest, never serialized).
+func (s *Server) buildDiagnostics(ctx context.Context) (map[string]any, error) {
+	bundle := map[string]any{
+		"generated_at":       time.Now().UTC().Format(time.RFC3339),
+		"server_version":     nodehub.Version(),
+		"protocol":           contracts.ProtocolVersion,
+		"min_agent_protocol": contracts.MinAgentProtocolVersion,
+		"uptime_seconds":     int(time.Since(s.startedAt).Seconds()),
+		"cluster_name":       s.cfg.ClusterName,
+		"discovery":          s.DiscoveryStatus(),
+	}
+
+	// Control-plane ownership (single-active lease + fencing epoch).
+	if cp, err := s.st.ReadControlPlane(ctx); err == nil && cp != nil {
+		cp.OwnerID = "" // instance ids are ephemeral; don't fingerprint
+		bundle["control_plane"] = cp
+	}
+
+	// DB reachability + latency.
+	dbCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	pingStart := time.Now()
+	dbOK := s.st.Pool.Ping(dbCtx) == nil
+	cancel()
+	bundle["database"] = map[string]any{
+		"reachable":  dbOK,
+		"latency_ms": time.Since(pingStart).Milliseconds(),
+	}
+
+	// Certificate expiry — operators need warning before agents can't
+	// verify the server. Leaf (serving cert) and CA expiry both matter.
+	if s.ca != nil {
+		cert := map[string]any{
+			"ca_fingerprint": s.ca.Fingerprint(),
+			"ca_expires_at":  s.ca.Cert.NotAfter.UTC().Format(time.RFC3339),
+		}
+		if len(s.ca.Server.Certificate) > 0 {
+			if leaf, err := x509.ParseCertificate(s.ca.Server.Certificate[0]); err == nil {
+				cert["server_expires_at"] = leaf.NotAfter.UTC().Format(time.RFC3339)
+				cert["server_days_remaining"] = int(time.Until(leaf.NotAfter).Hours() / 24)
+			}
+		}
+		bundle["tls"] = cert
+	}
+
+	// Nodes via hub snapshot (live views).
+	if views, err := s.hub.Snapshot(ctx); err == nil {
+		nodes := make([]map[string]any, 0, len(views))
+		for _, v := range views {
+			nodes = append(nodes, map[string]any{
+				"id": v.Node.ID, "name": v.Node.Name, "status": v.Node.Status,
+				"online": v.Online, "in_flight": v.InFlight,
+				"latency_ms": v.LatencyMS, "stale_heartbeat": v.StaleBeat,
+				"hardware": v.Node.Hardware, "engines": v.Node.Engines,
+				"models": v.Node.Models, "metrics": v.Node.Metrics,
+				"last_seen_at": v.Node.LastSeenAt,
+			})
+		}
+		bundle["nodes"] = nodes
+	}
+
+	// Model-op queue: config + status histogram + most recent ops.
+	if s.modelOps != nil {
+		qcfg := s.modelOps.Config()
+		bundle["modelops_config"] = qcfg
+	}
+	if ops, err := s.st.ListModelOpStates(ctx, 50); err == nil {
+		var byStatus = map[string]int{}
+		for _, o := range ops {
+			byStatus[o.Status]++
+		}
+		bundle["modelops_recent_status"] = byStatus
+		bundle["model_operations"] = ops
+	}
+
+	// Recent audit entries — already readonly-scoped.
+	if audit, err := s.st.ListAudit(ctx, 50); err == nil {
+		bundle["recent_audit"] = audit
+	}
+	return bundle, nil
+}
+
 func (s *Server) Hub() *nodehub.Hub               { return s.hub }
 func (s *Server) ModelOps() *modelops.Queue       { return s.modelOps }
 func (s *Server) Store() *store.DB                { return s.st }
@@ -743,11 +834,18 @@ func logRequests(log *slog.Logger, next http.Handler) http.Handler {
 			return
 		}
 		start := time.Now()
+		// Request correlation: honor a caller-provided id, else mint one.
+		// Echoed on the response so support can match client↔server logs.
+		reqID := r.Header.Get("X-Request-ID")
+		if reqID == "" || len(reqID) > 64 {
+			reqID = uuid.NewString()
+		}
+		w.Header().Set("X-Request-ID", reqID)
 		sw := &statusWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(sw, r)
 		// Never log request bodies; only method/path/status/duration.
 		log.Debug("http", "m", r.Method, "path", r.URL.Path, "status", sw.status,
-			"ms", time.Since(start).Milliseconds())
+			"ms", time.Since(start).Milliseconds(), "req", reqID)
 	})
 }
 

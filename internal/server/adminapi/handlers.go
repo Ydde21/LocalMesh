@@ -45,6 +45,8 @@ type API struct {
 	modelOps *modelops.Queue
 	// modelOpsReload re-reads persisted modelops settings into the queue.
 	modelOpsReload func(ctx context.Context)
+	// diag builds the redacted diagnostics bundle; nil → endpoint 404s.
+	diag func(ctx context.Context) (map[string]any, error)
 }
 
 // SetDiscoveryStatus wires the server's announce-state provider.
@@ -80,6 +82,8 @@ func (a *API) Register(mux *http.ServeMux, mwAdmin, mwRead func(http.Handler) ht
 
 	mux.Handle("GET /api/v1/nodes", mwRead(http.HandlerFunc(a.handleNodes)))
 	mux.Handle("GET /api/v1/nodes/{id}", mwRead(http.HandlerFunc(a.handleNode)))
+	mux.Handle("GET /api/v1/nodes/{id}/events", mwRead(http.HandlerFunc(a.handleNodeEvents)))
+	mux.Handle("GET /api/v1/diagnostics", mwRead(http.HandlerFunc(a.handleDiagnostics)))
 	mux.Handle("PATCH /api/v1/nodes/{id}", mwAdmin(http.HandlerFunc(a.handleNodePatch)))
 	mux.Handle("DELETE /api/v1/nodes/{id}", mwAdmin(http.HandlerFunc(a.handleNodeDelete)))
 	mux.Handle("POST /api/v1/nodes/{id}/revoke", mwAdmin(http.HandlerFunc(a.handleNodeRevoke)))
@@ -385,6 +389,54 @@ func (a *API) handleNode(w http.ResponseWriter, r *http.Request) {
 	}
 	v := nodehub.View{Node: n, Online: a.hub.Online(n.ID), InFlight: a.hub.InFlight(n.ID)}
 	writeJSON(w, http.StatusOK, nodeJSON(v))
+}
+
+// handleNodeEvents returns a node's connection history — the audit
+// trail for "why did this machine drop / reconnect".
+func (a *API) handleNodeEvents(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := a.st.GetNode(r.Context(), id); err != nil {
+		writeErr(w, http.StatusNotFound, "node not found")
+		return
+	}
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	events, err := a.st.ListNodeEvents(r.Context(), id, limit)
+	if err != nil {
+		a.internalErr(w, r, err)
+		return
+	}
+	if events == nil {
+		events = []store.NodeEvent{}
+	}
+	writeJSON(w, http.StatusOK, events)
+}
+
+// handleDiagnostics bundles a redacted operational snapshot for
+// troubleshooting: versions, ownership, DB reachability, cert expiry,
+// nodes, recent ops/audit. Deliberately excludes credential material —
+// keys/tokens live only as hashes and are never serialized anywhere.
+func (a *API) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
+	if a.diag == nil {
+		writeErr(w, http.StatusNotFound, "diagnostics unavailable")
+		return
+	}
+	bundle, err := a.diag(r.Context())
+	if err != nil {
+		a.internalErr(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, bundle)
+}
+
+// SetDiagnostics installs the provider that assembles the bundle — kept
+// as a closure so this package stays free of server/tlsx internals.
+func (a *API) SetDiagnostics(fn func(context.Context) (map[string]any, error)) {
+	a.diag = fn
 }
 
 type nodePatch struct {
