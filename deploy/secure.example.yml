@@ -1,0 +1,198 @@
+# LocalMesh — hardened production compose example.
+#
+#   ./scripts/gen-secrets.sh                      # writes ./.env (mode 0600)
+#   docker compose -f deploy/secure.example.yml up -d
+#
+# Differences from the stock docker-compose.yml — the hardening deltas
+# this file exists to demonstrate:
+#
+#   1. No inline secrets. Every credential interpolates from the env file
+#      (${VAR:?} fails the run loudly when unset). Generate real values
+#      with scripts/gen-secrets.sh — never paste secrets into YAML.
+#   2. Localhost-bound listeners by default (LOCALMESH_BIND=127.0.0.1).
+#      Remote agents can't enroll against a localhost bind: set
+#      LOCALMESH_BIND to the host's LAN IP — a deliberate choice — and
+#      keep the result off untrusted networks (LAN/VPN/Tailscale only).
+#   3. Healthchecks hit /healthz (process liveness) — NEVER /readyz:
+#      a standby intentionally serves 503 on /readyz until promotion,
+#      so a /readyz healthcheck would restart-loop healthy standbys.
+#      /readyz is the *routing* signal (the localmesh-router probes it);
+#      /healthz is the *process* signal (compose/restart policy).
+#   4. Containers drop all capabilities, no-new-privileges, read-only
+#      root filesystems where the app permits (the server writes only
+#      its /data volume; the dashboard only needs /tmp).
+#   5. No debug/status ports published. The router status listener
+#      (HA section) is loopback-only even inside the container.
+#   6. mDNS LAN discovery defaults OFF in this file — it advertises the
+#      cluster on the local broadcast domain; enable knowingly.
+#
+# What this file deliberately does NOT do: publish Postgres (it never
+# leaves the bridge network — the only sane default), terminate TLS in a
+# proxy (the server serves TLS 1.3 itself; agents pin its CA), or enable
+# LOCALMESH_DEV_INSECURE_HTTP / LOCALMESH_TLS_INSECURE (dev-only flags —
+# never set them here).
+#
+# Postgres↔server traffic is plaintext inside this private bridge —
+# acceptable for single-host. A remote/managed Postgres must use
+# sslmode=require (or verify-full) — see docs/production-hardening.md.
+
+name: localmesh-secure
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: localmesh
+      POSTGRES_USER: localmesh
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run scripts/gen-secrets.sh first}
+      # Lock Postgres to socket/TCP inside the bridge; the DSN the server
+      # builds carries the same password — nothing else can reach it.
+    volumes:
+      - localmesh-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U localmesh -d localmesh"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    # read_only is NOT set on postgres: it writes lock/socket files under
+    # its data volume and /var/run — the volume mount is the containment.
+    networks: [localmesh]
+
+  server:
+    build: ..
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # sslmode=disable: plaintext on the private bridge only. For an
+      # external Postgres, switch to a full DSN with sslmode=require.
+      LOCALMESH_DATABASE_URL: postgres://localmesh:${POSTGRES_PASSWORD:?}@postgres:5432/localmesh?sslmode=disable
+      LOCALMESH_LISTEN: 0.0.0.0:8443   # in-container; the published bind is LOCALMESH_BIND
+      LOCALMESH_DATA_DIR: /data
+      LOCALMESH_ADMIN_KEY: ${LOCALMESH_ADMIN_KEY:?run scripts/gen-secrets.sh first}
+      # SAN list — MUST cover every name/IP clients + agents dial,
+      # including the router hostname when you run the HA variant below.
+      # The leaf reissues on restart when SANs change; the CA does not.
+      LOCALMESH_HOSTNAMES: ${LOCALMESH_HOSTNAMES:?set hostnames in .env}
+      LOCALMESH_CLUSTER_NAME: ${LOCALMESH_CLUSTER_NAME:-localmesh}
+      LOCALMESH_DISCOVERY: ${LOCALMESH_DISCOVERY:-off}
+      LOCALMESH_CORS_ORIGINS: ""   # dashboard calls go through the BFF — no CORS needed
+      LOCALMESH_LOG_LEVEL: ${LOCALMESH_LOG_LEVEL:-info}
+      # LOCALMESH_TRUST_PROXY — set to 1 ONLY behind a reverse proxy that
+      # overwrites X-Forwarded-For; otherwise clients can spoof their
+      # rate-limit identity. Off by default and correct for this layout.
+      # LOCALMESH_DEV_INSECURE_HTTP — never set it here. It disables TLS.
+    volumes:
+      - localmesh-data:/data
+    ports:
+      # Localhost-bound by default; expose deliberately via LOCALMESH_BIND.
+      - "${LOCALMESH_BIND:-127.0.0.1}:${LOCALMESH_PORT:-8443}:8443"
+    healthcheck:
+      # Liveness probe — /healthz is 200 whenever the process serves,
+      # including while standby (see the commented HA block below).
+      test: ["CMD-SHELL", "wget -q --no-check-certificate -O /dev/null https://127.0.0.1:8443/healthz || exit 1"]
+      interval: 15s
+      timeout: 3s
+      start_period: 10s
+      retries: 4
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    networks: [localmesh]
+
+  web:
+    build: ../web
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      LOCALMESH_API_URL: https://server:8443
+      # Admin key path B: env value (gen-secrets) OR the bootstrap file
+      # the server writes into the shared volume when the env is empty.
+      # The key is used server-side only — it never reaches browsers.
+      LOCALMESH_API_KEY: ${LOCALMESH_ADMIN_KEY:-}
+      LOCALMESH_API_KEY_FILE: /ca/bootstrap-admin.key
+      LOCALMESH_CA_FILE: /ca/ca.pem
+      LOCALMESH_DASHBOARD_PASSWORD: ${LOCALMESH_DASHBOARD_PASSWORD:-}
+      LOCALMESH_DASHBOARD_PASSWORD_FILE: /ca/bootstrap-dashboard.password
+      # Session-signing key: gen-secrets value first, shared-file
+      # fallback — either way sessions survive web restarts.
+      LOCALMESH_SESSION_KEY: ${LOCALMESH_SESSION_KEY:-}
+      LOCALMESH_SESSION_KEY_FILE: /ca/session.key
+      # LOCALMESH_TLS_INSECURE — never set it here; the CA file above is
+      # the correct verification path for the self-signed cluster CA.
+    volumes:
+      - localmesh-data:/ca:ro   # read-only: web consumes, never writes
+    ports:
+      - "${LOCALMESH_BIND:-127.0.0.1}:${LOCALMESH_WEB_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 4
+    read_only: true   # Next.js standalone needs no writes; drop if you see EROFS cache errors
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    networks: [localmesh]
+
+  # -----------------------------------------------------------------------
+  # HA VARIANT (optional) — uncomment for active+standby behind the
+  # localmesh-router stable endpoint. Full guide: docs/ha-deployment.md.
+  #
+  #  server-standby:
+  #    build: ..
+  #    restart: unless-stopped
+  #    depends_on:
+  #      postgres: {condition: service_healthy}
+  #      server:   {condition: service_healthy}   # shared CA must exist first
+  #    environment:   # identical to `server`, plus:
+  #      LOCALMESH_STANDBY: "1"
+  #    volumes:
+  #      - localmesh-data:/data    # SAME volume — a standby serves the
+  #                                  # primary's CA, it never mints one
+  #    healthcheck:
+  #      # CRITICAL: /healthz, not /readyz. A standby's /readyz is
+  #      # intentionally 503 (that's how the router excludes it); its
+  #      # /healthz is 200 — liveness is what you want here.
+  #      test: ["CMD-SHELL", "wget -q --no-check-certificate -O /dev/null https://127.0.0.1:8443/healthz || exit 1"]
+  #      interval: 15s
+  #      timeout: 3s
+  #      start_period: 10s
+  #
+  #  router:
+  #    build: {context: .., dockerfile: deploy/Dockerfile.router}
+  #    restart: unless-stopped
+  #    depends_on:
+  #      server: {condition: service_healthy}
+  #    environment:
+  #      LOCALMESH_ROUTER_LISTEN: 0.0.0.0:8443
+  #      LOCALMESH_ROUTER_BACKENDS: https://server:8443,https://server-standby:8443
+  #      LOCALMESH_ROUTER_CA: /data/ca.pem      # verifies backend TLS
+  #      LOCALMESH_ROUTER_STATUS: 127.0.0.1:9443  # loopback-only, inside too
+  #      # The router splices raw TCP — TLS still terminates at the
+  #      # control plane, so auth cannot be bypassed by routing through it.
+  #    volumes:
+  #      - localmesh-data:/data:ro
+  #    ports:
+  #      - "${LOCALMESH_BIND:-127.0.0.1}:${LOCALMESH_PORT:-8443}:8443"
+  #      - "127.0.0.1:9443:9443"   # /status JSON — loopback only
+  #    # When the router fronts traffic, point web at it:
+  #    #   LOCALMESH_API_URL: https://router:8443
+  #    # and add `router` to LOCALMESH_HOSTNAMES so the cert covers it.
+  # -----------------------------------------------------------------------
+
+volumes:
+  localmesh-pg:
+  localmesh-data:
+
+networks:
+  localmesh:
+    driver: bridge

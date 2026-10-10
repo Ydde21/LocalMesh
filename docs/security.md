@@ -41,8 +41,9 @@ Notable properties:
   inside the TLS enrollment request. The server stores its hash — there
   is no plaintext credential in the database to leak.
 - **Node credentials are strength-checked and unique.** `POST /enroll`
-  rejects `node_token` values that are not `lmn_`-prefixed with ≥40
-  characters, and `nodes.token_hash` carries a UNIQUE constraint —
+  rejects `node_token` values that are not `lmn_`-prefixed with ≥24
+  characters (real agent-generated tokens carry 256 bits of entropy and
+  run 47), and `nodes.token_hash` carries a UNIQUE constraint —
   two devices can never end up bound to the same credential, and a
   guessable credential cannot survive approval.
 - The bootstrap admin key is printed to the server log once (or supplied
@@ -239,6 +240,11 @@ revoke/reinstate/delete, settings changes, model ops. Use it to answer
   inference key.
 
 ## Deployment hardening checklist
+
+The full operational guide is
+[docs/production-hardening.md](production-hardening.md) (threat model,
+checklist, first-run flow, rotation runbook); the pre-beta audit behind
+it is [docs/security-audit-v09.md](security-audit-v09.md). Highlights:
 
 - [ ] Don't expose 8443 to the internet — reach it over LAN, WireGuard,
       or Tailscale/Headscale. If you must publish it, front it with a
