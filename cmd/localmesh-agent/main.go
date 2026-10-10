@@ -2,7 +2,7 @@
 //
 // Usage:
 //
-//	localmesh-agent join --server https://host:8443 --token lme_... [--name ...] [--ca-fingerprint sha256:...]
+//	localmesh-agent join --server https://host:8443 --token lme_... [--name ...] [--ca-fingerprint sha256:...] [--update-pubkey keyfile]
 //	localmesh-agent join -discover --token lme_... [-discover-instance name] [--ca-fingerprint sha256:...]
 //	localmesh-agent discover [-timeout 5s] [-json]
 //	localmesh-agent run [--config path]
@@ -10,6 +10,7 @@
 //	localmesh-agent service install|uninstall|start|stop|status [--config path]
 //	localmesh-agent status
 //	localmesh-agent update -release <dir-or-url> -pubkey <keyfile> [--apply]
+//	localmesh-agent update-key [--config path] <keyfile>
 package main
 
 import (
@@ -53,6 +54,12 @@ func main() {
 		cmdStatus()
 	case "update":
 		cmdUpdate()
+	case "update-key":
+		cmdUpdateKey()
+	case "update-apply":
+		// Hidden: the self-update restart helper spawned by the agent
+		// itself after a server-dispatched upgrade. Not for operators.
+		cmdUpdateApply()
 	case "version":
 		fmt.Println(agent.Current())
 	default:
@@ -72,6 +79,7 @@ Commands:
   service   install|uninstall|start|stop|status the OS service
   status    show local agent configuration
   update    verify and install a signed agent release (opt-in, dry-run default)
+  update-key  pin the release signing key for server-dispatched upgrades
 
 Run "localmesh-agent join -h" or "localmesh-agent discover -h" for options.
 `)
@@ -86,6 +94,7 @@ func cmdJoin(log *slog.Logger) {
 	wait := fs.Duration("wait", 30*time.Minute, "max time to await admin approval")
 	cfgPath := fs.String("config", "", "config file path (default ~/.localmesh/agent.json)")
 	ollama := fs.String("ollama-url", "", "Ollama endpoint (default http://127.0.0.1:11434)")
+	updatePubkey := fs.String("update-pubkey", "", "release signing public key file (minisign .pub or PEM) — pins the trust anchor for server-dispatched upgrades; the control plane NEVER sends key material")
 	foreground := fs.Bool("run", true, "start serving workloads after approval")
 	discover := fs.Bool("discover", false, "find the control plane via mDNS instead of --server")
 	discInstance := fs.String("discover-instance", "", "cluster name to pick when several are discovered")
@@ -142,6 +151,13 @@ func cmdJoin(log *slog.Logger) {
 		fatal(err)
 	}
 	res.Config.OllamaURL = *ollama
+	if *updatePubkey != "" {
+		keyID, err := pinUpdateKeyFile(res.Config, *updatePubkey)
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Fprintf(os.Stderr, "release update key pinned: %s\n", keyID)
+	}
 	if ds != nil {
 		res.Config.DiscoveryEnabled = true
 		res.Config.DiscoveredCluster = ds.Cluster.Instance
@@ -154,6 +170,7 @@ func cmdJoin(log *slog.Logger) {
 
 	if *foreground {
 		ag := agent.New(res.Config, log)
+		ag.SetConfigPath(path)
 		if err := ag.Run(ctx); err != nil {
 			fatal(err)
 		}
@@ -220,14 +237,16 @@ func cmdRun(log *slog.Logger) {
 	defer stop()
 	// When launched by the Windows SCM this hands the process to the
 	// service control loop instead of running interactively.
-	handled, err := agent.RunUnderService(ctx, cfg, log)
+	handled, err := agent.RunUnderService(ctx, cfg, log, path)
 	if err != nil {
 		fatal(err)
 	}
 	if handled {
 		return
 	}
-	if err := agent.New(cfg, log).Run(ctx); err != nil {
+	ag := agent.New(cfg, log)
+	ag.SetConfigPath(path)
+	if err := ag.Run(ctx); err != nil {
 		fatal(err)
 	}
 }
@@ -281,6 +300,9 @@ func cmdStatus() {
 	}
 	fmt.Printf("server:  %s\nnode id: %s\nname:    %s\nconfig:  %s\n",
 		cfg.ServerURL, cfg.NodeID, cfg.Name, path)
+	if s := agent.PendingUpdateSummary(path); s != "" {
+		fmt.Printf("update:  %s\n", s)
+	}
 }
 
 func fatal(err error) {

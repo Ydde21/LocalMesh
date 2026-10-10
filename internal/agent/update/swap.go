@@ -24,6 +24,16 @@ const (
 	backupSuffix = ".bak"
 )
 
+// StagedPath is where StageArtifact places the verified incoming
+// binary for a given target.
+func StagedPath(target string) string { return target + stagedSuffix }
+
+// BackupPath is where InstallBinary preserves the outgoing binary —
+// the rollback copy. Callers that must name the backup before the swap
+// happens (the wire-op pending-update marker) use this so the naming
+// contract lives in one place.
+func BackupPath(target string) string { return target + backupSuffix }
+
 // StageArtifact streams the artifact from src to <target>.new, sets
 // mode 0755, and verifies its SHA-256 against wantHex. A failed or
 // partial stage never touches the live binary; the staged file is

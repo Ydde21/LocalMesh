@@ -90,6 +90,7 @@ func Doctor(ctx context.Context, cfgPath, caFile string, out io.Writer) int {
 
 	doctorEngine(ctx, cfg.OllamaURL, emit)
 	doctorDisk(cfgPath, emit)
+	doctorPendingUpdate(cfgPath, emit)
 	doctorHardware(ctx, emit)
 
 	if fails > 0 {
@@ -408,6 +409,15 @@ func doctorDisk(cfgPath string, emit func(string, string, string, ...any)) {
 		return
 	}
 	emit("PASS", "disk", "%.1f GiB free on %s (%.0f%% used)", freeGiB, dir, u.UsedPercent)
+}
+
+// doctorPendingUpdate surfaces an unfinished centralized update: the
+// marker means a swapped-in binary still owes the server a health
+// confirmation (or a rollback is in progress).
+func doctorPendingUpdate(cfgPath string, emit func(string, string, string, ...any)) {
+	if s := PendingUpdateSummary(cfgPath); s != "" {
+		emit("WARN", "update", "%s", s)
+	}
 }
 
 // doctorHardware reports the static snapshot plus which live metrics

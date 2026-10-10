@@ -28,6 +28,17 @@ type Config struct {
 	DiscoveredCluster string `json:"discovered_cluster,omitempty"`
 	// DiscoveredAt is when the discovery-assisted join happened.
 	DiscoveredAt time.Time `json:"discovered_at,omitempty"`
+	// UpdatePubkey is the release signing public key provisioned
+	// out-of-band (`localmesh-agent update-key <file>` or
+	// `join -update-pubkey`). It is the trust anchor for
+	// server-dispatched upgrades: the control plane never sends key
+	// material, and an agent_upgrade frame is refused outright when no
+	// key is pinned here.
+	UpdatePubkey string `json:"update_pubkey,omitempty"`
+	// UpdatePubkeyID is the key's identity as derived by
+	// release.ParsePublicKey().ID() at provisioning time — the value
+	// `update-key` prints for pinning into server-side release policy.
+	UpdatePubkeyID string `json:"update_pubkey_id,omitempty"`
 }
 
 // DefaultDir returns the agent config directory.

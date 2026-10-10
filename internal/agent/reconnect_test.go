@@ -88,6 +88,15 @@ type fakeCP struct {
 	hangOnHello  atomic.Bool  // read hello but never reply (dead-handshake simulation)
 	silent       atomic.Bool  // complete handshake, then stop reading entirely (dead-peer simulation)
 	closeAfter   atomic.Int32 // server closes the conn after N capability reports
+	helloError   string       // when set, reply to hello with an error frame carrying this message
+
+	// Release-proxy knobs: serveReleaseFile answers
+	// /api/v1/agent-releases/<id>/files/<name> from releaseFiles
+	// ("<id>/<name>" → bytes); releaseGate, when non-nil, blocks every
+	// release fetch until it closes (in-flight abort tests).
+	releaseFiles map[string][]byte
+	releaseGate  chan struct{}
+	lastRelAuth  atomic.Value // Authorization header on the last release fetch (string)
 
 	mu      sync.Mutex
 	conns   []*wsjson.Conn       // open server-side conns for cleanup
@@ -125,8 +134,13 @@ func newFakeCP(t *testing.T) *fakeCP {
 
 func (f *fakeCP) url() string { return f.srv.URL }
 
-// handle is the server side of /api/v1/agent/connect.
+// handle is the server side of /api/v1/agent/connect — plus the
+// authenticated release proxy for upgrade tests.
 func (f *fakeCP) handle(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/api/v1/agent-releases/") {
+		f.serveReleaseFile(w, r)
+		return
+	}
 	if f.status != 0 {
 		http.Error(w, http.StatusText(f.status), f.status)
 		return
@@ -151,6 +165,29 @@ func (f *fakeCP) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.helloN.Add(1)
+	if f.helloError != "" {
+		// Protocol-level rejection (e.g. agent speaks a protocol the
+		// server can't serve) — then keep reading so the agent's
+		// best-effort terminal report still lands on gotEnv.
+		c.Write(ctx, contracts.Envelope{
+			ID:      "err-1",
+			Type:    contracts.MsgError,
+			ReplyTo: env.ID,
+			Payload: contracts.MarshalPayload(contracts.ErrorPayload{
+				Code: "protocol", Message: f.helloError,
+			}),
+		})
+		for {
+			env, err := c.Read(ctx)
+			if err != nil {
+				return
+			}
+			select {
+			case f.gotEnv <- env:
+			default:
+			}
+		}
+	}
 	if f.hangOnHello.Load() {
 		// Keep reading (so agent writes don't block) but never answer —
 		// the bounded handshake must time the session out.
@@ -206,6 +243,32 @@ func (f *fakeCP) handle(w http.ResponseWriter, r *http.Request) {
 			f.pongN.Add(1)
 		}
 	}
+}
+
+// serveReleaseFile fakes GET /api/v1/agent-releases/<id>/files/<name>
+// — the control-plane release proxy the localmesh:// upgrade source
+// fetches through. It records the bearer token the agent sent so tests
+// can assert node-credential auth is attached.
+func (f *fakeCP) serveReleaseFile(w http.ResponseWriter, r *http.Request) {
+	if f.releaseGate != nil {
+		select {
+		case <-f.releaseGate:
+		case <-r.Context().Done():
+			return
+		}
+	}
+	f.lastRelAuth.Store(r.Header.Get("Authorization"))
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/agent-releases/")
+	parts := strings.SplitN(rest, "/files/", 2)
+	if len(parts) != 2 {
+		http.Error(w, "bad release path", http.StatusBadRequest)
+		return
+	}
+	if data, ok := f.releaseFiles[parts[0]+"/"+parts[1]]; ok {
+		w.Write(data)
+		return
+	}
+	http.NotFound(w, r)
 }
 
 // shouldClose decrements the armed close counter; reaching zero ends

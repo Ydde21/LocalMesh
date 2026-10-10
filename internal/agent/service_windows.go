@@ -91,18 +91,19 @@ func scStatus(out io.Writer) error {
 // runUnderService runs the agent under the Windows Service Control
 // Manager when the process was launched as a service; interactive
 // invocations return handled=false so `run` stays a foreground command.
-func runUnderService(ctx context.Context, cfg *Config, log *slog.Logger) (bool, error) {
+func runUnderService(ctx context.Context, cfg *Config, log *slog.Logger, cfgPath string) (bool, error) {
 	isSvc, err := svc.IsWindowsService()
 	if err != nil || !isSvc {
 		return false, err
 	}
-	return true, svc.Run(serviceName, &winService{ctx: ctx, cfg: cfg, log: log})
+	return true, svc.Run(serviceName, &winService{ctx: ctx, cfg: cfg, log: log, cfgPath: cfgPath})
 }
 
 type winService struct {
-	ctx context.Context
-	cfg *Config
-	log *slog.Logger
+	ctx     context.Context
+	cfg     *Config
+	log     *slog.Logger
+	cfgPath string
 }
 
 func (s *winService) Execute(_ []string, r <-chan svc.ChangeRequest, schan chan<- svc.Status) (bool, uint32) {
@@ -111,7 +112,11 @@ func (s *winService) Execute(_ []string, r <-chan svc.ChangeRequest, schan chan<
 	defer cancel()
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- New(s.cfg, s.log).Run(ctx) }()
+	go func() {
+		ag := New(s.cfg, s.log)
+		ag.SetConfigPath(s.cfgPath)
+		errCh <- ag.Run(ctx)
+	}()
 
 	schan <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
 	s.log.Info("running as Windows service", "name", serviceName)

@@ -1,6 +1,7 @@
 package update
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -42,6 +43,13 @@ const (
 // (local mirrors/tests) — releases must otherwise travel over TLS, and
 // even then the signature, not TLS, is what is trusted.
 func OpenSource(release string, client *http.Client) (Source, error) {
+	return openSourceCtx(context.Background(), release, client)
+}
+
+// openSourceCtx is OpenSource with a context bound into the resulting
+// remote source's fetches — callers that can be cancelled mid-download
+// (the wire-op upgrade path) pass a real ctx.
+func openSourceCtx(ctx context.Context, release string, client *http.Client) (Source, error) {
 	if release == "" {
 		return nil, fmt.Errorf("empty -release")
 	}
@@ -56,7 +64,7 @@ func OpenSource(release string, client *http.Client) (Source, error) {
 		if client == nil {
 			client = &http.Client{Timeout: httpTimeout}
 		}
-		return &urlSource{base: strings.TrimRight(u.String(), "/"), c: client}, nil
+		return &urlSource{base: strings.TrimRight(u.String(), "/"), c: client, ctx: ctx}, nil
 	}
 	st, err := os.Stat(release)
 	if err != nil {
@@ -116,13 +124,22 @@ func (d *dirSource) Describe() string {
 type urlSource struct {
 	base string
 	c    *http.Client
+	ctx  context.Context // nil → per-request Background
 }
 
 func (u *urlSource) get(name string, w io.Writer, limit int64) error {
 	if strings.ContainsAny(name, "/\\") || name == ".." {
 		return fmt.Errorf("bad release file name %q", name)
 	}
-	resp, err := u.c.Get(u.base + "/" + name)
+	ctx := u.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.base+"/"+name, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := u.c.Do(req)
 	if err != nil {
 		return err
 	}
