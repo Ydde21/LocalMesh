@@ -393,14 +393,16 @@ func (q *Queue) Cancel(ctx context.Context, opID string) error {
 		return err // ErrNotFound propagates
 	}
 	switch op.Status {
-	case "queued":
+	case "queued", "interrupted":
+		// Neither is executing on an agent — finalize locally. The
+		// store's guard covers both; a miss means the op raced to
+		// dispatched/running, so fall through to the abort path.
 		if ok, err := q.st.CancelQueuedModelOp(ctx, opID); err != nil {
 			return err
 		} else if ok {
 			q.kick()
 			return nil
 		}
-		// Raced with a claim — fall through to the abort path.
 		fallthrough
 	case "dispatched", "running":
 		if err := q.disp.Abort(ctx, op.NodeID, opID); err != nil {

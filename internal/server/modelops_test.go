@@ -172,8 +172,10 @@ func TestModelOpCancel(t *testing.T) {
 	}
 }
 
-// TestModelOpInterruptOnDisconnect: killing the agent mid-pull marks
-// the op 'interrupted' instead of leaking 'running' forever.
+// TestModelOpInterruptOnDisconnect: killing the agent mid-pull must not
+// leak 'running' forever. The queue interrupts the op, then — because a
+// pull is idempotent and attempts remain — resumes it to 'queued' for
+// retry (a delete would stay 'interrupted': its outcome is unknowable).
 func TestModelOpInterruptOnDisconnect(t *testing.T) {
 	ol := fakeollama.New(fakeollama.Model{Name: "tiny:latest", Family: "f", Size: 100 << 20})
 	defer ol.Close()
@@ -186,11 +188,18 @@ func TestModelOpInterruptOnDisconnect(t *testing.T) {
 
 	ops := pullModel(t, e, "dropme:latest", http.StatusAccepted)
 	opID := ops[0]["id"].(string)
-	time.Sleep(300 * time.Millisecond)
+	// Confirm the pull actually dispatched before the kill — otherwise a
+	// still-'queued' op would pass the assertion without exercising the
+	// interrupt path at all.
+	waitOpStatus(t, e, opID, 10*time.Second, "running", "dispatched")
 	stop() // agent vanishes mid-pull
 
-	if st := waitOpStatus(t, e, opID, 10*time.Second, "interrupted", "cancelled", "failed"); st != "interrupted" {
-		t.Fatalf("op status = %s, want interrupted", st)
+	// interrupted → resumed pull: the queue requeues retryable pulls.
+	// 'interrupted' is a transient hop inside handleDisconnect, so poll
+	// for the settle state specifically: 'queued' awaiting the node's
+	// return.
+	if st := waitOpStatus(t, e, opID, 10*time.Second, "queued"); st != "queued" {
+		t.Fatalf("op status = %s, want queued (resumed pull)", st)
 	}
 }
 

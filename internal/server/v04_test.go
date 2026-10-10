@@ -64,13 +64,24 @@ func TestModelPlacement(t *testing.T) {
 	runAgent(t, cfg)
 	e.waitNodeOnline(t, 1)
 
-	code, _, raw := e.adminReq(t, "GET", "/api/v1/models/placement", nil)
-	if code != 200 {
-		t.Fatalf("placement: %d", code)
-	}
+	// The capability report lands after connect — poll until placement
+	// sees the agent's model inventory (timing-sensitive under -race).
 	var entries []map[string]any
-	if err := json.Unmarshal(raw, &entries); err != nil || len(entries) == 0 {
-		t.Fatalf("placement empty/undecodable — fake ollama has models: %s", raw)
+	var raw []byte
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var code int
+		code, _, raw = e.adminReq(t, "GET", "/api/v1/models/placement", nil)
+		if code != 200 {
+			t.Fatalf("placement: %d", code)
+		}
+		if err := json.Unmarshal(raw, &entries); err == nil && len(entries) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("placement empty/undecodable — fake ollama has models: %s", raw)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	var found map[string]any
 	for _, m := range entries {

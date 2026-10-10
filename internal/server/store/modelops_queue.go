@@ -252,11 +252,16 @@ func (d *DB) MarkModelOpInterrupted(ctx context.Context, id, reason string) erro
 
 // CancelQueuedModelOp cancels an op still waiting in the queue — it never
 // reaches an agent. Returns false when the op already left 'queued'.
+// CancelQueuedModelOp finalizes an op that no agent may be executing:
+// 'queued' (never dispatched) or 'interrupted' (node lost, awaiting the
+// resume sweep — without this a cancel in the interrupt window would
+// 409 yet still retry later). Returns false when the op already raced
+// to dispatched/running/terminal.
 func (d *DB) CancelQueuedModelOp(ctx context.Context, id string) (bool, error) {
 	tag, err := d.Pool.Exec(ctx,
 		`UPDATE model_operations SET status='cancelled', error='cancelled by administrator',
 			finished_at=now(), updated_at=now()
-		 WHERE id=$1 AND status='queued'`, id)
+		 WHERE id=$1 AND status IN ('queued','interrupted')`, id)
 	if err != nil {
 		return false, err
 	}
@@ -365,6 +370,31 @@ func (d *DB) ListQueuedModelOps(ctx context.Context, limit int) ([]*OpState, err
 		 LEFT JOIN nodes n ON n.id=o.node_id
 		 WHERE o.status='queued'
 		 ORDER BY o.priority DESC, o.created_at LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*OpState
+	for rows.Next() {
+		s, err := scanOpState(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// ListModelOpStates returns the recent full op view (queue + progress +
+// retry fields) — the shape the admin API and dashboard consume.
+func (d *DB) ListModelOpStates(ctx context.Context, limit int) ([]*OpState, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	rows, err := d.Pool.Query(ctx,
+		`SELECT `+modelOpCols+` FROM model_operations o
+		 LEFT JOIN nodes n ON n.id=o.node_id
+		 ORDER BY o.created_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}

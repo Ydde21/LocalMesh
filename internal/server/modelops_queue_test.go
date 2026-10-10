@@ -3,13 +3,10 @@ package server_test
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/localmesh/localmesh/internal/server/modelops"
-	"github.com/localmesh/localmesh/internal/server/nodehub"
 	"github.com/localmesh/localmesh/internal/server/store"
 	"github.com/localmesh/localmesh/internal/testutil/fakeollama"
 )
@@ -19,13 +16,16 @@ import (
 // callbacks (OnProgress/OnDone/OnFail) remain on the hub's legacy path in
 // this worktree; tests exercise the queue contract by calling them
 // directly where the integrator would.
+// startModelOpsQueue returns the server's own running queue with the
+// test-fast config applied. A second queue over the same store would
+// race the real one's SKIP-LOCKED claims (locked-but-uncommitted rows
+// are invisible to a concurrent claim, breaking the per-node cap) and
+// never see hub op frames — the hub wires callbacks to exactly one
+// queue, which is the server's.
 func startModelOpsQueue(t *testing.T, e *testEnv, cfg modelops.Config) *modelops.Queue {
 	t.Helper()
-	q := modelops.New(e.srv.Store(), nodehub.NewOpDispatcher(e.srv.Hub()), cfg,
-		slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ctx, cancel := context.WithCancel(context.Background())
-	go q.Run(ctx)
-	t.Cleanup(cancel)
+	q := e.srv.ModelOps()
+	q.UpdateConfig(cfg)
 	return q
 }
 

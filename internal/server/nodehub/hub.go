@@ -15,6 +15,7 @@ import (
 
 	"github.com/localmesh/localmesh/internal/contracts"
 	"github.com/localmesh/localmesh/internal/server/events"
+	"github.com/localmesh/localmesh/internal/server/modelops"
 	"github.com/localmesh/localmesh/internal/server/store"
 	"github.com/localmesh/localmesh/internal/wsjson"
 )
@@ -72,7 +73,15 @@ type Hub struct {
 
 	pendingOpsMu sync.Mutex
 	pendingOps   map[string]string // operationID -> nodeID
+
+	// opQueue receives lifecycle + op-frame callbacks when the modelops
+	// queue is installed (server.go). Nil in tests that build a bare hub.
+	opQueue *modelops.Queue
 }
+
+// SetModelOpsQueue wires the persistent model-op queue into the hub's
+// conn lifecycle and op-frame handling.
+func (h *Hub) SetModelOpsQueue(q *modelops.Queue) { h.opQueue = q }
 
 func New(st *store.DB, ev *events.Broker, cfg Config, log *slog.Logger) *Hub {
 	h := &Hub{
@@ -238,6 +247,9 @@ func (h *Hub) register(id string, nc *conn) {
 	h.conns[id] = nc
 	h.mu.Unlock()
 	h.ev.Publish("node.connected", map[string]string{"id": id, "name": nc.node.Name})
+	if h.opQueue != nil {
+		h.opQueue.OnNodeConnected(id)
+	}
 	h.notify()
 }
 
@@ -318,6 +330,12 @@ func (h *Hub) unregister(id string, nc *conn) {
 
 	h.log.Info("node disconnected", "node", nc.node.Name, "id", id)
 	h.ev.Publish("node.disconnected", map[string]string{"id": id, "name": nc.node.Name})
+	if h.opQueue != nil {
+		// Queue owns interruption + retry-resume bookkeeping; its
+		// InterruptNodeModelOps is status-guarded and idempotent vs the
+		// direct call above.
+		h.opQueue.OnNodeDisconnected(id)
+	}
 	h.notify()
 }
 
@@ -401,11 +419,22 @@ func (h *Hub) handleFrame(ctx context.Context, nc *conn, env contracts.Envelope)
 		if env.Decode(&p) != nil {
 			return
 		}
-		h.st.UpdateModelOperation(ctx, p.OperationID, "running", p.Status, int64(p.Completed), int64(p.Total))
+		if h.opQueue != nil {
+			h.opQueue.OnProgress(ctx, p.OperationID, modelops.Progress{
+				Phase:         p.Phase,
+				Completed:     int64(p.Completed),
+				Total:         int64(p.Total),
+				RateBPS:       int64(p.RateBPS),
+				Indeterminate: p.Indeterminate,
+			})
+		} else {
+			h.st.UpdateModelOperation(ctx, p.OperationID, "running", p.Status, int64(p.Completed), int64(p.Total))
+		}
 		h.ev.Publish("model.operation", map[string]any{
 			"operation_id": p.OperationID, "node_id": nc.node.ID,
 			"model": p.Model, "status": "running", "detail": p.Status,
 			"completed": p.Completed, "total": p.Total,
+			"phase": p.Phase, "rate_bps": p.RateBPS, "indeterminate": p.Indeterminate,
 		})
 
 	case contracts.MsgOpDone:
@@ -420,7 +449,21 @@ func (h *Hub) handleFrame(ctx context.Context, nc *conn, env contracts.Envelope)
 		if d.Cancelled {
 			status = "cancelled"
 		}
-		h.st.FinishModelOperationStatus(ctx, d.OperationID, status, d.Error)
+		if h.opQueue != nil {
+			h.opQueue.OnDone(ctx, d.OperationID, modelops.Done{
+				Success:       d.Success,
+				Cancelled:     d.Cancelled,
+				Retryable:     d.Retryable,
+				Error:         d.Error,
+				Completed:     int64(d.Completed),
+				Total:         int64(d.Total),
+				Phase:         d.Phase,
+				RateBPS:       int64(d.RateBPS),
+				Indeterminate: d.Indeterminate,
+			})
+		} else {
+			h.st.FinishModelOperationStatus(ctx, d.OperationID, status, d.Error)
+		}
 		h.ev.Publish("model.operation", map[string]any{
 			"operation_id": d.OperationID, "node_id": nc.node.ID,
 			"model": d.Model, "status": status, "error": d.Error,

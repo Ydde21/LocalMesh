@@ -19,6 +19,7 @@ import (
 	"github.com/localmesh/localmesh/internal/creds"
 	"github.com/localmesh/localmesh/internal/server/auth"
 	"github.com/localmesh/localmesh/internal/server/events"
+	"github.com/localmesh/localmesh/internal/server/modelops"
 	"github.com/localmesh/localmesh/internal/server/nodehub"
 	"github.com/localmesh/localmesh/internal/server/scheduler"
 	"github.com/localmesh/localmesh/internal/server/store"
@@ -38,10 +39,23 @@ type API struct {
 	// discoveryStatus reports LAN advertise state; nil = unset (server
 	// wires it post-construction once the announcer exists).
 	discoveryStatus func() map[string]any
+
+	// modelOps is the persistent model-operation queue; nil falls back
+	// to direct hub dispatch (tests that build a bare API).
+	modelOps *modelops.Queue
+	// modelOpsReload re-reads persisted modelops settings into the queue.
+	modelOpsReload func(ctx context.Context)
 }
 
 // SetDiscoveryStatus wires the server's announce-state provider.
 func (a *API) SetDiscoveryStatus(fn func() map[string]any) { a.discoveryStatus = fn }
+
+// SetModelOps wires the persistent model-operation queue and its
+// settings-reload hook.
+func (a *API) SetModelOps(q *modelops.Queue, reload func(ctx context.Context)) {
+	a.modelOps = q
+	a.modelOpsReload = reload
+}
 
 func New(st *store.DB, hub *nodehub.Hub, sched *scheduler.Scheduler, ev *events.Broker, caPEM []byte, log *slog.Logger) *API {
 	return &API{
@@ -511,9 +525,10 @@ func (a *API) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 type modelOpRequest struct {
-	Model   string   `json:"model"`
-	NodeIDs []string `json:"node_ids"` // empty = all online nodes that have (pull) / all nodes
-	Force   bool     `json:"force"`    // delete: allow removing the cluster's last replica
+	Model    string   `json:"model"`
+	NodeIDs  []string `json:"node_ids"` // empty = all online nodes that have (pull) / all nodes
+	Force    bool     `json:"force"`    // delete: allow removing the cluster's last replica
+	Priority int      `json:"priority"` // queue: higher dispatches first; 0 = normal
 }
 
 func (a *API) handleModelPull(w http.ResponseWriter, r *http.Request)   { a.modelOp(w, r, "pull") }
@@ -578,6 +593,28 @@ func (a *API) modelOp(w http.ResponseWriter, r *http.Request, op string) {
 		if len(targets) > 0 && !targets[v.Node.ID] {
 			continue
 		}
+		if a.modelOps != nil {
+			// Queue path: the op row lands 'queued' first; the dispatch
+			// loop sends the wire frame when capacity allows.
+			opRec, err := a.modelOps.Submit(r.Context(), modelops.SubmitRequest{
+				NodeID: v.Node.ID, Model: req.Model, Op: op, Priority: req.Priority,
+			})
+			if err != nil {
+				var de *modelops.DuplicateError
+				if errors.As(err, &de) {
+					skipped = append(skipped, v.Node.Name+" (op "+de.OpID+" already "+de.Status+")")
+					continue
+				}
+				if errors.Is(err, modelops.ErrQueueFull) {
+					writeErr(w, http.StatusTooManyRequests, "model operation queue is full — retry shortly")
+					return
+				}
+				a.internalErr(w, r, err)
+				return
+			}
+			ops = append(ops, opRec)
+			continue
+		}
 		opRec, err := a.st.CreateModelOperation(r.Context(), v.Node.ID, req.Model, op)
 		if err != nil {
 			if errors.Is(err, store.ErrActiveModelOp) {
@@ -610,6 +647,22 @@ func (a *API) handleModelOpCancel(w http.ResponseWriter, r *http.Request) {
 	op, err := a.st.GetModelOperation(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "operation not found")
+		return
+	}
+	if a.modelOps != nil {
+		// Queue owns the full cancel matrix: queued → terminal in place,
+		// dispatched/running → abort frame + local finalize.
+		if err := a.modelOps.Cancel(r.Context(), op.ID); err != nil {
+			if errors.Is(err, store.ErrNotFound) || errors.Is(err, modelops.ErrNotActive) {
+				writeErr(w, http.StatusConflict, "operation already finished")
+				return
+			}
+			a.internalErr(w, r, err)
+			return
+		}
+		principal, _ := auth.PrincipalFrom(r.Context())
+		a.st.Audit(r.Context(), principal.Name, "model_op.cancel", op.Model, map[string]string{"operation_id": op.ID})
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	if op.Status != "dispatched" && op.Status != "running" {
@@ -816,13 +869,15 @@ func skippedSuffix(s []string) string {
 
 func (a *API) handleModelOps(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	ops, err := a.st.ListModelOperations(r.Context(), limit)
+	// OpState carries the queue fields (attempt/next_attempt/phase/rate/
+	// indeterminate) flat on the op record — the dashboard needs them.
+	ops, err := a.st.ListModelOpStates(r.Context(), limit)
 	if err != nil {
 		a.internalErr(w, r, err)
 		return
 	}
 	if ops == nil {
-		ops = []*store.ModelOperation{}
+		ops = []*store.OpState{}
 	}
 	writeJSON(w, http.StatusOK, ops)
 }
@@ -1036,6 +1091,22 @@ func (a *API) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		a.internalErr(w, r, err)
 		return
 	}
+	if all == nil {
+		all = map[string]json.RawMessage{}
+	}
+	if _, ok := all["modelops"]; !ok && a.modelOps != nil {
+		// Surface the effective queue bounds so the dashboard can render
+		// the tuning card before the operator first saves them.
+		c := a.modelOps.Config()
+		if raw, err := json.Marshal(map[string]any{
+			"global_concurrent":   c.GlobalConcurrent,
+			"per_node_concurrent": c.PerNodeConcurrent,
+			"queue_max":           c.QueueMax,
+			"max_attempts":        c.MaxAttempts,
+		}); err == nil {
+			all["modelops"] = raw
+		}
+	}
 	writeJSON(w, http.StatusOK, all)
 }
 
@@ -1061,6 +1132,9 @@ func (a *API) handlePutSetting(w http.ResponseWriter, r *http.Request) {
 	}
 	if key == "scheduling" || key == "privacy" {
 		a.reloadSchedulingConfig(r.Context())
+	}
+	if key == "modelops" && a.modelOpsReload != nil {
+		a.modelOpsReload(r.Context())
 	}
 	principal, _ := auth.PrincipalFrom(r.Context())
 	a.st.Audit(r.Context(), principal.Name, "settings.update", key, nil)

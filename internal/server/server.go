@@ -22,6 +22,7 @@ import (
 	"github.com/localmesh/localmesh/internal/server/auth"
 	"github.com/localmesh/localmesh/internal/server/events"
 	"github.com/localmesh/localmesh/internal/server/gateway"
+	"github.com/localmesh/localmesh/internal/server/modelops"
 	"github.com/localmesh/localmesh/internal/server/nodehub"
 	"github.com/localmesh/localmesh/internal/server/scheduler"
 	"github.com/localmesh/localmesh/internal/server/store"
@@ -43,6 +44,7 @@ type Server struct {
 
 	httpSrv   *http.Server
 	announcer *discovery.Announcer
+	modelOps  *modelops.Queue
 }
 
 func New(cfg Config, log *slog.Logger) *Server {
@@ -68,6 +70,12 @@ func (s *Server) Start(ctx context.Context) error {
 	s.hub = nodehub.New(st, s.ev, nodehub.DefaultConfig(), s.log)
 	s.sched = scheduler.New(s.hub, scheduler.DefaultConfig())
 	s.gw = gateway.New(st, s.hub, s.sched, s.ev, s.log)
+	// Persistent bounded model-op queue — submissions are rows first,
+	// wire frames second. Owns dispatch, retry, interruption, progress.
+	s.modelOps = modelops.New(st, nodehub.NewOpDispatcher(s.hub), s.modelOpsConfig(context.Background()), s.log)
+	s.modelOps.SetNotifier(s.ev.Publish)
+	s.hub.SetModelOpsQueue(s.modelOps)
+	go s.modelOps.Run(ctx)
 
 	var tlsCfg *tls.Config
 	var caPEM []byte
@@ -101,6 +109,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	s.admin = adminapi.New(st, s.hub, s.sched, s.ev, caPEM, s.log)
+	s.admin.SetModelOps(s.modelOps, s.ReloadModelOpsConfig)
 	s.admin.SetDiscoveryStatus(s.DiscoveryStatus)
 
 	// A restart abandons all in-flight work: connections, capacity
@@ -369,6 +378,34 @@ func (s *Server) bootstrapSessionKey() {
 	}
 }
 
+// modelOpsConfig reads the persisted "modelops" settings object into a
+// queue Config (defaults apply for absent/invalid fields).
+func (s *Server) modelOpsConfig(ctx context.Context) modelops.Config {
+	cfg := modelops.Config{}
+	var m map[string]any
+	if s.st != nil && s.st.GetSetting(ctx, "modelops", &m) == nil {
+		num := func(k string, d int) int {
+			if f, ok := m[k].(float64); ok && f == float64(int(f)) {
+				return int(f)
+			}
+			return d
+		}
+		cfg.GlobalConcurrent = num("global_concurrent", cfg.GlobalConcurrent)
+		cfg.PerNodeConcurrent = num("per_node_concurrent", cfg.PerNodeConcurrent)
+		cfg.QueueMax = num("queue_max", cfg.QueueMax)
+		cfg.MaxAttempts = num("max_attempts", cfg.MaxAttempts)
+	}
+	return cfg
+}
+
+// ReloadModelOpsConfig pushes the persisted modelops settings into the
+// live queue — called at boot and on PUT /settings/modelops.
+func (s *Server) ReloadModelOpsConfig(ctx context.Context) {
+	if s.modelOps != nil {
+		s.modelOps.UpdateConfig(s.modelOpsConfig(ctx))
+	}
+}
+
 func (s *Server) reloadSchedulerSettings(ctx context.Context) {
 	// Reuse the adminapi reload path by pushing persisted settings into
 	// the scheduler at boot.
@@ -479,6 +516,7 @@ func caFP(ca *tlsx.CA) string {
 }
 
 func (s *Server) Hub() *nodehub.Hub               { return s.hub }
+func (s *Server) ModelOps() *modelops.Queue       { return s.modelOps }
 func (s *Server) Store() *store.DB                { return s.st }
 func (s *Server) Scheduler() *scheduler.Scheduler { return s.sched }
 func (s *Server) CA() *tlsx.CA                    { return s.ca }

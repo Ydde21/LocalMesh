@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/localmesh/localmesh/internal/server/store"
 	"github.com/localmesh/localmesh/internal/testutil"
 	"github.com/localmesh/localmesh/internal/testutil/fakeollama"
 )
@@ -129,12 +130,24 @@ func TestWorkloadOrphanedByRestart(t *testing.T) {
 	if code != 200 || wl["status"] != "completed" {
 		t.Fatalf("completed workload disturbed by sweep: %d %v", code, wl["status"])
 	}
-	opAfter, err := b.srv.Store().GetModelOperation(ctx, op.ID)
-	if err != nil {
-		t.Fatalf("get op on B: %v", err)
-	}
-	if opAfter.Status != "interrupted" {
-		t.Fatalf("orphaned model op status=%q, want interrupted", opAfter.Status)
+	// Restart reconciliation interrupts the orphaned pull, then the
+	// queue's resume path requeues it (attempts remain) — 'queued', not
+	// a leaked 'running' and not a terminal 'interrupted' for a pull.
+	// Reconcile runs inside the queue goroutine, so poll for the settle.
+	var opAfter *store.ModelOperation
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		opAfter, err = b.srv.Store().GetModelOperation(ctx, op.ID)
+		if err != nil {
+			t.Fatalf("get op on B: %v", err)
+		}
+		if opAfter.Status == "queued" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("orphaned model op status=%q, want queued (resumed pull)", opAfter.Status)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
