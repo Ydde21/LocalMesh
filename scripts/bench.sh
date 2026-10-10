@@ -27,8 +27,8 @@ COUNT="${COUNT:-1}"
 BENCHMEM="${BENCHMEM:-1}"
 BENCH="${BENCH:-.}"
 
-memflag=()
-[ "$BENCHMEM" = "1" ] && memflag=(-benchmem)
+memflag=""
+[ "$BENCHMEM" = "1" ] && memflag="-benchmem"
 
 echo "# LocalMesh control-plane benchmarks"
 echo "# $(go version) | $(uname -srm) | $(date +%F)"
@@ -44,7 +44,7 @@ run() {
 	echo
 	echo "== ${pkg}"
 	if ! go test "$pkg" -run '^$' -bench "$BENCH" \
-		-benchtime="$BENCHTIME" -count="$COUNT" -timeout=15m "${memflag[@]}" \
+		-benchtime="$BENCHTIME" -count="$COUNT" -timeout=15m $memflag \
 		| grep -E '^(goos|goarch|pkg|cpu|Benchmark|ok|FAIL|---)' ; then
 		echo "!! $pkg failed" >&2
 		return 1
