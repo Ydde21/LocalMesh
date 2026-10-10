@@ -286,15 +286,37 @@ type OpProgress struct {
 	Status      string `json:"status"` // engine-provided status line
 	Completed   uint64 `json:"completed"`
 	Total       uint64 `json:"total"`
+	// Phase is the engine's phase string verbatim (e.g. Ollama's
+	// "pulling manifest"/"downloading"/"verifying sha256 digest").
+	// RateBPS is the measured byte rate since the previous progress
+	// frame — 0 when not yet measurable, never an estimate.
+	// Indeterminate marks progress whose Total is unknown: Completed
+	// and Total carry no meaningful fraction in that case.
+	Phase         string `json:"phase,omitempty"`
+	RateBPS       uint64 `json:"rate_bps,omitempty"`
+	Indeterminate bool   `json:"indeterminate,omitempty"`
 }
 
-// OpDone completes an operation.
+// OpDone completes an operation. On success it carries the final
+// counters: Completed==Total when the total was measured, otherwise
+// Indeterminate=true and Phase="complete" — a finished op never
+// reports 0/0 as if it were a measurement.
 type OpDone struct {
 	OperationID string `json:"operation_id"`
 	Model       string `json:"model"`
 	Success     bool   `json:"success"`
 	Cancelled   bool   `json:"cancelled,omitempty"` // aborted by admin request
 	Error       string `json:"error,omitempty"`
+	// Retryable marks the failure class: transient engine/transport
+	// errors (dial, 5xx, mid-stream EOF, deadline) may be retried by
+	// the server; permanent errors (model not found, invalid ref) end
+	// the operation. Meaningful only when Success is false.
+	Retryable     bool   `json:"retryable,omitempty"`
+	Completed     uint64 `json:"completed,omitempty"`
+	Total         uint64 `json:"total,omitempty"`
+	Phase         string `json:"phase,omitempty"`
+	RateBPS       uint64 `json:"rate_bps,omitempty"`
+	Indeterminate bool   `json:"indeterminate,omitempty"`
 }
 
 // ModelOpAbort asks the agent to cancel a running pull/delete.

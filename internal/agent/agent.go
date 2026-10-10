@@ -450,21 +450,45 @@ func (a *Agent) runModelOp(ctx context.Context, c *wsjson.Conn, opID, model, op 
 		defer cancel()
 		c.Write(wctx, env)
 	}
+
+	started := time.Now()
+	var lastCompleted, lastTotal uint64
+	var lastPhase string
+	var lastProgT time.Time
+
+	// progress forwards the engine's status verbatim as `phase` and
+	// computes rate_bps from the byte delta since the previous frame —
+	// never synthesized, 0 until a real delta exists. total==0 means the
+	// engine hasn't disclosed a size: reported as indeterminate, not 0%.
 	progress := func(status string, completed, total uint64) {
+		now := time.Now()
+		var rate uint64
+		if !lastProgT.IsZero() && completed > lastCompleted {
+			if dt := now.Sub(lastProgT).Seconds(); dt > 0 {
+				rate = uint64(float64(completed-lastCompleted) / dt)
+			}
+		}
+		lastProgT = now
+		lastCompleted, lastTotal, lastPhase = completed, total, status
 		send(contracts.Envelope{
 			ID: uuid.NewString(), Type: contracts.MsgOpProgress,
 			Payload: contracts.MarshalPayload(contracts.OpProgress{
 				OperationID: opID, Model: model,
-				Status: status, Completed: completed, Total: total,
+				Status: status, Phase: status,
+				Completed: completed, Total: total,
+				RateBPS:       rate,
+				Indeterminate: total == 0,
 			}),
 		})
 	}
 
 	var err error
+	matched := false
 	for _, e := range a.engines {
 		if e.Type() != "ollama" {
 			continue
 		}
+		matched = true
 		switch op {
 		case "pull":
 			err = e.Pull(opCtx, model, progress)
@@ -472,6 +496,11 @@ func (a *Agent) runModelOp(ctx context.Context, c *wsjson.Conn, opID, model, op 
 			err = e.Delete(opCtx, model)
 		}
 		break
+	}
+	if !matched {
+		// No engine to run the op — previously this silently reported
+		// success for work that never happened.
+		err = fmt.Errorf("%w: no ollama engine detected", engine.ErrEngineDown)
 	}
 
 	_, aborted := a.opAborted.LoadAndDelete(opID)
@@ -484,12 +513,32 @@ func (a *Agent) runModelOp(ctx context.Context, c *wsjson.Conn, opID, model, op 
 			errStr = err.Error()
 		}
 	}
+
+	// Final counters: a finished op must never read as 0/0 — success
+	// with a known total reports completed==total; unknown total is
+	// indeterminate with phase "complete", not a fake measurement.
+	done := contracts.OpDone{
+		OperationID: opID, Model: model, Success: success, Cancelled: aborted,
+		Error:     errStr,
+		Completed: lastCompleted, Total: lastTotal,
+		Phase:         lastPhase,
+		Indeterminate: lastTotal == 0,
+	}
+	if el := time.Since(started).Seconds(); el > 0 && lastCompleted > 0 {
+		done.RateBPS = uint64(float64(lastCompleted) / el)
+	}
+	if success {
+		if lastTotal > 0 {
+			done.Completed = lastTotal
+		} else {
+			done.Phase = "complete"
+		}
+	} else if err != nil && !aborted {
+		done.Retryable = engine.Retryable(err)
+	}
 	send(contracts.Envelope{
 		ID: uuid.NewString(), Type: contracts.MsgOpDone,
-		Payload: contracts.MarshalPayload(contracts.OpDone{
-			OperationID: opID, Model: model, Success: success, Cancelled: aborted,
-			Error: errStr,
-		}),
+		Payload: contracts.MarshalPayload(done),
 	})
 	// Refresh model inventory.
 	a.reportCapabilities(ctx, c)
