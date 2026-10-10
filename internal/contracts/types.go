@@ -215,9 +215,10 @@ const (
 	MsgInferChunk = "infer_chunk"       // one streamed token batch (reply)
 	MsgInferEnd   = "infer_end"         // stream finished (reply)
 	MsgInferError = "infer_error"       // stream failed (reply)
-	MsgOpProgress = "model_op_progress" // pull/delete progress
-	MsgOpDone     = "model_op_done"     // pull/delete finished
-	MsgPong       = "pong"
+	MsgOpProgress   = "model_op_progress" // pull/delete progress
+	MsgOpDone       = "model_op_done"     // pull/delete finished
+	MsgUpgradeState = "upgrade_state"     // agent upgrade progress/result
+	MsgPong         = "pong"
 )
 
 // Message types, server -> agent.
@@ -228,6 +229,8 @@ const (
 	MsgModelPull    = "model_pull"
 	MsgModelDelete  = "model_delete"
 	MsgModelOpAbort = "model_op_abort"
+	MsgAgentUpgrade = "agent_upgrade" // install an approved signed release
+	MsgUpgradeAbort = "upgrade_abort" // cancel a not-yet-installed upgrade
 	MsgPing         = "ping"
 	MsgError        = "error"
 )
@@ -330,6 +333,56 @@ type Ping struct {
 }
 type Pong struct {
 	SentAt time.Time `json:"sent_at"`
+}
+
+// AgentUpgrade dispatches one admin-approved release to one agent.
+//
+// TRUST MODEL: the frame carries *where the release is* and *which key
+// must have signed it* — never the key itself. The agent verifies the
+// detached signature against the release public key provisioned in its
+// own config (join flag / update-key command / enrollment field). A
+// compromised control plane can point at a malicious artifact or lie
+// about key_id, but cannot supply the verification key — a
+// signature that doesn't verify against the agent's pinned key is
+// refused.
+//
+// Source is an https:// base URL the agent reads release-manifest.json,
+// SHA256SUMS, signatures and the artifact from; the scheme
+// "localmesh://releases/<release-id>" routes the same fetches through
+// the control plane's authenticated release proxy (for agents without
+// outbound access to the release host).
+type AgentUpgrade struct {
+	OperationID string `json:"operation_id"`
+	ReleaseID   string `json:"release_id"`
+	Version     string `json:"version"`
+	Source      string `json:"source"`
+	KeyID       string `json:"key_id"` // expected signer identity
+	// Protocol bounds from the manifest — the agent double-checks these
+	// itself after verifying the signature; these fields let it reject
+	// an incompatible dispatch before downloading anything.
+	ProtocolVersion    int `json:"protocol_version"`
+	MinAgentProtocol   int `json:"min_agent_protocol"`
+	AllowInsecureHTTP  bool `json:"allow_insecure_http,omitempty"` // loopback mirror only
+}
+
+// UpgradeState is the agent's report on an upgrade operation. Terminal
+// phases: succeeded, failed, rolled_back, aborted. Progress phases:
+// verifying, downloading, staging, installing, restarting,
+// verify_health.
+type UpgradeState struct {
+	OperationID string `json:"operation_id"`
+	Phase       string `json:"phase"`
+	Detail      string `json:"detail,omitempty"`
+	Error       string `json:"error,omitempty"`
+	FromVersion string `json:"from_version,omitempty"`
+	ToVersion   string `json:"to_version,omitempty"`
+}
+
+// UpgradeAbort cancels a dispatched upgrade. Only honored before the
+// install phase — a binary already swapped cannot be un-swapped by a
+// message (that's what rollback is for).
+type UpgradeAbort struct {
+	OperationID string `json:"operation_id"`
 }
 
 // ErrorPayload is a generic wire error.

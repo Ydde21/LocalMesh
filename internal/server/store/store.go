@@ -64,9 +64,14 @@ type Node struct {
 	Metrics       *contracts.Metrics     `json:"metrics,omitempty"`
 	Labels        map[string]string      `json:"labels"`
 	MaxConcurrent int                    `json:"max_concurrent"`
-	LastSeenAt    *time.Time             `json:"last_seen_at,omitempty"`
-	CreatedAt     time.Time              `json:"created_at"`
-	UpdatedAt     time.Time              `json:"updated_at"`
+	// Maintenance: '' in service · 'draining' · 'maintenance' ·
+	// 'updating'. Any non-empty value excludes the node from new work.
+	Maintenance       string     `json:"maintenance,omitempty"`
+	MaintenanceReason string     `json:"maintenance_reason,omitempty"`
+	MaintenanceSince  *time.Time `json:"maintenance_since,omitempty"`
+	LastSeenAt        *time.Time `json:"last_seen_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 func scanNode(row pgx.Row) (*Node, error) {
@@ -74,7 +79,8 @@ func scanNode(row pgx.Row) (*Node, error) {
 	var hw, eng, models, labels, metrics []byte
 	var lastSeen *time.Time
 	err := row.Scan(&n.ID, &n.Name, &n.Status, &hw, &eng, &models, &metrics,
-		&labels, &n.MaxConcurrent, &lastSeen, &n.CreatedAt, &n.UpdatedAt)
+		&labels, &n.MaxConcurrent, &n.Maintenance, &n.MaintenanceReason,
+		&n.MaintenanceSince, &lastSeen, &n.CreatedAt, &n.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -99,7 +105,8 @@ func scanNode(row pgx.Row) (*Node, error) {
 }
 
 const nodeCols = `id, name, status, hardware, engines, models, metrics,
-	labels, max_concurrent, last_seen_at, created_at, updated_at`
+	labels, max_concurrent, maintenance, maintenance_reason,
+	maintenance_since, last_seen_at, created_at, updated_at`
 
 func (d *DB) CreateNode(ctx context.Context, name, tokenHash string, hw contracts.HardwareInfo, maxConcurrent int) (*Node, error) {
 	hwJSON, _ := json.Marshal(hw)
