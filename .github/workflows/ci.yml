@@ -57,12 +57,52 @@ jobs:
       - name: go test
         run: go test -count=1 ./internal/agent/...
       - name: go test -race
-        if: runner.os == 'Linux'
-        run: go test -race -count=1 ./internal/agent/...
-      - name: build + headless smoke (help/status/doctor/version/service-status)
+        # -race needs cgo: gcc on linux/windows, clang on macOS — all
+        # present on the hosted images today. Guarded on Windows so an
+        # image change drops to a loud SKIP line instead of a red job.
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ] && ! command -v gcc >/dev/null 2>&1; then
+            echo "SKIP: race detector requires cgo+gcc; no gcc on this windows image"
+            exit 0
+          fi
+          go test -race -count=1 ./internal/agent/...
+      - name: build + headless + runtime smoke (service lifecycle, doctor contract, config round-trip)
         # bash resolves to Git Bash on windows runners.
         shell: bash
         run: bash scripts/ci-agent-smoke.sh
+
+  # Real end-to-end on shipped binaries: postgres service + server +
+  # fakeollama + agent — enroll → admin approve → WS connect →
+  # capability report → /v1/chat/completions through the gateway.
+  # The single highest-fidelity job in the workflow: it exercises the
+  # wire protocol, migrations, and the admin API, not just compile+CLI.
+  agent-integration:
+    name: agent-integration (linux)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: localmeshtest
+          POSTGRES_DB: localmesh
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d localmesh"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      LOCALMESH_DATABASE_URL: postgres://postgres:localmeshtest@127.0.0.1:5432/localmesh?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: e2e smoke — enroll→approve→connect→infer on real binaries
+        run: bash scripts/ci-e2e-smoke.sh
 
   web:
     runs-on: ubuntu-latest

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // Fixture-driven coverage of the nvidia-smi telemetry path. Two layers:
@@ -48,15 +49,33 @@ func TestParseNvidiaSMILoadTable(t *testing.T) {
 		{"neither field", "N/A, N/A\n", 0, 0, false, false},
 		{"mixed healthy and partial", "55, N/A\n12, 1024\n", 33.5, 1024 * mib, true, true},
 		{"util from one of two GPUs", "N/A, 512\n40, N/A\n", 40, 512 * mib, true, true},
+		{"eight-GPU node", "5, 1024\n7, 1024\n9, 1024\n11, 1024\n13, 1024\n15, 1024\n17, 1024\n21, 1024\n",
+			12.25, 8192 * mib, true, true},
+		{"partial across four GPUs", "50, N/A\nN/A, 2048\n30, 4096\nN/A, N/A\n",
+			40, 6144 * mib, true, true},
 		// Malformed / absent output — everything unmeasured.
 		{"empty", "", 0, 0, false, false},
 		{"blank line", "\n", 0, 0, false, false},
 		{"driver error text", "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.\n",
 			0, 0, false, false},
+		{"no devices found", "No devices were found\n", 0, 0, false, false},
 		{"one column", "37\n", 0, 0, false, false},
 		{"three columns", "37, 512, extra\n", 0, 0, false, false},
 		{"trailing comma", "37,\n", 37, 0, true, false}, // empty vram field → unmeasured
+		{"empty util field", ", 512\n", 0, 512 * mib, false, true},
 		{"non-numeric", "a, b\n", 0, 0, false, false},
+		// Values that parse as floats but are physically impossible —
+		// nvidia-smi reports util 0-100% and MiB counts. Negative or
+		// huge fields would convert to platform-dependent uint64
+		// garbage (0 on arm64, 2^63 on amd64); bounds-checking drops
+		// them so they are unmeasured, not nonsense data.
+		{"negative values", "-1, -512\n", 0, 0, false, false},
+		{"negative vram only", "50, -512\n", 50, 0, true, false},
+		{"util over 100", "150, 512\n", 0, 512 * mib, false, true},
+		{"huge vram rejected", "50, 1e30\n", 50, 0, true, false},
+		{"NaN fields", "NaN, NaN\n", 0, 0, false, false},
+		{"Inf fields", "+Inf, +Inf\n", 0, 0, false, false},
+		{"negative line among good", "60, 1024\n-5, -1\n", 60, 1024 * mib, true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,6 +103,11 @@ func TestHelperProcess(t *testing.T) {
 	if os.Getenv(fakeSMIEnv) != "1" {
 		return
 	}
+	// FAKE_SMI_SLEEP_MS makes the fake hang — exercises the 4s
+	// nvidia-smi deadline inside sampleGPU.
+	if ms, _ := strconv.Atoi(os.Getenv("FAKE_SMI_SLEEP_MS")); ms > 0 {
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+	}
 	fmt.Fprint(os.Stdout, os.Getenv("FAKE_SMI_STDOUT"))
 	fmt.Fprint(os.Stderr, os.Getenv("FAKE_SMI_STDERR"))
 	code, _ := strconv.Atoi(os.Getenv("FAKE_SMI_EXIT"))
@@ -94,6 +118,13 @@ func TestHelperProcess(t *testing.T) {
 // stdout=="" and exit==0 still produce a runnable command; pass
 // missingBinary to simulate ENOENT instead.
 func stubCommandContext(t *testing.T, stdout, stderr string, exitCode int, missingBinary bool) {
+	t.Helper()
+	stubCommandContextEx(t, stdout, stderr, exitCode, 0, missingBinary)
+}
+
+// stubCommandContextEx additionally lets the fake sleep before
+// answering, to exercise the sampling deadline.
+func stubCommandContextEx(t *testing.T, stdout, stderr string, exitCode, sleepMS int, missingBinary bool) {
 	t.Helper()
 	old := commandContext
 	if missingBinary {
@@ -111,6 +142,7 @@ func stubCommandContext(t *testing.T, stdout, stderr string, exitCode int, missi
 				"FAKE_SMI_STDOUT="+stdout,
 				"FAKE_SMI_STDERR="+stderr,
 				"FAKE_SMI_EXIT="+strconv.Itoa(exitCode),
+				"FAKE_SMI_SLEEP_MS="+strconv.Itoa(sleepMS),
 			)
 			return cmd
 		}
@@ -179,5 +211,63 @@ func TestMetricsGPUUnknownIsNotZero(t *testing.T) {
 	}
 	if m.GPUUtilPercent != 0 || m.GPUVRAMUsedBytes != 0 {
 		t.Errorf("unmeasured fields should stay zero: %+v", m)
+	}
+}
+
+func TestSampleGPUNoDevicesFound(t *testing.T) {
+	// Driver loaded but no GPUs attached (or all claimed by other
+	// containers): some nvidia-smi builds print this to stdout and
+	// exit 0 — Output() succeeds but nothing is measurable.
+	stubCommandContext(t, "No devices were found\n", "", 0, false)
+	util, vram, utilOK, vramOK := sampleGPU(t.Context())
+	if util != 0 || vram != 0 || utilOK || vramOK {
+		t.Fatalf("got (%v,%v,%v,%v), want all zero/false", util, vram, utilOK, vramOK)
+	}
+}
+
+func TestSampleGPUNoisyStderr(t *testing.T) {
+	// Driver warnings on stderr must not corrupt CSV parsing — only
+	// stdout is fed to the parser.
+	stubCommandContext(t, "42, 2048\n",
+		"Warning: NVML initialization found unexpected issues", 0, false)
+	util, vram, utilOK, vramOK := sampleGPU(t.Context())
+	if !utilOK || !vramOK || util != 42 || vram != 2048*(1<<20) {
+		t.Fatalf("got (%v,%v,%v,%v), want (42,%d,true,true)",
+			util, vram, utilOK, vramOK, 2048*(1<<20))
+	}
+}
+
+func TestSampleGPUMultiDeviceExec(t *testing.T) {
+	// Eight-device CSV through the real exec path — exercises the
+	// aggregate-averaging path end to end, not just the parser.
+	stubCommandContext(t,
+		"10, 512\n20, 512\n30, 512\n40, 512\n50, 512\n60, 512\n70, 512\n90, 512\n",
+		"", 0, false)
+	util, vram, utilOK, vramOK := sampleGPU(t.Context())
+	if !utilOK || !vramOK {
+		t.Fatal("expected both measured")
+	}
+	if util != 46.25 {
+		t.Errorf("util = %v, want 46.25 (mean over 8 devices)", util)
+	}
+	if vram != 4096*(1<<20) {
+		t.Errorf("vram = %v, want 4096 MiB summed", vram)
+	}
+}
+
+func TestSampleGPUHang(t *testing.T) {
+	// A wedged nvidia-smi that never answers must not stall the
+	// heartbeat: sampleGPU's 4s deadline kills the subprocess and
+	// reports unmeasured. Sleeps well past the deadline to prove the
+	// parent returned first.
+	stubCommandContextEx(t, "50, 1024\n", "", 0, 10_000, false)
+	start := time.Now()
+	util, vram, utilOK, vramOK := sampleGPU(t.Context())
+	elapsed := time.Since(start)
+	if util != 0 || vram != 0 || utilOK || vramOK {
+		t.Fatalf("got (%v,%v,%v,%v), want all zero/false", util, vram, utilOK, vramOK)
+	}
+	if elapsed > 8*time.Second {
+		t.Fatalf("sampleGPU took %v — deadline not enforced", elapsed)
 	}
 }

@@ -127,6 +127,12 @@ func trailingCounter(line string) (uint64, bool) {
 // memory.used --format=csv,noheader,nounits` output: one line per GPU,
 // "util%, MiB". util is averaged across GPUs, vram summed. Each flag is
 // true only when at least one GPU reported that field.
+//
+// Fields are range-checked: util must be 0-100%, vram 0 to 1 PiB (MiB).
+// Bounds do double duty — they reject NaN/Inf/negatives (NaN fails every
+// comparison) and keep the float→uint64 conversion in range. Without
+// them, malformed output converts to platform-dependent garbage
+// (0 on arm64, 2^63 on amd64) and gets reported as measured data.
 func parseNvidiaSMILoad(out string) (util float64, vram uint64, utilOK, vramOK bool) {
 	var nU, nV int
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
@@ -134,11 +140,11 @@ func parseNvidiaSMILoad(out string) (util float64, vram uint64, utilOK, vramOK b
 		if len(parts) != 2 {
 			continue
 		}
-		if u, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64); err == nil {
+		if u, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64); err == nil && u >= 0 && u <= 100 {
 			util += u
 			nU++
 		}
-		if v, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64); err == nil {
+		if v, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64); err == nil && v >= 0 && v <= (1<<30) {
 			vram += uint64(v * (1 << 20))
 			nV++
 		}

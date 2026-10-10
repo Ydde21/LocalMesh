@@ -41,6 +41,55 @@ func TestParseMeminfoGarbage(t *testing.T) {
 	}
 }
 
+// Memory-pressure boundaries: "available" is a *measurement*, so the
+// parser must report extreme values honestly — including zero, which is
+// a real "fully exhausted" reading, not a missing one.
+func TestParseMeminfoPressure(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        string
+		wantTotal uint64
+		wantAvail uint64
+		wantOK    bool
+	}{
+		// The kernel reports 0 available under maximum reclaim
+		// pressure — a valid, schedulable signal: the node has no
+		// headroom. Distinct from unmeasured.
+		{"zero available", "MemTotal:       16384000 kB\nMemAvailable:          0 kB\n",
+			16384000 * 1024, 0, true},
+		{"one kB left", "MemTotal:       16384000 kB\nMemAvailable:          1 kB\n",
+			16384000 * 1024, 1024, true},
+		// Weird-but-consistent: kernels under heavy cgroup pressure can
+		// report avail > total momentarily on old versions; the parser
+		// passes values through — classification lives in the sampler.
+		{"avail exceeds total", "MemTotal:       16384000 kB\nMemAvailable:   20000000 kB\n",
+			16384000 * 1024, 20000000 * 1024, true},
+		// 512 GiB+ nodes: no truncation.
+		{"huge total", "MemTotal:       536870912 kB\nMemAvailable:   268435456 kB\n",
+			536870912 * 1024, 268435456 * 1024, true},
+		// Later field wins — matches the sequential-scan semantics.
+		{"duplicate fields last-wins", "MemTotal:       16384000 kB\nMemAvailable:    8192000 kB\nMemAvailable:    4096000 kB\n",
+			16384000 * 1024, 4096000 * 1024, true},
+		{"missing unit still parses", "MemTotal:       16384000\nMemAvailable:    8192000 kB\n",
+			16384000 * 1024, 8192000 * 1024, true},
+		// Partial reads still return what parsed; ok=false is what the
+		// caller must gate on.
+		{"avail without total", "MemAvailable:    8192000 kB\n",
+			0, 8192000 * 1024, false},
+		{"negative field rejected", "MemTotal:       -1024 kB\nMemAvailable:    8192000 kB\n",
+			0, 8192000 * 1024, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			total, avail, ok := parseMeminfo(tc.in)
+			if ok != tc.wantOK || total != tc.wantTotal || avail != tc.wantAvail {
+				t.Errorf("parseMeminfo(%q) = (%d, %d, %v), want (%d, %d, %v)",
+					tc.in, total, avail, ok, tc.wantTotal, tc.wantAvail, tc.wantOK)
+			}
+		})
+	}
+}
+
 const procStatFixture = "cpu  4705 356 5844 369900 1966 0 234 0 0 0\ncpu0 1000 100 1500 90000 500 0 60 0 0 0\n"
 
 func TestParseCPUStatLine(t *testing.T) {
@@ -83,6 +132,26 @@ func TestCPUDeltaPercent(t *testing.T) {
 	}
 	if _, ok := cpuDeltaPercent(a, a); ok {
 		t.Fatal("expected ok=false for identical samples")
+	}
+}
+
+func TestCPUDeltaPercentEdge(t *testing.T) {
+	// Total advanced but busy counter reset (jiffies wrap/CPU
+	// hot-unplug): cannot produce an honest delta → unmeasured.
+	a, _ := parseCPUStatLine("cpu  100 0 100 700 100 0 0 0")
+	wrap, _ := parseCPUStatLine("cpu  10 0 10 800 100 0 0 0")
+	if _, ok := cpuDeltaPercent(a, wrap); ok {
+		t.Fatal("expected ok=false when busy counter regressed")
+	}
+	// 100% busy window: every elapsed jiffy was busy → 100, not a clamp.
+	busy, _ := parseCPUStatLine("cpu  300 0 300 700 100 0 0 0")
+	if p, ok := cpuDeltaPercent(a, busy); !ok || p != 100 {
+		t.Fatalf("full busy = %v,%v want 100,true", p, ok)
+	}
+	// Idle window: total advanced, busy did not → a genuine 0%.
+	idle, _ := parseCPUStatLine("cpu  100 0 100 900 100 0 0 0")
+	if p, ok := cpuDeltaPercent(a, idle); !ok || p != 0 {
+		t.Fatalf("idle = %v,%v want 0,true", p, ok)
 	}
 }
 
@@ -151,6 +220,28 @@ func TestParseVMStatBad(t *testing.T) {
 		if _, ok := parseVMStat(s); ok {
 			t.Fatalf("expected ok=false for %q", s)
 		}
+	}
+}
+
+func TestParseVMStatPressure(t *testing.T) {
+	// Zero free+inactive is a REAL reading under full memory pressure
+	// (macOS compresses/swaps rather than reporting nothing) — ok must
+	// stay true: 0 available is schedulable signal, not "unmeasured".
+	avail, ok := parseVMStat("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n" +
+		"Pages free: 0.\nPages inactive: 0.\n")
+	if !ok || avail != 0 {
+		t.Fatalf("full pressure = (%d, %v), want (0, true)", avail, ok)
+	}
+	// Intel-Mac 4 KiB page size path (vs the 16 KiB fixture).
+	avail, ok = parseVMStat("Mach Virtual Memory Statistics: (page size of 4096 bytes)\n" +
+		"Pages free: 1000.\nPages inactive: 500.\n")
+	if !ok || avail != 1500*4096 {
+		t.Fatalf("4k pages = (%d, %v), want (%d, true)", avail, ok, 1500*4096)
+	}
+	// Page size present but no free counter → unmeasured, not zero.
+	if _, ok = parseVMStat("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n" +
+		"Pages inactive: 100.\n"); ok {
+		t.Fatal("expected ok=false without Pages free")
 	}
 }
 
