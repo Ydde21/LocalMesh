@@ -134,6 +134,16 @@ live-reloaded on PUT):
 | DELETE | `/nodes/{id}`          | delete node record |
 | POST   | `/nodes/{id}/revoke`   | revoke — disconnects the agent and refuses reconnects |
 | POST   | `/nodes/{id}/reinstate`| undo a revoke |
+| GET    | `/nodes/{id}/events`   | connection history, newest first (`?limit=`, max 500). Rows: `{id, node_id, event, reason, agent_version, created_at}` where `event` is `connected`/`disconnected` and `reason` explains the drop (`replaced by new connection`, `control plane shutting down`, `connection closed by agent`, a revoke reason). |
+
+### Diagnostics
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/diagnostics` | Redacted operational snapshot for troubleshooting (readonly scope): `{generated_at, server_version, protocol, min_agent_protocol, uptime_seconds, cluster_name, discovery, control_plane, database, tls, nodes, modelops_config, modelops_recent_status, model_operations, recent_audit}`. `control_plane` carries the single-active ownership row (`epoch` is the fencing token — see `docs/reliability.md`); `tls` carries CA + serving-cert expiry. No credential material is ever serialized — credentials exist only as SHA-256 hashes at rest. |
+
+All responses also echo `X-Request-ID` (or mint one when the caller
+doesn't send it) — it appears in server logs as `req=<id>`.
 
 ### Enrollment tokens & requests
 

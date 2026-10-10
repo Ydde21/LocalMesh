@@ -12,7 +12,7 @@ the behavior stays honest when the code changes.
 | **Control-plane crash** (SIGKILL / host loss) | Same as above, minus the graceful drain: sockets die with the process, the next boot reconciles orphans. | same |
 | **Agent disconnect/crash** | Hub `unregister` fails all pending dispatches for that conn, marks its in-flight model ops `interrupted`, node flips `online=false`. Running workloads fail `node disconnected`; the reconcile loop backstops strays after a 90s grace (30s tick). — `nodehub/conn.go`, `server.go reconcileLoop` | in-flight work on that node |
 | **Agent restart** | `agent.Run` redials with backoff 1s → 30s cap ±20% jitter; gives up only after 3 consecutive auth rejections (revoked/deleted node). On reconnect it re-reports capabilities and is schedulable again — same node identity, no re-enrollment. | none |
-| **Postgres blip** | pgx pool reconnects when the DB returns. While down: new enrolls/connects/dispatches fail (500), heartbeats can't persist, admin API 500s — but existing agent websockets stay up. `store.Connect` fails boot if the DB is unreachable. | requests during the blip |
+| **Postgres blip** | pgx pool reconnects when the DB returns. While down: new enrolls/connects/dispatches fail (500), heartbeats can't persist, admin API 500s — but existing agent websockets stay up. `store.Connect` fails boot if the DB is unreachable. **Ownership:** if the blip kills the advisory-lock session, the control plane fences itself and exits (see "Single-active ownership" below) — a supervisor restarts it, it re-acquires, and resumes. | requests during the blip |
 | **Web/dashboard restart** | The BFF is stateless: session validity lives in the `session_revocations` table (logout survives restarts), the cookie secret is `session.key` in the data dir, the admin key is `bootstrap-admin.key` or `LOCALMESH_API_KEY`. SSE clients resubscribe; no dashboard state is lost. | none |
 
 Proven by: `TestAgentReconnectsAfterServerRestart`,
@@ -36,6 +36,35 @@ session_revocations, settings, audit_log.
 **Durable (`LOCALMESH_DATA_DIR`):** cluster CA (`ca.pem`,
 `ca-key.pem`), server cert, `session.key`, bootstrap files. Losing the
 CA forces every agent to re-join — see `docs/backup-recovery.md`.
+
+## Single-active control-plane ownership (v0.6)
+
+Exactly one control-plane process may be authoritative over a database
+at a time. The mechanism:
+
+- A dedicated Postgres session holds `pg_advisory_lock`. Process death
+  or a dead DB connection releases it automatically — no lease-expiry
+  guessing for crash recovery.
+- On acquisition the owner bumps `control_plane_lock.epoch`. That epoch
+  is a **fencing token**: model-op claims carry it and match zero rows
+  once a successor takes over — a stale process cannot dispatch work
+  even in the gap before it notices it lost the lock.
+- A heartbeat on the lock session detects loss; on `Lost` the process
+  stops the model-ops queue, closes all node connections, fails
+  in-flight workloads, and exits (`Start` returns a non-nil error) so a
+  supervisor restarts it into a fresh lock-acquiring state.
+- A second control plane attempting startup fails **clearly** — the
+  error names the incumbent's owner id, epoch, start time, and
+  heartbeat age — rather than silently co-owning the cluster and
+  double-dispatching operations.
+
+Proven by: `TestOwnershipContentionAndHandover`,
+`TestOwnershipCrashRecovery`, `TestOwnershipFencesModelOpClaims`,
+`TestOwnershipLostOnConnDeath`, `TestSecondServerRefused`
+(`internal/server/ownership_test.go`).
+
+Node connection churn is recorded in `node_events` (`GET
+/nodes/{id}/events`) — the audit trail for disconnect reasons.
 
 **Volatile (never persists):** hub connections, in-flight dispatches,
 loaded/metrics freshness (re-reported within one heartbeat, ~10s), SSE
