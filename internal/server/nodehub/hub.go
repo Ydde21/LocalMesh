@@ -167,10 +167,15 @@ func (h *Hub) Snapshot(ctx context.Context) ([]View, error) {
 // credential was already validated by the HTTP handler; the first frame
 // must be a hello.
 func (h *Hub) HandleConnection(ctx context.Context, c *wsjson.Conn, node *store.Node) {
-	c.SetReadLimit(1 << 20)
+	// 4MiB: capability reports carry the full model inventory — a node
+	// with hundreds of models can exceed the old 1MiB and get dropped.
+	c.SetReadLimit(4 << 20)
 
-	// Read hello.
-	env, err := c.Read(ctx)
+	// Read hello — bounded: a peer that accepts the upgrade but never
+	// sends hello would otherwise park this handler forever.
+	hctx, hcancel := context.WithTimeout(ctx, 15*time.Second)
+	env, err := c.Read(hctx)
+	hcancel()
 	if err != nil {
 		h.log.Debug("node hello read failed", "node", node.Name, "err", err)
 		return
@@ -242,8 +247,9 @@ func (h *Hub) HandleConnection(ctx context.Context, c *wsjson.Conn, node *store.
 func (h *Hub) register(id string, nc *conn) {
 	h.mu.Lock()
 	if old, ok := h.conns[id]; ok {
-		// Duplicate connection for the same node: kick the stale one.
-		go old.close(websocket.StatusNormalClosure, "replaced by new connection")
+		// Duplicate connection for the same node: kick the stale one —
+		// immediately, no 5s close-handshake stall on a dead peer.
+		go old.closeNow(websocket.StatusNormalClosure, "replaced by new connection")
 	}
 	h.conns[id] = nc
 	h.mu.Unlock()
@@ -265,7 +271,7 @@ func (h *Hub) Disconnect(nodeID, reason string) {
 	c, ok := h.conns[nodeID]
 	h.mu.RUnlock()
 	if ok {
-		c.close(websocket.StatusPolicyViolation, reason)
+		c.closeNow(websocket.StatusPolicyViolation, reason)
 	}
 }
 
@@ -296,7 +302,10 @@ func (h *Hub) CloseAll(reason string) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for _, c := range h.conns {
-		c.close(websocket.StatusGoingAway, reason)
+		// CloseNow: no per-conn handshake stall — N dead peers can't
+		// pile 5s waits inside this lock. The reason is recorded on the
+		// conn for node_events; agents see EOF and reconnect.
+		c.closeNow(websocket.StatusGoingAway, reason)
 	}
 }
 

@@ -200,6 +200,14 @@ func (c *conn) close(code websocket.StatusCode, reason string) {
 	c.ws.Close(code, reason)
 }
 
+// closeNow drops the conn without the close handshake — for forced
+// disconnects (revoke/dup-kick/ownership loss) where waiting ~5s for a
+// close echo just delays fencing and cleanup.
+func (c *conn) closeNow(code websocket.StatusCode, reason string) {
+	c.closeReason.Store(reason)
+	c.ws.CloseNow()
+}
+
 // pingLoop keeps the ws connection alive and measures RTT. Runs until ctx
 // is done or the ping fails.
 func (c *conn) pingLoop(ctx context.Context, interval time.Duration, done <-chan struct{}) {
