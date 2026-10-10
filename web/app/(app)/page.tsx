@@ -7,6 +7,7 @@ import { Panel, Stat, Meter, Empty } from "@/components/ui";
 import { NodeBadge } from "@/components/status";
 import { ActivityFeed } from "@/components/activity-feed";
 import { MetricsChart } from "@/components/metrics-chart";
+import { OnboardingChecklist } from "@/components/onboarding";
 import { ArrowRight } from "lucide-react";
 
 export default function OverviewPage() {
@@ -37,6 +38,9 @@ export default function OverviewPage() {
           </p>
         </div>
       </header>
+
+      {/* First-run setup checklist — self-hides once the cluster is live */}
+      <OnboardingChecklist />
 
       {/* Top stats */}
       <div className={`grid grid-cols-2 gap-3 ${opsTotal > 0 ? "md:grid-cols-5" : "md:grid-cols-4"}`}>

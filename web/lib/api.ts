@@ -141,6 +141,34 @@ export function useSettings() {
   return useSWR<Record<string, unknown>>("/settings", fetcher);
 }
 
+// Connection lifecycle history for one node (newest first). v0.6+ — a
+// 404 (node gone or older server) shouldn't loop retries; consumers
+// render nothing when there's no data.
+export function useNodeEvents(id: string | null, limit = 10) {
+  return useSWR<T.NodeEvent[]>(
+    id ? `/nodes/${id}/events?limit=${limit}` : null,
+    fetcher,
+    { shouldRetryOnError: false, errorRetryCount: 0, refreshInterval: 10000 }
+  );
+}
+
+// Redacted operational snapshot for support/bug reports. v0.6+ — 404s on
+// older servers, so no retries; UI gates on `data` being present.
+export function useDiagnostics() {
+  return useSWR<T.Diagnostics>("/diagnostics", fetcher, {
+    shouldRetryOnError: false,
+    errorRetryCount: 0,
+  });
+}
+
+// Just "has the cluster ever served a request?" — the onboarding
+// checklist needs existence, not rows, so fetch a single record.
+export function useHasWorkloads() {
+  return useSWR<T.Workload[]>("/workloads?limit=1", fetcher, {
+    refreshInterval: 10000,
+  });
+}
+
 export function useAudit() {
   return useSWR<T.AuditEntry[]>("/audit?limit=50", fetcher, {
     refreshInterval: 8000,
