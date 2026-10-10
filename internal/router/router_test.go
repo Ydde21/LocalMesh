@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -97,9 +98,11 @@ func waitFor(t *testing.T, what string, fn func() bool) {
 }
 
 func TestRouterRoutesToReadyBackend(t *testing.T) {
-	aReady, bReady := 200, 503
-	a := newFakeCP(t, func() int { return aReady })
-	b := newFakeCP(t, func() int { return bReady })
+	var aReady, bReady atomic.Int32
+	aReady.Store(200)
+	bReady.Store(503)
+	a := newFakeCP(t, func() int { return int(aReady.Load()) })
+	b := newFakeCP(t, func() int { return int(bReady.Load()) })
 	addr := startRouter(t, []string{a.srv.URL, b.srv.URL}, time.Second)
 
 	waitFor(t, "election", func() bool {
@@ -116,7 +119,8 @@ func TestRouterRoutesToReadyBackend(t *testing.T) {
 	_ = body
 
 	// A fails → B promotes → same router address serves B.
-	aReady, bReady = 503, 200
+	aReady.Store(503)
+	bReady.Store(200)
 	waitFor(t, "failover", func() bool {
 		code, _ := getThrough(t, addr, "/readyz")
 		return code == 200
@@ -128,15 +132,16 @@ func TestRouterRoutesToReadyBackend(t *testing.T) {
 }
 
 func TestRouterHoldsConnectionsAcrossPromotionGap(t *testing.T) {
-	ready := 503 // nothing ready — accepted conns must be held, not refused
-	cp := newFakeCP(t, func() int { return ready })
+	var ready atomic.Int32
+	ready.Store(503) // nothing ready — accepted conns must be held, not refused
+	cp := newFakeCP(t, func() int { return int(ready.Load()) })
 	addr := startRouter(t, []string{cp.srv.URL}, 4*time.Second)
 
 	done := make(chan int, 1)
 	go func() { code, _ := getThrough(t, addr, "/readyz"); done <- code }()
 
 	time.Sleep(300 * time.Millisecond) // mid-gap: conn is parked
-	ready = 200                        // promotion completes
+	ready.Store(200)                   // promotion completes
 	select {
 	case code := <-done:
 		if code != 200 {
@@ -170,7 +175,7 @@ func TestRouterDeterministicPrimaryFirst(t *testing.T) {
 	cpB := newFakeCP(t, func() int { return 200 })
 	r, err := New(discardLog(), Options{
 		Listen: "127.0.0.1:0", Backends: []string{cpA.srv.URL, cpB.srv.URL},
-		Interval: 20 * time.Millisecond,
+		Interval: 20 * time.Millisecond, Rise: 1, // single probeAll elects
 	})
 	if err != nil {
 		t.Fatal(err)
