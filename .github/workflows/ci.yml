@@ -35,6 +35,35 @@ jobs:
           GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/localmesh-agent
           GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/localmesh-agent
 
+  # Runs the real agent binary headless on each OS and vets/tests the
+  # agent packages natively. This is a smoke gate, not fleet validation:
+  # runners have no GPUs and no heterogeneous hardware — NVIDIA code is
+  # covered by parser/exec-seam unit tests instead. See docs/ci.md.
+  agent-smoke:
+    name: agent-smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet
+        run: go vet ./internal/agent/...
+      - name: go test
+        run: go test -count=1 ./internal/agent/...
+      - name: go test -race
+        if: runner.os == 'Linux'
+        run: go test -race -count=1 ./internal/agent/...
+      - name: build + headless smoke (help/status/doctor/version/service-status)
+        # bash resolves to Git Bash on windows runners.
+        shell: bash
+        run: bash scripts/ci-agent-smoke.sh
+
   web:
     runs-on: ubuntu-latest
     defaults:
