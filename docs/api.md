@@ -107,11 +107,22 @@ Auth: `admin` for writes; `readonly`+ for `GET`s. Prefix `/api/v1`.
 | GET    | `/events`           | SSE stream of cluster events |
 | GET    | `/audit?limit=`     | audit log entries |
 | GET    | `/settings`         | all settings (scheduling config etc.) |
-| PUT    | `/settings/{key}`   | replace a setting — body is the raw JSON value; keys: `scheduling`, `privacy`, `cluster` |
+| PUT    | `/settings/{key}`   | replace a setting — body is the raw JSON value; keys: `scheduling`, `privacy`, `cluster`, `modelops` |
+| GET    | `/discovery/status` | mDNS announce state: `{enabled, advertising, cluster_name, ca_fingerprint}` |
 
 Mutable `scheduling` keys include `queue_timeout_ms` (1–300000),
 `max_attempts` (1–10), `heartbeat_timeout_seconds` (10–600 — live-tunes
 the node staleness window used by scheduling eligibility), and `weights`.
+
+Mutable `modelops` keys (bounds for the model-operation queue —
+live-reloaded on PUT):
+
+| Key                   | Range | Default | Meaning |
+|-----------------------|-------|---------|---------|
+| `global_concurrent`   | 1–16  | 2       | max in-flight pull/delete ops cluster-wide |
+| `per_node_concurrent` | 1–4   | 1       | max in-flight ops per node |
+| `queue_max`           | 8–256 | 64      | bound on the queued backlog (`429` when full) |
+| `max_attempts`        | 0–8   | 3       | retry attempts for retryable pull failures |
 
 ### Nodes
 
@@ -141,14 +152,26 @@ the node staleness window used by scheduling eligibility), and `weights`.
 |--------|------|-------------|
 | GET    | `/models`             | cluster-wide model inventory (`node_ids`, `node_names`, `loaded_on`) |
 | GET    | `/models/placement`   | per-model placement view (see below) |
-| POST   | `/models/pull`        | `{model, node_ids?}` — dispatch pull to selected or all eligible online nodes |
-| POST   | `/models/delete`      | `{model, node_ids?, force?}` — same for deletion; see last-replica guard below |
-| GET    | `/model-operations`   | pull/delete operation status + progress |
-| POST   | `/model-operations/{id}/cancel` | abort an in-flight pull/delete (`204`); finished ops return `409` |
+| POST   | `/models/pull`        | `{model, node_ids?, priority?}` — enqueue pull for selected or all eligible online nodes |
+| POST   | `/models/delete`      | `{model, node_ids?, force?, priority?}` — same for deletion; see last-replica guard below |
+| GET    | `/model-operations`   | pull/delete operation status + queue/progress/retry state |
+| POST   | `/model-operations/{id}/cancel` | cancel a `queued`/`interrupted` op or abort a `dispatched`/`running` one (`204`); finished ops return `409` |
 
-Model-operation states: `dispatched` → `running` → `succeeded` | `failed` |
-`cancelled` | `interrupted` (node vanished mid-op). Concurrent ops on the
-same node+model are deduplicated — a conflicting dispatch returns `409`.
+Model operations go through a persistent bounded queue (see the
+`modelops` settings above). States: `queued` (persisted, awaiting a
+slot) → `dispatched` → `running` → `succeeded` | `failed` | `cancelled`
+| `interrupted` (node vanished mid-op; retryable pulls resume to
+`queued`, deletes stay `interrupted`). Concurrent ops on the same
+node+model are deduplicated (`409`); a full queue returns `429`.
+Queued/interrupted ops survive control-plane restarts — restart
+reconciles leftovers and resumes retryable pulls.
+
+Each op carries queue fields: `attempt`, `max_attempts`,
+`next_attempt_at`, `last_error`, `priority`, `finished_at`, and honest
+progress fields — `phase` (engine phase string), `rate_bps` (measured
+byte rate, 0 when unknown), `indeterminate` (total unknown — `completed`
+and `total` carry no fraction; a `0/0` op is never meaningful progress).
+
 Model identifiers are validated (`namespace/name:tag` shape) before ever
 reaching an agent.
 

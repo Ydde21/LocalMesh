@@ -62,6 +62,24 @@ localmesh-agent join \
   -token lme_...
 ```
 
+On the same LAN, `join -discover` finds the control plane itself —
+no `-server` needed:
+
+```bash
+localmesh-agent join -discover -token lme_...
+```
+
+The agent browses mDNS for `_localmesh._tcp` advertisements, prints each
+discovered cluster with its CA fingerprint, and asks you to pick one
+when several answer (`-discover-instance <name>` selects directly,
+`-discover-timeout` sets the browse window). Discovery only locates the
+endpoint — trust is still established by CA fingerprint verification and
+admin approval. mDNS is single-subnet multicast; across routed networks
+or VPNs keep using `-server`. In Docker's NAT'd networking the container
+advertises only inside the docker network — LAN discovery needs a Linux
+host with `network_mode: host` or a bare-metal install. Disable with
+`LOCALMESH_DISCOVERY=off`.
+
 Flags:
 
 - `-name <name>` — display name (default: hostname)
