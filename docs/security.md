@@ -1,0 +1,215 @@
+# Security model
+
+LocalMesh assumes the machines it runs on are yours but the network
+between them is not. This document covers the trust model, credential
+handling, and the defaults designed to keep data on your hardware.
+
+## Threat model in one paragraph
+
+The control plane is the root of trust: it authenticates every caller,
+approves every device, and decides what runs where. Agents are trusted
+only after an administrator explicitly approves them. Anything the
+control plane stores must be non-replayable — a database dump should
+reveal metadata, never usable secrets or user data.
+
+## Transport
+
+- The control plane generates an **internal CA** at first boot and serves
+  TLS 1.3 with a cert it issues itself. Everything — gateway, admin API,
+  agent WebSocket — shares that listener.
+- Agents bootstrap trust by fetching `/api/v1/ca.pem`, optionally pinned
+  with `-ca-fingerprint sha256:…` (TOFU otherwise, with a loud warning).
+  The fetched CA is persisted and enforced on every reconnect.
+- `LOCALMESH_DEV_INSECURE_HTTP` disables TLS entirely. It is for local
+  development only — never expose it.
+- Behind a reverse proxy you may terminate TLS externally; keep the
+  proxy→server hop on localhost or re-encrypt it.
+
+## Credentials
+
+| Credential      | Prefix | Created by | Stored as        | Scope |
+|-----------------|--------|------------|------------------|-------|
+| API key         | `lmk_` | server     | SHA-256 hash     | admin / inference / readonly |
+| Enrollment token| `lme_` | server     | SHA-256 hash     | submit one enrollment; bounded uses + TTL |
+| Node credential | `lmn_` | **agent**  | SHA-256 hash     | authenticate that node's WebSocket |
+| Poll secret     | `lmp_` | server     | SHA-256 hash     | read one enrollment's decision |
+
+Notable properties:
+
+- **Agents hold the only copy of their credential.** The node token is
+  generated on the device during `join`; it crosses the wire exactly once
+  inside the TLS enrollment request. The server stores its hash — there
+  is no plaintext credential in the database to leak.
+- **Node credentials are strength-checked and unique.** `POST /enroll`
+  rejects `node_token` values that are not `lmn_`-prefixed with ≥40
+  characters, and `nodes.token_hash` carries a UNIQUE constraint —
+  two devices can never end up bound to the same credential, and a
+  guessable credential cannot survive approval.
+- The bootstrap admin key is printed to the server log once (or supplied
+  via `LOCALMESH_ADMIN_KEY`, minimum 16 characters). In compose it's
+  also written to `<data>/bootstrap-admin.key` (mode 0600) so the
+  dashboard can read it from the shared volume.
+- The enrollment `poll_secret` is sent in the `X-Poll-Secret` header
+  (a `?secret=` query parameter is still accepted for compatibility)
+  so the secret stays out of URL logs.
+- Plaintext tokens are returned to the caller exactly once at creation;
+  every list endpoint exposes only prefixes.
+
+## Authorization
+
+- `admin` — everything: settings, enrollment decisions, token/key
+  management, node ops, model ops.
+- `inference` — `/v1/*` only. Hand this to applications.
+- `readonly` — `GET /api/v1/*`. Good for dashboards/monitoring.
+- Node credentials can **only** open `/api/v1/agent/connect`. They cannot
+  call the REST API at all.
+- Revoking a node takes effect immediately: the open socket is dropped
+  and reconnects are refused until `reinstate`.
+- A `hello` that names a `node_id` different from the credential's node
+  is rejected at the protocol layer.
+- Internal errors are sanitized: 500 responses return a generic
+  `"internal error"` body while the real error is only logged —
+  SQLSTATEs, driver strings, and schema names never reach clients.
+
+## Rate limiting
+
+Unauthenticated endpoints are bounded per source IP so anonymous floods
+cannot exhaust the database pool:
+
+- `POST /api/v1/enroll` — 30 submissions/minute
+- `GET  /api/v1/enroll/{id}` — 600 polls/minute (agents poll ~5/s during join)
+- `GET  /api/v1/agent/connect` — 30 connects/minute
+- Failed bearer authentication — a source accumulating >20 401s/minute
+  is throttled with 429 before the credential lookup runs
+
+Limits are in-memory token buckets — per-process, not coordinated across
+replicas (LocalMesh is a single control-plane instance by design).
+
+## Dashboard sessions
+
+Sessions are stateless signed cookies (HMAC-SHA256 over expiry+nonce,
+`HttpOnly`, `SameSite=Lax`, 12h TTL). The signing secret lives in
+`{data_dir}/session.key` (0600, generated once, shared to the web
+container via the data volume) — so sessions survive web restarts while
+never existing server-side. `LOCALMESH_SESSION_KEY[_FILE]` overrides.
+
+Logout adds the token's nonce to a revocation list so a logged-out
+token stays rejected until it expires. v0.4 makes that list **durable**:
+the control plane stores revocations in Postgres
+(`session_revocations`, migration 0004) behind two admin-key endpoints —
+`POST /api/v1/dashboard/sessions/revoke` (logout) and
+`GET /api/v1/dashboard/sessions/check?nonce=` (per-request verify).
+Rows self-expire with the cookie's TTL, so the table can't accumulate
+dead entries.
+
+The BFF wires it like this (`web/lib/session.ts`):
+
+- **On logout** the nonce hits the in-process denylist immediately and
+  is persisted to Postgres fire-and-forget — the local check kills the
+  cookie now, durability just needs the write to land.
+- **Per request** the nonce is verified against the durable store,
+  positive results cached 60s per nonce so dashboard polling doesn't
+  pay an upstream roundtrip every call. Only *clean* verdicts are
+  cached — a revocation is never masked by the cache (logout also drops
+  the cached verdict).
+- **On control-plane outage** the check degrades to local-only
+  validation (one logged warning) rather than logging everyone out when
+  the API blips. The window this opens: a nonce revoked after a web
+  restart stays locally accepted while the API is unreachable — narrow,
+  time-bounded (12h cookie TTL), accepted.
+
+
+The dashboard is a **backend-for-frontend**: its `/api/lm/*` route
+injects the admin API key into upstream calls server-side. To keep the
+admin key out of browsers:
+
+- Signing in requires the dashboard password —
+  `LOCALMESH_DASHBOARD_PASSWORD`, or the generated
+  `<data>/bootstrap-dashboard.password` the server writes on first boot.
+- Sessions are the signed cookies described above — stateless, so they
+  survive web restarts as long as `session.key` persists (a regenerated
+  or ephemeral key = everyone logs in again).
+- Password verification is constant-time; 5 failures/minute per IP → 429.
+- Mutations through the BFF additionally require a same-origin request.
+- **The admin key never ships in client JavaScript** — it lives only in
+  the web container's env / the mounted key file.
+
+## Command safety
+
+The agent's remote surface is deliberately narrow. Over the WebSocket the
+server can ask for exactly four things: run an inference request against
+an installed engine, cancel it, pull a model, delete a model. There is no
+shell, no arbitrary process execution, no file access — an attacker who
+seizes the control plane can schedule inference on your nodes but cannot
+run commands on them.
+
+Agents also verify the server: the pinned cluster CA means a hostile
+look-alike control plane cannot impersonate the real one and harvest
+node credentials.
+
+## Privacy
+
+- **Prompts and completions are never persisted.** Workload records carry
+  metadata only (model, node, token counts, timings, routing decision).
+  Nothing in the write path touches request or response bodies.
+- The audit log records *actions* (who approved what, when a key was
+  created), never payloads.
+- No telemetry, no phone-home, no mandatory external accounts.
+
+## Audit
+
+`GET /api/v1/audit` lists administrative actions: enrollment
+requests/decisions, key/token creation and revocation, node
+revoke/reinstate/delete, settings changes, model ops. Use it to answer
+"who let this device in" and "what changed".
+
+## Accepted risks
+
+- **`braces`/`micromatch` advisories (dev-only).** `npm audit` reports
+  high-severity glob-pattern DoS advisories reachable only through the
+  `eslint-config-next` devDependency chain. No upstream fix exists for
+  the latest versions, and the vulnerable code never ships in the
+  production image — it runs only when linting our own source. Accepted;
+  revisit when upstream publishes a fix.
+- **Session revocation degrades to local-only on control-plane
+  outage.** With the API unreachable, a nonce revoked elsewhere can be
+  re-accepted until its 12h cookie expiry — the deliberate trade for
+  not logging everyone out when the API blips. See *Dashboard
+  sessions*.
+- **`no_capacity` 503 responses** echo node names and filter reasons to
+  inference-key holders. Deliberate — capacity is what makes LocalMesh
+  explainable — but it does disclose cluster shape to anyone with an
+  inference key.
+
+## Deployment hardening checklist
+
+- [ ] Don't expose 8443 to the internet — reach it over LAN, WireGuard,
+      or Tailscale/Headscale. If you must publish it, front it with a
+      reverse proxy and real cert (`LOCALMESH_HOSTNAMES` for SANs).
+- [ ] Set `LOCALMESH_ADMIN_KEY` instead of relying on the logged
+      bootstrap key, then revoke/rotate it from the UI.
+- [ ] Use `inference` keys for applications, `readonly` for monitoring.
+      Keep `admin` keys out of anything shipped to clients.
+- [ ] Restrict who can create enrollment tokens; prefer `max_uses=1`
+      and short TTLs.
+- [ ] Approve enrollments interactively — verify the hardware fingerprint
+      shown in the request matches the machine you expected.
+- [ ] Keep `LOCALMESH_DEV_INSECURE_HTTP` off outside development.
+
+## Remote model operations
+
+Pull/delete requests validate the model identifier before dispatch
+(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}(/…)?(:tag)?$`) — URL/path/control
+strings are rejected at the API boundary and never reach an agent's
+engine call. Operations are deduplicated per node+model, audited, and
+bounded; aborts propagate into the engine HTTP request context.
+
+A delete that would remove a model's **last replica** is refused with
+`409` unless the caller passes `"force": true` — an admin fat-finger
+can't silently make a model unschedulable cluster-wide. The check
+counts replicas across all node records (an offline node's copy still
+counts: it isn't deleted, just unreachable).
+
+`LOCALMESH_TRUST_PROXY` gates `X-Forwarded-For` handling for the rate
+limiter — off by default, so forwarding headers are never trusted
+unless a known reverse proxy is in front.

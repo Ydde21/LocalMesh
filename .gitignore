@@ -1,0 +1,31 @@
+# Binaries
+/bin/
+/dist/
+*.exe
+
+# Go
+*.test
+*.out
+vendor/
+
+# Node / Next.js
+node_modules/
+web/.next/
+web/out/
+web/next-env.d.ts
+web/tsconfig.tsbuildinfo
+
+# Env & secrets
+.env
+.env.local
+*.pem
+*.key
+data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/

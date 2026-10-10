@@ -1,0 +1,266 @@
+# API reference
+
+Base URL: `https://<control-plane>:8443`
+
+All endpoints except `POST /api/v1/enroll`, `GET /api/v1/enroll/{id}`,
+`GET /api/v1/ca.pem`, and `/healthz` require
+`Authorization: Bearer <key>`.
+
+API keys carry one of three roles:
+
+| Role        | Can access                                    |
+|-------------|-----------------------------------------------|
+| `admin`     | everything                                    |
+| `inference` | `/v1/*` only (the OpenAI gateway)             |
+| `readonly`  | `GET` on `/api/v1/*` (dashboard read access)  |
+
+Errors are JSON: `{"error": {"message": "...", "type": "..."}}`.
+5xx responses always carry the generic message `"internal error"` —
+internal details are logged server-side only.
+
+---
+
+## OpenAI-compatible gateway
+
+Auth: `inference`, `admin`.
+
+### `GET /v1/models`
+
+Lists models installed on at least one approved node, in the OpenAI
+`{"object": "list", "data": [...]}` shape.
+
+### `POST /v1/chat/completions`
+
+```json
+{
+  "model": "llama3.1:8b",
+  "messages": [{"role": "user", "content": "Hello"}],
+  "stream": true,
+  "max_tokens": 512,
+  "temperature": 0.7
+}
+```
+
+- `stream: true` → SSE chunks, `data: [DONE]` terminator — the standard
+  OpenAI wire format.
+- Unknown/absent model → `404`; no eligible node → `503` with
+  `{"error": {"type": "capacity"}}`.
+- Client disconnect cancels the request on the executing node.
+- The scheduler may retry once on another node **only if** no response
+  bytes were sent yet — a stream is never replayed mid-flight.
+
+---
+
+## Enrollment (public, no API key)
+
+### `GET /api/v1/ca.pem`
+
+Returns the cluster CA certificate (PEM). Fetch before joining to pin
+the control-plane TLS chain, or embed its SHA-256 fingerprint in the
+join command (`-ca-fingerprint sha256:...`).
+
+### `POST /api/v1/enroll`
+
+```json
+{
+  "token": "lme_...",
+  "name": "workstation",
+  "hardware": { "hostname": "...", "os": "linux", "...": "..." },
+  "node_token": "<agent-generated lmn_ credential>"
+}
+```
+
+→ `202 Accepted` with `{"request_id": "...", "poll_secret": "...",
+"status": "pending"}`. The `node_token` is generated on the agent and
+stored on the server only as a SHA-256 hash — it becomes the node's
+permanent WebSocket credential once approved.
+
+`node_token` must be `lmn_`-prefixed and ≥40 characters — the endpoint
+returns `400` for weak or wrongly-prefixed credentials. Approving an
+enrollment whose credential hash is already bound to another node
+returns `409`.
+
+### `GET /api/v1/enroll/{id}`
+
+Poll enrollment status. Pass the server-issued `poll_secret` in the
+`X-Poll-Secret` header (preferred — keeps the secret out of URL logs);
+`?secret=` is still accepted for compatibility. `pending` → `approved`
+returns `{status, node_id, ca_pem}`; `denied` returns the reason.
+
+### Rate limits
+
+Per source IP: `POST /enroll` 30/min · `GET /enroll/{id}` 600/min ·
+`GET /nodes/connect` 30/min. Sustained failed bearer auth (>20 401s/min)
+yields `429` on authenticated routes.
+
+---
+
+## Admin API
+
+Auth: `admin` for writes; `readonly`+ for `GET`s. Prefix `/api/v1`.
+
+### Cluster
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET    | `/overview`         | aggregate cluster stats |
+| GET    | `/events`           | SSE stream of cluster events |
+| GET    | `/audit?limit=`     | audit log entries |
+| GET    | `/settings`         | all settings (scheduling config etc.) |
+| PUT    | `/settings/{key}`   | replace a setting — body is the raw JSON value; keys: `scheduling`, `privacy`, `cluster` |
+
+Mutable `scheduling` keys include `queue_timeout_ms` (1–300000),
+`max_attempts` (1–10), `heartbeat_timeout_seconds` (10–600 — live-tunes
+the node staleness window used by scheduling eligibility), and `weights`.
+
+### Nodes
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET    | `/nodes`               | list nodes (hardware, engines, models, metrics, online/stale flags) |
+| GET    | `/nodes/{id}`          | node detail |
+| PATCH  | `/nodes/{id}`          | update `name`, `labels`, `max_concurrent` |
+| DELETE | `/nodes/{id}`          | delete node record |
+| POST   | `/nodes/{id}/revoke`   | revoke — disconnects the agent and refuses reconnects |
+| POST   | `/nodes/{id}/reinstate`| undo a revoke |
+
+### Enrollment tokens & requests
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET    | `/enrollment-tokens`             | list tokens (prefix, uses, expiry) |
+| POST   | `/enrollment-tokens`             | create `{label?, max_uses?, ttl_hours?}` → returns plaintext `token` once |
+| DELETE | `/enrollment-tokens/{id}`        | revoke a token |
+| GET    | `/enrollments`                   | list enrollment requests |
+| POST   | `/enrollments/{id}/approve`      | approve → creates the node |
+| POST   | `/enrollments/{id}/deny`         | deny `{reason?}` |
+
+### Models
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET    | `/models`             | cluster-wide model inventory (`node_ids`, `node_names`, `loaded_on`) |
+| GET    | `/models/placement`   | per-model placement view (see below) |
+| POST   | `/models/pull`        | `{model, node_ids?}` — dispatch pull to selected or all eligible online nodes |
+| POST   | `/models/delete`      | `{model, node_ids?, force?}` — same for deletion; see last-replica guard below |
+| GET    | `/model-operations`   | pull/delete operation status + progress |
+| POST   | `/model-operations/{id}/cancel` | abort an in-flight pull/delete (`204`); finished ops return `409` |
+
+Model-operation states: `dispatched` → `running` → `succeeded` | `failed` |
+`cancelled` | `interrupted` (node vanished mid-op). Concurrent ops on the
+same node+model are deduplicated — a conflicting dispatch returns `409`.
+Model identifiers are validated (`namespace/name:tag` shape) before ever
+reaching an agent.
+
+**Last-replica guard.** A `/models/delete` that would remove the model's
+only remaining replica is rejected `409`
+(`"this delete removes the model's last available replica — retry with
+force to confirm"`). Re-send with `"force": true` to proceed. The check
+counts replicas on **all** node records, not just online ones — a model
+surviving only on an offline node still counts as a replica (it is not
+gone, just unreachable).
+
+#### `GET /models/placement`
+
+Per-model view of where things can run — the data behind the dashboard's
+placement UI:
+
+```json
+[{
+  "name": "qwen2.5:0.5b",
+  "engine": "ollama",
+  "size_mb": 397,
+  "est_mem_mb": 628,
+  "replicas": 2,
+  "loaded_on": 1,
+  "nodes": [{"id": "…", "name": "…", "online": true,
+             "digest": "…", "loaded": true, "loaded_mb": 628}],
+  "candidates": [{"id": "…", "name": "…", "reason": "sufficient estimated headroom",
+                  "free_mb": 5120, "eligible": true}],
+  "active_ops": ["pull:running"],
+  "last_replica": false
+}]
+```
+
+- `est_mem_mb` is the largest **measured** resident footprint
+  (`loaded_mb`) observed on any node, else `size_mb × 1.5` — the same
+  estimate the scheduler uses.
+- `candidates` lists online nodes not hosting the model. `eligible`
+  nodes have a measured `free_mb` ≥ the estimate, or unmeasured memory
+  (`"memory availability unmeasured — unknown"` is eligible: unknown is
+  not ineligible). Ineligible reasons: `"no inference engine detected"`,
+  `"insufficient free memory for estimated footprint"`.
+- `last_replica` is true when `replicas == 1` — the delete-guard
+  condition.
+
+**Model objects** (in `GET /nodes`, `GET /nodes/{id}`, and placement
+`nodes[]`) carry residency detail reported by the engine:
+
+| Field | Meaning |
+|---|---|
+| `loaded`         | resident in engine memory right now (refreshed per heartbeat) |
+| `loaded_bytes`   | real resident footprint — Ollama `/api/ps` `size` (weights + KV cache + runtime) |
+| `loaded_vram_bytes` | the VRAM portion of that footprint (`size_vram`; 0 on CPU-only/unified memory) |
+| `runner`         | engine runner serving the model, e.g. `llamacpp` |
+
+`loaded_bytes`/`loaded_vram_bytes`/`runner` refresh with capability
+reports (connect, engine-state change, model ops); the `loaded` flag
+itself tracks the heartbeat (~10s), so it can flip before the byte
+counts catch up.
+
+### Dashboard sessions (for the BFF)
+
+Auth: `admin` only — these exist for the co-deployed web dashboard,
+which holds the admin key server-side. Dashboard login/logout normally
+goes through the web app; these endpoints are the durable backing store.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST   | `/dashboard/sessions/revoke` | `{nonce, expires_at}` (epoch ms) — record a logged-out session nonce until its cookie expiry; `204`. Idempotent (`ON CONFLICT DO NOTHING`). `nonce` must be 16–128 chars. Note: an omitted/`0` `expires_at` stores an already-expired row — pass the cookie's real expiry |
+| GET    | `/dashboard/sessions/check?nonce=` | `{"revoked": bool}` — rows past `expires_at` don't count. Cheap indexed lookup, safe to call per request |
+
+Revocations live in Postgres (`session_revocations` table), so they
+survive both control-plane and web-process restarts.
+
+### Workloads
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET    | `/workloads?status=&limit=` | workload history (metadata only — never prompts); `status` ∈ `queued`, `running`, `completed`, `failed`, `cancelled` |
+| GET    | `/workloads/{id}`           | detail incl. the full routing decision (`candidates`, scores, reasons, `queued_ms`) |
+
+### API keys
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET    | `/api-keys`          | list keys (prefix + role only) |
+| POST   | `/api-keys`          | create `{name, role}` → returns plaintext `key` once |
+| DELETE | `/api-keys/{id}`     | revoke |
+
+### Agent WebSocket
+
+`GET /api/v1/agent/connect` — upgrades to WebSocket. Header:
+`Authorization: Bearer <node credential>` (the `lmn_` token); the node
+identifies itself in the first `hello` frame. Speaks the frame protocol
+in `internal/contracts`.
+
+### Health
+
+`GET /healthz` — liveness probe, no auth.
+
+---
+
+## SSE events
+
+`GET /api/v1/events` streams `event: <type>` + `data: {type, data}`:
+
+- `node.connected`, `node.disconnected`, `node.metrics`, `node.capability`,
+  `node.approved`, `node.revoked`, `node.reinstated`, `node.deleted`,
+  `node.updated`
+- `workload.queued`, `workload.started`, `workload.finished`
+- `model.operation`
+- `enrollment.requested`, `enrollment.denied`, `enrollment_token.created`
+- `api_key.created`, `api_key.revoked`
+- `settings.updated`
+
+A `: keepalive` comment is emitted every 20s.

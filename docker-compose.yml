@@ -1,0 +1,86 @@
+# LocalMesh control plane + dashboard.
+#
+#   docker compose up -d
+#
+# The server generates an internal CA + TLS cert on first boot (stored in
+# the `localmesh-data` volume). The dashboard mounts that volume read-only
+# and trusts the CA. The bootstrap admin API key is printed once in the
+# server logs — `docker compose logs server | grep "bootstrap admin"`.
+#
+# The dashboard requires sign-in. On first boot the server writes a
+# generated password to bootstrap-dashboard.password in the data volume —
+# retrieve it with:
+#   docker compose exec web cat /ca/bootstrap-dashboard.password
+# or set LOCALMESH_DASHBOARD_PASSWORD in .env to choose your own.
+#
+# Set LOCALMESH_ADMIN_KEY in .env to install a known admin key instead
+# (see .env.example).
+
+name: localmesh
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: localmesh
+      POSTGRES_USER: localmesh
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - localmesh-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U localmesh -d localmesh"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [localmesh]
+
+  server:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      LOCALMESH_DATABASE_URL: postgres://localmesh:${POSTGRES_PASSWORD}@postgres:5432/localmesh?sslmode=disable
+      LOCALMESH_LISTEN: 0.0.0.0:8443
+      LOCALMESH_DATA_DIR: /data
+      LOCALMESH_ADMIN_KEY: ${LOCALMESH_ADMIN_KEY:-}
+      LOCALMESH_HOSTNAMES: server,localmesh-server,localhost
+      LOCALMESH_CORS_ORIGINS: ""
+    volumes:
+      - localmesh-data:/data
+    ports:
+      - "${LOCALMESH_PORT:-8443}:8443"
+    networks: [localmesh]
+
+  web:
+    build: ./web
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      LOCALMESH_API_URL: https://server:8443
+      # If LOCALMESH_ADMIN_KEY is set, use it directly; otherwise read the
+      # bootstrap key the server writes into the shared data volume.
+      LOCALMESH_API_KEY: ${LOCALMESH_ADMIN_KEY:-}
+      LOCALMESH_API_KEY_FILE: /ca/bootstrap-admin.key
+      LOCALMESH_CA_FILE: /ca/ca.pem
+      # Dashboard sign-in password. If unset, the server-generated
+      # bootstrap-dashboard.password in the shared volume is used.
+      LOCALMESH_DASHBOARD_PASSWORD: ${LOCALMESH_DASHBOARD_PASSWORD:-}
+      LOCALMESH_DASHBOARD_PASSWORD_FILE: /ca/bootstrap-dashboard.password
+      LOCALMESH_SESSION_KEY_FILE: /ca/session.key
+    volumes:
+      - localmesh-data:/ca:ro
+    ports:
+      - "${LOCALMESH_WEB_PORT:-3000}:3000"
+    networks: [localmesh]
+
+volumes:
+  localmesh-pg:
+  localmesh-data:
+
+networks:
+  localmesh:
+    driver: bridge

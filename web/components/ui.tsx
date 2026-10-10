@@ -1,0 +1,103 @@
+"use client";
+
+import { ReactNode } from "react";
+import { clsx } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+export function cn(...args: Parameters<typeof clsx>) {
+  return twMerge(clsx(...args));
+}
+
+export function Panel({
+  children,
+  className,
+  hover,
+}: {
+  children: ReactNode;
+  className?: string;
+  hover?: boolean;
+}) {
+  return (
+    <div className={cn("panel", hover && "panel-hover", className)}>{children}</div>
+  );
+}
+
+export function Stat({
+  label,
+  value,
+  sub,
+  accent,
+}: {
+  label: string;
+  value: ReactNode;
+  sub?: string;
+  accent?: string;
+}) {
+  return (
+    <div>
+      <div className="label">{label}</div>
+      <div
+        className="mono mt-1.5 text-[26px] font-medium leading-none tracking-tight"
+        style={accent ? { color: accent } : undefined}
+      >
+        {value}
+      </div>
+      {sub && (
+        <div className="mt-1 text-[11px] text-[var(--color-text-faint)]">{sub}</div>
+      )}
+    </div>
+  );
+}
+
+export function Meter({
+  value,
+  max = 100,
+  className,
+  color,
+}: {
+  value: number;
+  max?: number;
+  className?: string;
+  color?: string;
+}) {
+  const pct = Math.min(100, Math.max(0, (value / max) * 100));
+  const c =
+    color || (pct > 90 ? "var(--color-danger)" : pct > 70 ? "var(--color-warn)" : "var(--color-accent)");
+  return (
+    <div className={cn("meter", className)}>
+      <div style={{ width: `${pct}%`, background: c }} />
+    </div>
+  );
+}
+
+export function Empty({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint?: string;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="flex flex-col items-center justify-center py-14 text-center">
+      <div className="text-[13px] font-medium text-[var(--color-text-dim)]">{title}</div>
+      {hint && (
+        <div className="mt-1 max-w-[340px] text-[12px] text-[var(--color-text-faint)]">{hint}</div>
+      )}
+      {children && <div className="mt-4">{children}</div>}
+    </div>
+  );
+}
+
+export function Copyable({ text, mono = true }: { text: string; mono?: boolean }) {
+  return (
+    <code
+      className={`${mono ? "mono" : ""} cursor-pointer rounded bg-white/[0.06] px-1.5 py-0.5 text-[11px] text-[var(--color-text-dim)] transition-colors hover:bg-white/[0.1]`}
+      title="Click to copy"
+      onClick={() => navigator.clipboard.writeText(text)}
+    >
+      {text}
+    </code>
+  );
+}
