@@ -4,15 +4,16 @@ import { Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
   useNodes, useNode, useEnrollments, useDiscoveryStatus, useOverview,
-  useNodeEvents, useVersion, api,
+  useNodeEvents, useVersion, useReleases, useAgentUpdates, api,
 } from "@/lib/api";
-import { fmtBytes, fmtAgo, fmtMs, fmtUptime, fmtVersion, agentVersion, osLabel } from "@/lib/format";
+import { fmtBytes, fmtAgo, fmtMs, fmtUptime, fmtVersion, agentVersion, osLabel, versionGt } from "@/lib/format";
 import { Panel, Meter, Empty } from "@/components/ui";
-import { NodeBadge } from "@/components/status";
-import type { Node } from "@/lib/types";
+import { NodeBadge, StatusBadge } from "@/components/status";
+import { UpdatePhaseStepper } from "@/components/update-phase";
+import type { Node, Release } from "@/lib/types";
 import {
   X, Cpu, HardDrive, Zap, RefreshCw, Plus, Copy, Check, Wifi, WifiOff,
-  Package,
+  Package, Wrench, ArrowUpCircle,
 } from "lucide-react";
 import { useSWRConfig } from "swr";
 
@@ -63,18 +64,78 @@ function DevicesInner() {
         </div>
       )}
 
+      <UpdateHistory />
+
       {addOpen && <AddDeviceDialog onClose={() => setAddOpen(false)} />}
       {selectedId && <DeviceDrawer id={selectedId} />}
     </div>
   );
 }
 
+// Fleet-wide agent-update history (v0.7+) — newest 10 rows. The whole
+// panel self-hides when the endpoint is absent (404) or empty.
+function UpdateHistory() {
+  const { data: updates } = useAgentUpdates({ limit: 10 });
+  if (!updates || updates.length === 0) return null;
+  return (
+    <Panel className="fade-up mt-3">
+      <div className="border-b px-4 py-3" style={{ borderColor: "var(--color-border)" }}>
+        <div className="label">Update history</div>
+      </div>
+      {updates
+        .slice()
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))
+        .slice(0, 10)
+        .map((u) => (
+        <div
+          key={u.id}
+          className="row-line flex flex-wrap items-center gap-3 px-4 py-2"
+          style={{ borderColor: "var(--color-border)" }}
+        >
+          <span className="text-[12px] font-medium">{u.node_name || u.node_id.slice(0, 8)}</span>
+          <span className="mono text-[11px] text-[var(--color-text-dim)]">
+            {u.from_version || "?"} → {u.to_version || u.release_version || "?"}
+          </span>
+          <StatusBadge status={u.phase} />
+          {u.error && (
+            <span
+              className="max-w-[320px] truncate text-[11px] text-[var(--color-danger)]"
+              title={u.error}
+            >
+              {u.error}
+            </span>
+          )}
+          <span className="ml-auto text-[10.5px] text-[var(--color-text-faint)]">
+            {fmtAgo(u.finished_at || u.updated_at || u.created_at)}
+          </span>
+        </div>
+      ))}
+    </Panel>
+  );
+}
+
+// Newest approved release strictly newer than `agent` (semver-ish, best
+// effort). null when the registry is absent/empty or nothing is newer.
+function newerRelease(releases: Release[] | undefined, agent: string): Release | null {
+  if (!agent) return null;
+  let best: Release | null = null;
+  for (const r of releases ?? []) {
+    if (r.status !== "approved") continue;
+    if (!versionGt(r.version, agent)) continue;
+    if (!best || versionGt(r.version, best.version)) best = r;
+  }
+  return best;
+}
+
 // Agent version/compat tag: mono version for reporting agents, a "legacy"
-// pill for pre-v0.5 ones, and a quiet warn pill when the agent build
-// differs from the server. serverVersion is absent on pre-v0.5 servers —
-// no comparison is made then.
+// pill for pre-v0.5 ones, a quiet warn pill when the agent build differs
+// from the server, and an "update" pill when the registry holds a newer
+// approved release. serverVersion is absent on pre-v0.5 servers — no
+// comparison is made then.
 function AgentVersionTag({ node, serverVersion }: { node: Node; serverVersion?: string }) {
+  const { data: releases } = useReleases();
   const av = agentVersion(node);
+  const newer = newerRelease(releases, av);
   if (!av) {
     return (
       <span
@@ -100,6 +161,14 @@ function AgentVersionTag({ node, serverVersion }: { node: Node; serverVersion?: 
           title={`agent ${av} differs from server ${serverVersion} — still protocol-compatible; upgrade when convenient`}
         >
           mismatch
+        </span>
+      )}
+      {newer && (
+        <span
+          className="badge badge-accent !px-1.5 !py-0"
+          title={`approved release ${fmtVersion(newer.version)} is newer than this agent — update from the device drawer or Releases`}
+        >
+          update {fmtVersion(newer.version)}
         </span>
       )}
     </>
@@ -429,6 +498,11 @@ function DeviceDrawer({ id }: { id: string }) {
           {/* Connection history (v0.6+; absent endpoint renders nothing) */}
           <ConnectionHistory id={node.id} />
 
+          {/* Maintenance + agent update (v0.7+; each self-hides when the
+              server doesn't expose the capability) */}
+          <MaintenanceSection node={node} busy={busy} act={act} />
+          <UpdateSection node={node} busy={busy} act={act} />
+
           {/* Controls */}
           <section>
             <div className="label mb-2.5">Concurrency</div>
@@ -532,6 +606,198 @@ function ConnectionHistory({ id }: { id: string }) {
             );
           })}
         </div>
+      )}
+    </section>
+  );
+}
+
+// Maintenance/drain controls (v0.7+). Capability probe: the node row
+// carries `maintenance` only on servers that have the endpoints; on
+// older ones the whole section stays hidden. A 403/404 on the action
+// itself surfaces through the drawer's error box like every other call.
+function MaintenanceSection({
+  node,
+  busy,
+  act,
+}: {
+  node: Node;
+  busy: boolean;
+  act: (fn: () => Promise<unknown>) => Promise<void>;
+}) {
+  const [reason, setReason] = useState("");
+  if (node.maintenance === undefined) return null;
+  const st = node.maintenance;
+  return (
+    <section>
+      <div className="label mb-2.5">Maintenance</div>
+      {st === "" ? (
+        <>
+          <div className="flex gap-2">
+            <input
+              className="input flex-1"
+              placeholder="reason (optional)"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              onKeyDown={(e) =>
+                e.key === "Enter" &&
+                act(() => api("POST", `/nodes/${node.id}/maintenance`, { reason }))
+              }
+            />
+            <button
+              className="btn btn-sm"
+              disabled={busy}
+              onClick={() => act(() => api("POST", `/nodes/${node.id}/maintenance`, { reason }))}
+            >
+              <Wrench size={12} /> Enter maintenance
+            </button>
+          </div>
+          <p className="mt-1.5 text-[11px] text-[var(--color-text-faint)]">
+            Stops new work on this node; in-flight requests finish first.
+          </p>
+        </>
+      ) : (
+        <>
+          <div className="flex items-center gap-2">
+            <NodeBadge node={node} />
+            {st === "draining" && (
+              <span className="mono text-[11px] text-[var(--color-warn)]">
+                …{node.in_flight} in flight
+              </span>
+            )}
+          </div>
+          {node.maintenance_reason && (
+            <div className="mt-1.5 text-[11.5px] text-[var(--color-text-dim)]">
+              {node.maintenance_reason}
+            </div>
+          )}
+          {node.maintenance_since && (
+            <div className="mt-0.5 text-[10.5px] text-[var(--color-text-faint)]">
+              since {fmtAgo(node.maintenance_since)}
+            </div>
+          )}
+          <button
+            className="btn btn-sm mt-2.5"
+            disabled={busy}
+            onClick={() => act(() => api("POST", `/nodes/${node.id}/resume`))}
+          >
+            <Check size={12} /> Resume service
+          </button>
+        </>
+      )}
+    </section>
+  );
+}
+
+// Agent update for this node (v0.7+): a live stepper while an update is
+// in flight, otherwise a release picker that dispatches a single-node
+// rollout, plus the last finished update for context. Hidden when the
+// feature endpoints are absent entirely.
+function UpdateSection({
+  node,
+  busy,
+  act,
+}: {
+  node: Node;
+  busy: boolean;
+  act: (fn: () => Promise<unknown>) => Promise<void>;
+}) {
+  const { data: releases } = useReleases();
+  const { data: updates } = useAgentUpdates({ node_id: node.id, limit: 1 });
+  const { mutate: gm } = useSWRConfig();
+  const [relId, setRelId] = useState("");
+
+  const approved = (releases ?? []).filter((r) => r.status === "approved");
+  // Endpoint ordering isn't contractual — take newest by created_at.
+  const latest = (updates ?? [])
+    .slice()
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+  const live = !!latest && !latest.finished_at;
+
+  if (!releases && !updates) return null; // pre-v0.7 server
+  if (approved.length === 0 && !latest) return null; // nothing to act on
+
+  // Default the picker to the newest approved release (semver-ish).
+  const newest = approved.reduce<Release | null>(
+    (best, r) => (best && versionGt(best.version, r.version) ? best : r),
+    null
+  );
+  const sel = relId || newest?.id || "";
+  const canUpdate =
+    !!sel && node.online && node.status === "approved" && !node.maintenance && !live;
+
+  return (
+    <section>
+      <div className="label mb-2.5">Agent update</div>
+      {live && latest ? (
+        <UpdatePhaseStepper update={latest} />
+      ) : (
+        <>
+          {approved.length > 0 ? (
+            <div className="flex gap-2">
+              <select
+                className="input mono flex-1"
+                value={sel}
+                onChange={(e) => setRelId(e.target.value)}
+              >
+                {approved.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {fmtVersion(r.version)} · {r.channel}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="btn btn-sm btn-primary"
+                disabled={busy || !canUpdate}
+                title={
+                  canUpdate
+                    ? "Dispatch a single-node rollout to this release"
+                    : !node.online
+                      ? "node is offline"
+                      : node.maintenance
+                        ? "node is in maintenance"
+                        : node.status !== "approved"
+                          ? "node is not approved"
+                          : undefined
+                }
+                onClick={() =>
+                  act(async () => {
+                    await api("POST", "/rollouts", {
+                      release_id: sel,
+                      strategy: "single",
+                      node_ids: [node.id],
+                    });
+                    gm(
+                      (key) =>
+                        typeof key === "string" &&
+                        (key.startsWith("/agent-updates") || key.startsWith("/rollouts"))
+                    );
+                  })
+                }
+              >
+                <ArrowUpCircle size={12} /> Update this device
+              </button>
+            </div>
+          ) : (
+            <div className="text-[12px] text-[var(--color-text-faint)]">
+              No approved releases — register one on the Releases page.
+            </div>
+          )}
+          {latest && (
+            <div className="mt-2.5 flex flex-wrap items-center gap-2 text-[11px] text-[var(--color-text-faint)]">
+              <span>last update:</span>
+              <span className="mono text-[var(--color-text-dim)]">
+                {latest.from_version || "?"} → {latest.to_version || latest.release_version || "?"}
+              </span>
+              <StatusBadge status={latest.phase} />
+              <span>{fmtAgo(latest.finished_at)}</span>
+              {latest.error && (
+                <span className="max-w-[220px] truncate text-[var(--color-danger)]" title={latest.error}>
+                  {latest.error}
+                </span>
+              )}
+            </div>
+          )}
+        </>
       )}
     </section>
   );

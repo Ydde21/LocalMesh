@@ -316,7 +316,12 @@ export default function ModelsPage() {
                             {pl.replicas} {pl.last_replica ? "⚠" : ""}
                           </span>
                         ) : (
-                          <span className="badge badge-neutral">{ids.length}</span>
+                          <span
+                            className="badge badge-neutral"
+                            title={m.eligible_nodes !== undefined ? `${m.eligible_nodes} eligible nodes` : undefined}
+                          >
+                            {ids.length}
+                          </span>
                         )}
                       </Td>
                       <Td>
@@ -357,8 +362,28 @@ export default function ModelsPage() {
                         </div>
                       </Td>
                       <Td>
-                        {loadedOn.length > 0 ? (
-                          <span className="badge badge-ok"><span className="dot" />loaded on {loadedOn.length}</span>
+                        {/* v0.7 availability rollup takes priority when the
+                            server emits it; otherwise the classic loaded/idle
+                            badge from node reports. */}
+                        {m.availability === "offline_only" ? (
+                          <span
+                            className="badge badge-warn"
+                            title="installed only on offline nodes — unschedulable until one returns"
+                          >
+                            offline-only
+                          </span>
+                        ) : m.availability === "unavailable" ? (
+                          <span
+                            className="badge badge-danger"
+                            title="no usable replica in the cluster"
+                          >
+                            unavailable
+                          </span>
+                        ) : (m.loaded_nodes ?? loadedOn.length) > 0 ? (
+                          <span className="badge badge-ok">
+                            <span className="dot" />
+                            loaded on {m.loaded_nodes ?? loadedOn.length}
+                          </span>
                         ) : (
                           <span className="badge badge-neutral">idle</span>
                         )}

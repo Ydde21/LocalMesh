@@ -137,6 +137,14 @@ body {
 .badge-idle .dot {
   background: var(--color-idle);
 }
+.badge-accent {
+  background: var(--color-accent-soft);
+  border-color: #4f7cff33;
+  color: var(--color-accent);
+}
+.badge-accent .dot {
+  background: var(--color-accent);
+}
 .badge-neutral {
   background: #ffffff08;
 }

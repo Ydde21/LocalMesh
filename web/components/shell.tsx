@@ -8,6 +8,7 @@ import {
   Server,
   Network,
   Boxes,
+  Rocket,
   Activity,
   Settings,
   Hexagon,
@@ -22,6 +23,7 @@ const NAV = [
   { href: "/devices", label: "Devices", icon: Server },
   { href: "/topology", label: "Topology", icon: Network },
   { href: "/models", label: "Models", icon: Boxes },
+  { href: "/releases", label: "Releases", icon: Rocket },
   { href: "/workloads", label: "Workloads", icon: Activity },
   { href: "/settings", label: "Settings", icon: Settings },
 ];

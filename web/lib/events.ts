@@ -39,6 +39,14 @@ export function useClusterEvents(enabled = true) {
         mutate((key) => typeof key === "string" && (key.startsWith("/workloads") || key === "/overview"));
       } else if (t.startsWith("model.") || t.startsWith("enrollment_token.") || t.startsWith("api_key.")) {
         mutate((key) => typeof key === "string" && (key === "/models" || key.startsWith("/model-operations") || key === "/enrollment-tokens" || key === "/api-keys" || key === "/nodes" || key.startsWith("/nodes/")));
+      } else if (t === "agent.update" || t === "rollout") {
+        // Update progress + campaign state (v0.7+) — also refresh nodes
+        // (maintenance flag flips) and the overview counts.
+        mutate((key) => typeof key === "string" && (key.startsWith("/agent-updates") || key.startsWith("/rollouts") || key === "/nodes" || key.startsWith("/nodes/") || key === "/overview"));
+      } else if (t === "release.registered" || t === "release.revoked" || t === "release_key.registered" || t === "release_key.revoked") {
+        mutate((key) => typeof key === "string" && (key === "/releases" || key === "/release-keys"));
+      } else if (t === "control-plane") {
+        mutate((key) => typeof key === "string" && (key === "/control-plane" || key === "/overview"));
       }
     };
 
@@ -46,10 +54,15 @@ export function useClusterEvents(enabled = true) {
     for (const t of [
       "node.connected", "node.disconnected", "node.capability", "node.metrics",
       "node.approved", "node.revoked", "node.reinstated", "node.deleted", "node.updated",
+      "node.maintenance",
       "workload.queued", "workload.started", "workload.finished",
       "model.operation", "enrollment.requested", "enrollment.denied",
       "enrollment_token.created", "api_key.created", "api_key.revoked",
       "settings.updated",
+      "agent.update", "rollout",
+      "release.registered", "release.revoked",
+      "release_key.registered", "release_key.revoked",
+      "control-plane",
     ]) {
       es.addEventListener(t, handler as EventListener);
     }
