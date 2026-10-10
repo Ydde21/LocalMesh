@@ -37,8 +37,25 @@ func PostgresDSN(t *testing.T) string {
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
 
+	// Registered BEFORE `docker run` so every exit path — Skip on run
+	// failure, readiness timeout, t.Fatal, panic — still sweeps a
+	// container that may have been created daemon-side before the
+	// client returned an error (e.g. context deadline mid-run).
+	t.Cleanup(func() {
+		rmCtx, rmCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer rmCancel()
+		exec.CommandContext(rmCtx, "docker", "rm", "-f", name).Run()
+	})
+
+	// --tmpfs over PGDATA stops postgres:16-alpine's declared VOLUME
+	// from leaking an anonymous volume per run (--rm only removes the
+	// container) and is faster than disk. Ownership labels let
+	// scripts/clean-test-resources.sh sweep only test-owned resources.
 	cmd := exec.CommandContext(ctx, "docker", "run", "-d", "--rm",
 		"--name", name,
+		"-l", "localmesh.test=1",
+		"-l", "localmesh.test.role=postgres",
+		"--tmpfs", "/var/lib/postgresql/data:rw,size=512m",
 		"-e", "POSTGRES_PASSWORD=localmeshtest",
 		"-e", "POSTGRES_DB=localmesh",
 		"-p", fmt.Sprintf("127.0.0.1:%d:5432", port),
@@ -47,9 +64,6 @@ func PostgresDSN(t *testing.T) string {
 	if err != nil {
 		t.Skipf("docker postgres unavailable: %v: %s", err, strings.TrimSpace(string(out)))
 	}
-	t.Cleanup(func() {
-		exec.Command("docker", "rm", "-f", name).Run()
-	})
 
 	dsn := fmt.Sprintf("postgres://postgres:localmeshtest@127.0.0.1:%d/localmesh?sslmode=disable", port)
 	// Wait for readiness.
