@@ -453,21 +453,26 @@ func TestChaosOwnershipCrashPromotion(t *testing.T) {
 
 	// Standby-era security spot-check (scenario H slice): nothing but
 	// the standby stub answers while it waits — privileged API 503,
-	// inference surface 503, healthz 503.
+	// inference surface 503. Health semantics split: /healthz 200 (the
+	// standby is ALIVE — liveness must not flap it), /readyz 503 (not
+	// routable — this is what the router/LB probes).
 	for _, path := range []string{"/api/v1/nodes", "/v1/models"} {
 		if code, _ := keyReq(t, standby, http.MethodGet, path, adminKey, nil); code != http.StatusServiceUnavailable {
 			t.Fatalf("standby %s = %d, want 503", path, code)
 		}
 	}
-	if c := healthCode(standby); c != http.StatusServiceUnavailable {
-		t.Fatalf("standby /healthz = %d, want 503", c)
+	if c := readyCode(standby); c != http.StatusServiceUnavailable {
+		t.Fatalf("standby /readyz = %d, want 503", c)
+	}
+	if c := healthCode(standby); c != http.StatusOK {
+		t.Fatalf("standby /healthz = %d, want 200 (live, not routable)", c)
 	}
 
 	// THE FAULT: terminate the lock-holding session.
 	killAdvisoryHolders(t, dsn)
 	t0 := time.Now()
 
-	chaosWait(t, 30*time.Second, func() bool { return healthCode(standby) == http.StatusOK },
+	chaosWait(t, 30*time.Second, func() bool { return readyCode(standby) == http.StatusOK },
 		"standby promotion")
 	failover := time.Since(t0)
 	t.Logf("standby failover (lock kill → serving): %s", failover.Round(time.Millisecond))
