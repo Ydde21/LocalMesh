@@ -3,6 +3,8 @@
 // Usage:
 //
 //	localmesh-agent join --server https://host:8443 --token lme_... [--name ...] [--ca-fingerprint sha256:...]
+//	localmesh-agent join -discover --token lme_... [-discover-instance name] [--ca-fingerprint sha256:...]
+//	localmesh-agent discover [-timeout 5s] [-json]
 //	localmesh-agent run [--config path]
 //	localmesh-agent doctor [--config path] [--ca-file ca.pem]
 //	localmesh-agent service install|uninstall|start|stop|status [--config path]
@@ -11,6 +13,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -21,6 +24,7 @@ import (
 
 	"github.com/localmesh/localmesh/internal/agent"
 	"github.com/localmesh/localmesh/internal/agent/hardware"
+	"github.com/localmesh/localmesh/internal/discovery"
 )
 
 var version = "dev"
@@ -36,6 +40,8 @@ func main() {
 	switch os.Args[1] {
 	case "join":
 		cmdJoin(log)
+	case "discover":
+		cmdDiscover()
 	case "run":
 		cmdRun(log)
 	case "doctor":
@@ -56,13 +62,14 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `localmesh-agent — LocalMesh node agent
 
 Commands:
-  join     enroll this machine with a control plane
-  run      connect and serve workloads (default when configured)
-  doctor   check connectivity, credentials, engine, and telemetry
-  service  install|uninstall|start|stop|status the OS service
-  status   show local agent configuration
+  join      enroll this machine with a control plane
+  discover  find LocalMesh clusters on this network (mDNS)
+  run       connect and serve workloads (default when configured)
+  doctor    check connectivity, credentials, engine, and telemetry
+  service   install|uninstall|start|stop|status the OS service
+  status    show local agent configuration
 
-Run "localmesh-agent join -h" for options.
+Run "localmesh-agent join -h" or "localmesh-agent discover -h" for options.
 `)
 }
 
@@ -76,10 +83,20 @@ func cmdJoin(log *slog.Logger) {
 	cfgPath := fs.String("config", "", "config file path (default ~/.localmesh/agent.json)")
 	ollama := fs.String("ollama-url", "", "Ollama endpoint (default http://127.0.0.1:11434)")
 	foreground := fs.Bool("run", true, "start serving workloads after approval")
+	discover := fs.Bool("discover", false, "find the control plane via mDNS instead of --server")
+	discInstance := fs.String("discover-instance", "", "cluster name to pick when several are discovered")
+	discTimeout := fs.Duration("discover-timeout", 5*time.Second, "mDNS browse window for -discover")
 	fs.Parse(os.Args[2:])
 
-	if *server == "" || *token == "" {
-		fmt.Fprintln(os.Stderr, "join requires --server and --token")
+	switch {
+	case *discover && *server != "":
+		fmt.Fprintln(os.Stderr, "use either --server or --discover, not both")
+		os.Exit(2)
+	case !*discover && *server == "":
+		fmt.Fprintln(os.Stderr, "join requires --server (or --discover)")
+		os.Exit(2)
+	case *token == "":
+		fmt.Fprintln(os.Stderr, "join requires --token")
 		os.Exit(2)
 	}
 	path := *cfgPath
@@ -94,14 +111,38 @@ func cmdJoin(log *slog.Logger) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Discovery supplies only the server URL and a verified CA
+	// fingerprint — the enrollment token and admin approval are
+	// unchanged, so discovery never authorizes a device.
+	serverURL := *server
+	caFinger := *fingerprint
+	var ds *agent.DiscoveredServer
+	if *discover {
+		var err error
+		ds, err = agent.DiscoverServer(ctx, agent.DiscoverJoinOptions{
+			Timeout: *discTimeout, Instance: *discInstance,
+			CAFinger: caFinger, Stderr: os.Stderr,
+		})
+		if err != nil {
+			fatal(err)
+		}
+		serverURL = ds.Server
+		caFinger = ds.CAFinger
+	}
+
 	res, err := agent.Enroll(ctx, agent.EnrollOptions{
-		Server: *server, Token: *token, Name: *name,
-		CAFinger: *fingerprint, Wait: *wait, Stderr: os.Stderr,
+		Server: serverURL, Token: *token, Name: *name,
+		CAFinger: caFinger, Wait: *wait, Stderr: os.Stderr,
 	})
 	if err != nil {
 		fatal(err)
 	}
 	res.Config.OllamaURL = *ollama
+	if ds != nil {
+		res.Config.DiscoveryEnabled = true
+		res.Config.DiscoveredCluster = ds.Cluster.Instance
+		res.Config.DiscoveredAt = time.Now().UTC()
+	}
 	if err := res.Config.Save(path); err != nil {
 		fatal(err)
 	}
@@ -112,6 +153,44 @@ func cmdJoin(log *slog.Logger) {
 		if err := ag.Run(ctx); err != nil {
 			fatal(err)
 		}
+	}
+}
+
+func cmdDiscover() {
+	fs := flag.NewFlagSet("discover", flag.ExitOnError)
+	timeout := fs.Duration("timeout", discovery.DefaultBrowseTimeout, "mDNS browse window")
+	asJSON := fs.Bool("json", false, "emit the raw cluster list as JSON for scripting")
+	fs.Parse(os.Args[2:])
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	clusters, err := agent.DiscoverServers(ctx, *timeout)
+	if err != nil {
+		fatal(err)
+	}
+	if *asJSON {
+		if clusters == nil {
+			clusters = []discovery.Cluster{}
+		}
+		json.NewEncoder(os.Stdout).Encode(clusters)
+		return
+	}
+	// Empty is not an error: mDNS is link-local multicast and does not
+	// cross routed networks, VLANs, or VPNs — exit 0 with guidance.
+	if len(clusters) == 0 {
+		fmt.Println("no LocalMesh clusters found on this network — use `join --server <url>` for manual enrollment")
+		fmt.Println("note: discovery works only on the local network segment (not across routers, VLANs, or VPNs)")
+		return
+	}
+	fmt.Printf("%-24s  %-30s  %s\n", "NAME", "HOST:PORT", "CA FINGERPRINT")
+	for _, c := range clusters {
+		fp := c.CAFingerprint
+		if fp == "" {
+			fp = "(none advertised — join needs --ca-fingerprint)"
+		} else if len(fp) > 23 {
+			fp = fp[:23] + "…"
+		}
+		fmt.Printf("%-24s  %-30s  %s\n", c.Instance, c.Endpoint(), fp)
 	}
 }
 
