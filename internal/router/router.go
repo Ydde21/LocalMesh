@@ -122,17 +122,24 @@ func New(log *slog.Logger, o Options) (*Router, error) {
 
 // Serve listens and proxies until ctx is cancelled. Blocks.
 func (r *Router) Serve(ctx context.Context, o Options) error {
-	go r.probeLoop(ctx)
-
 	ln, err := net.Listen("tcp", o.Listen)
 	if err != nil {
 		return err
 	}
+	return r.ServeListener(ctx, ln, o.StatusAddr)
+}
+
+// ServeListener proxies on an already-bound listener — the caller knows
+// the socket is accepting before ServeListener returns (no
+// listen-then-dial race in callers that need readiness).
+func (r *Router) ServeListener(ctx context.Context, ln net.Listener, statusAddr string) error {
+	go r.probeLoop(ctx)
+
 	go func() { <-ctx.Done(); ln.Close() }()
 	r.log.Info("router listening", "addr", ln.Addr(), "backends", len(r.backends))
 
-	if o.StatusAddr != "" {
-		go r.serveStatus(ctx, o.StatusAddr)
+	if statusAddr != "" {
+		go r.serveStatus(ctx, statusAddr)
 	}
 
 	for {

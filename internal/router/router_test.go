@@ -46,17 +46,18 @@ func startRouter(t *testing.T, backends []string, wait time.Duration) string {
 		t.Fatal(err)
 	}
 	addr := ln.Addr().String()
-	ln.Close()
 	r, err := New(discardLog(), Options{
 		Listen: addr, Backends: backends,
 		Interval: 30 * time.Millisecond, Wait: wait,
 	})
 	if err != nil {
+		ln.Close()
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go r.Serve(ctx, Options{Listen: addr})
+	// Bound listener handed in already-accepting — no dial race.
+	go r.ServeListener(ctx, ln, "")
 	return addr
 }
 
