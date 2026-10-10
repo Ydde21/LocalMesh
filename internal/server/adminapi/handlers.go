@@ -34,7 +34,14 @@ type API struct {
 
 	defaultMaxConcurrent int
 	enrollTokenTTL       time.Duration
+
+	// discoveryStatus reports LAN advertise state; nil = unset (server
+	// wires it post-construction once the announcer exists).
+	discoveryStatus func() map[string]any
 }
+
+// SetDiscoveryStatus wires the server's announce-state provider.
+func (a *API) SetDiscoveryStatus(fn func() map[string]any) { a.discoveryStatus = fn }
 
 func New(st *store.DB, hub *nodehub.Hub, sched *scheduler.Scheduler, ev *events.Broker, caPEM []byte, log *slog.Logger) *API {
 	return &API{
@@ -78,6 +85,7 @@ func (a *API) Register(mux *http.ServeMux, mwAdmin, mwRead func(http.Handler) ht
 	mux.Handle("GET /api/v1/model-operations", mwRead(http.HandlerFunc(a.handleModelOps)))
 	mux.Handle("POST /api/v1/model-operations/{id}/cancel", mwAdmin(http.HandlerFunc(a.handleModelOpCancel)))
 	mux.Handle("GET /api/v1/models/placement", mwRead(http.HandlerFunc(a.handleModelPlacement)))
+	mux.Handle("GET /api/v1/discovery/status", mwRead(http.HandlerFunc(a.handleDiscoveryStatus)))
 	mux.Handle("POST /api/v1/dashboard/sessions/revoke", mwAdmin(http.HandlerFunc(a.handleSessionRevoke)))
 	mux.Handle("GET /api/v1/dashboard/sessions/check", mwAdmin(http.HandlerFunc(a.handleSessionCheck)))
 
@@ -95,6 +103,19 @@ func (a *API) Register(mux *http.ServeMux, mwAdmin, mwRead func(http.Handler) ht
 // ---------------------------------------------------------------------------
 // Public enrollment endpoints
 // ---------------------------------------------------------------------------
+
+// handleDiscoveryStatus reports mDNS advertise state for the dashboard's
+// onboarding flow. Everything it returns is already public on the LAN
+// (the cluster name and CA fingerprint are the advertisement itself).
+func (a *API) handleDiscoveryStatus(w http.ResponseWriter, r *http.Request) {
+	if a.discoveryStatus == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"enabled": false, "advertising": false, "cluster_name": "", "ca_fingerprint": "",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, a.discoveryStatus())
+}
 
 func (a *API) handleCAPEM(w http.ResponseWriter, r *http.Request) {
 	if len(a.caPEM) == 0 {

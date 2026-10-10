@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/localmesh/localmesh/internal/contracts"
 	"github.com/localmesh/localmesh/internal/creds"
+	"github.com/localmesh/localmesh/internal/discovery"
 	"github.com/localmesh/localmesh/internal/server/adminapi"
 	"github.com/localmesh/localmesh/internal/server/auth"
 	"github.com/localmesh/localmesh/internal/server/events"
@@ -39,7 +41,8 @@ type Server struct {
 	ev    *events.Broker
 	ca    *tlsx.CA
 
-	httpSrv *http.Server
+	httpSrv   *http.Server
+	announcer *discovery.Announcer
 }
 
 func New(cfg Config, log *slog.Logger) *Server {
@@ -69,7 +72,25 @@ func (s *Server) Start(ctx context.Context) error {
 	var tlsCfg *tls.Config
 	var caPEM []byte
 	if !s.cfg.DevInsecureHTTP {
-		ca, err := tlsx.LoadOrCreate(s.cfg.DataDir, s.cfg.Hostnames, nil)
+		hostnames := s.cfg.Hostnames
+		if s.cfg.Discovery {
+			// Agents joining via mDNS dial the advertised hostname —
+			// make sure the leaf covers <hostname>.local.
+			if h, herr := os.Hostname(); herr == nil {
+				for _, cand := range []string{h + ".local", h} {
+					found := false
+					for _, e := range hostnames {
+						if e == cand {
+							found = true
+						}
+					}
+					if !found {
+						hostnames = append(hostnames, cand)
+					}
+				}
+			}
+		}
+		ca, err := tlsx.LoadOrCreate(s.cfg.DataDir, hostnames, nil)
 		if err != nil {
 			return fmt.Errorf("tls: %w", err)
 		}
@@ -80,6 +101,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	s.admin = adminapi.New(st, s.hub, s.sched, s.ev, caPEM, s.log)
+	s.admin.SetDiscoveryStatus(s.DiscoveryStatus)
 
 	// A restart abandons all in-flight work: connections, capacity
 	// reservations and streaming goroutines are gone. Fail those rows so
@@ -101,6 +123,15 @@ func (s *Server) Start(ctx context.Context) error {
 	s.bootstrapDashboardPassword()
 	s.bootstrapSessionKey()
 	s.reloadSchedulerSettings(ctx)
+
+	// LAN discovery: announce _localmesh._tcp over mDNS so agents can
+	// find this cluster. Advertises only public info (port, cluster
+	// name, CA fingerprint) and authorizes nothing — enrollment still
+	// needs a token + admin approval. TLS-only: in insecure-dev mode
+	// there is no CA fingerprint to pin against.
+	if s.cfg.Discovery && !s.cfg.DevInsecureHTTP {
+		s.startDiscovery(ctx)
+	}
 
 	mux := http.NewServeMux()
 	lookup := s.lookupPrincipal
@@ -387,6 +418,58 @@ func (s *Server) reloadSchedulerSettings(ctx context.Context) {
 		}
 	}
 	s.sched.UpdateConfig(cfg)
+}
+
+// startDiscovery advertises this control plane on the LAN via mDNS.
+// Failure to announce is not fatal — multicast is unavailable on many
+// networks (containers, VPNs); agents can always enroll with --server.
+func (s *Server) startDiscovery(ctx context.Context) {
+	_, portStr, err := net.SplitHostPort(s.cfg.Listen)
+	if err != nil {
+		s.log.Warn("discovery: cannot parse listen address", "err", err)
+		return
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 {
+		s.log.Warn("discovery: bad listen port", "port", portStr)
+		return
+	}
+	ann, err := discovery.Announce(ctx, discovery.AnnounceOptions{
+		Port:     port,
+		Instance: s.cfg.ClusterName,
+		TXT: map[string]string{
+			discovery.TXTKeyCAFP:  s.ca.Fingerprint(),
+			discovery.TXTKeyProto: strconv.Itoa(contracts.ProtocolVersion),
+		},
+	})
+	if err != nil {
+		if errors.Is(err, discovery.ErrUnavailable) {
+			s.log.Info("LAN discovery unavailable (no multicast?) — agents can still join via --server")
+		} else {
+			s.log.Warn("LAN discovery announce failed", "err", err)
+		}
+		return
+	}
+	s.announcer = ann
+	s.log.Info("LAN discovery active", "service", discovery.ServiceType,
+		"instance", s.cfg.ClusterName, "port", port)
+}
+
+// DiscoveryStatus reports LAN advertisement state for the dashboard.
+func (s *Server) DiscoveryStatus() map[string]any {
+	return map[string]any{
+		"enabled":        s.cfg.Discovery && !s.cfg.DevInsecureHTTP,
+		"advertising":    s.announcer != nil,
+		"cluster_name":   s.cfg.ClusterName,
+		"ca_fingerprint": caFP(s.ca),
+	}
+}
+
+func caFP(ca *tlsx.CA) string {
+	if ca == nil {
+		return ""
+	}
+	return ca.Fingerprint()
 }
 
 func (s *Server) Hub() *nodehub.Hub               { return s.hub }
