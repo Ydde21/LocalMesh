@@ -6,7 +6,7 @@ BIN           := bin
 VERSION       ?= dev
 LDFLAGS       := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build test vet tidy clean release dashboard dev-up dev-down
+.PHONY: all build test vet tidy clean release dashboard dev-up dev-down verify verify-fast
 
 all: build
 
@@ -17,6 +17,30 @@ build:
 
 test:
 	go test ./...
+
+# Regression gate — run before merging any workstream and before calling
+# a milestone done. Covers formatting, static analysis, the full backend
+# suite (incl. security regression tests), race detection on the server,
+# agent cross-compiles, and every frontend check. Fails fast on the
+# cheapest checks first.
+verify:
+	@test -z "$$(gofmt -l internal cmd 2>/dev/null)" || (echo "gofmt dirty:"; gofmt -l internal cmd; exit 1)
+	go vet ./...
+	go test ./...
+	go test -race -count=1 ./internal/server/ ./internal/server/scheduler/
+	@for t in "darwin arm64" "darwin amd64" "linux amd64" "linux arm64" "windows amd64"; do \
+		set -- $$t; GOOS=$$1 GOARCH=$$2 go build -o /dev/null ./cmd/localmesh-agent || exit 1; \
+	done
+	@echo "cross-compile ok (5 targets)"
+	cd web && npx tsc --noEmit && npm run lint && npm run build
+	@echo "verify: PASS"
+
+# Backend-only gate — the loop to run after every integration step.
+verify-fast:
+	@test -z "$$(gofmt -l internal cmd 2>/dev/null)" || (echo "gofmt dirty:"; gofmt -l internal cmd; exit 1)
+	go vet ./...
+	go test -count=1 ./internal/server/
+	@echo "verify-fast: PASS"
 
 vet:
 	go vet ./...

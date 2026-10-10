@@ -126,7 +126,21 @@ const CHECK_TTL_MS = 60_000;
 const remoteOK = new Map<string, number>();
 let warnedOnce = false;
 
-export async function checkSession(token: string | undefined | null): Promise<boolean> {
+export interface CheckOptions {
+  // privileged = the request performs a mutation (POST/PATCH/PUT/DELETE
+  // through the BFF, or an admin action). Privileged checks always
+  // consult the durable revocation store — the 60s positive cache is
+  // never consulted — and FAIL CLOSED when the control plane can't be
+  // reached. Read-only checks may use the cache and degrade to local
+  // validation on upstream outage (dashboard availability shouldn't die
+  // with the API, but a revoked admin must never regain mutation).
+  privileged?: boolean;
+}
+
+export async function checkSession(
+  token: string | undefined | null,
+  opts?: CheckOptions
+): Promise<boolean> {
   if (!token) return false;
   const parts = token.split(".");
   if (parts.length !== 3) return false;
@@ -144,28 +158,39 @@ export async function checkSession(token: string | undefined | null): Promise<bo
 
   // Durable check: the control plane stores revocations in Postgres, so
   // logouts issued before this process (re)started still count.
-  if ((remoteOK.get(nonce) ?? 0) > Date.now()) return true;
+  // Privileged calls skip the positive cache entirely — a revocation
+  // that lands after a cached "clean" verdict must still deny mutations.
+  if (!opts?.privileged && (remoteOK.get(nonce) ?? 0) > Date.now()) return true;
   try {
     const res = await upstreamFetch(
       `/api/v1/dashboard/sessions/check?nonce=${encodeURIComponent(nonce)}`
     );
     if (res.ok) {
       const body = (await res.json()) as { revoked?: boolean };
-      if (body.revoked) return false;
+      if (body.revoked) {
+        revokedNonces.set(nonce, expiry); // subsequent reads reject fast
+        remoteOK.delete(nonce);
+        return false;
+      }
       remoteOK.set(nonce, Date.now() + CHECK_TTL_MS);
       if (remoteOK.size > 8192) remoteOK.clear(); // bound memory
       return true;
     }
   } catch {
-    // upstream unreachable — degrade to local validation below
+    // upstream unreachable — policy branch below
+  }
+  if (opts?.privileged) {
+    // Fail closed: we cannot prove the session isn't revoked, so a
+    // mutation must not proceed. Reads still degrade (below).
+    return false;
   }
   // The durable check couldn't run: fall back to local-only validation
   // rather than logging everyone out whenever the API blips. The window
   // this misses is "revoked after web restart AND control plane
-  // unreachable" — narrow and time-bounded.
+  // unreachable" — narrow, time-bounded, and read-only.
   if (!warnedOnce) {
     warnedOnce = true;
-    console.warn("[localmesh] session revocation check unavailable — degraded to local-only");
+    console.warn("[localmesh] session revocation check unavailable — reads degrade to local-only, mutations denied");
   }
   return true;
 }

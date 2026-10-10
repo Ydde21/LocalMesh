@@ -14,6 +14,13 @@ import (
 // version than its own.
 const ProtocolVersion = 1
 
+// MinAgentProtocolVersion is the oldest agent protocol this server can
+// still serve — agents older than this are rejected at hello with an
+// upgrade instruction rather than silently half-working. Kept equal to
+// ProtocolVersion while v1 is the only version; lower it only when the
+// server genuinely carries compatibility code for an older dialect.
+const MinAgentProtocolVersion = 1
+
 // ---------------------------------------------------------------------------
 // Node identity & hardware
 // ---------------------------------------------------------------------------

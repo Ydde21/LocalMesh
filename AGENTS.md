@@ -65,3 +65,28 @@ cd web && npm run dev           # dashboard :3000 (needs LOCALMESH_API_URL/KEY)
   `bootstrap-admin.key`) — shared volume in compose.
 - `web/node_modules` contains a Go package (flatted); `web/go.mod` exists
   solely to exclude it from the parent module.
+
+## Parallel-agent workflow (v0.5+ — mandatory)
+
+v0.4 proved concurrent agents can silently revert verified code. Rules:
+
+- **Baseline is committed.** `main` is always a verified state — never
+  leave the tree dirty when handing off or pausing.
+- **Exclusive file ownership.** Each workstream owns disjoint files;
+  `internal/server/server.go`, `adminapi/handlers.go`, `auth/**`,
+  `nodehub/**`, `scheduler/**`, existing `store` files, `Makefile`, and
+  `AGENTS.md` are **core-owned** — parallel agents do not edit them.
+  Integration points are applied by the integrator.
+- **Isolated worktrees.** Each agent works in `git worktree add
+  ../lm-<name> -b <name>` and lands one reviewed diff at a time.
+- **Never** run `git checkout --`, `git restore`, or broad file copies
+  over shared paths. Adding new files in a package is safe; modifying
+  shared files is not.
+- **After every integration:** run `make verify-fast` (or `make verify`
+  at phase boundaries). `internal/server/security_test.go` is the
+  authoritative security regression suite — it must stay green.
+- **Unexpected churn = stop.** If `git status`/`git diff` shows
+  deletions or reverted hunks you didn't make, investigate before
+  continuing — do not "restore" blindly.
+- New migrations go in `internal/server/store/migrations/` (numbered
+  SQL files auto-load via embed) — no shared-file edits needed.

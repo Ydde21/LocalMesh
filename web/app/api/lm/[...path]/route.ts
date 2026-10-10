@@ -55,8 +55,11 @@ function apiKey(): string {
 
 async function proxy(req: Request, ctx: { params: Promise<{ path: string[] }> }) {
   // Session gate: this proxy upgrades every call to admin-level access,
-  // so an unauthenticated visitor must get nothing through.
-  if (!(await checkSession(sessionCookieValue(req)))) {
+  // so an unauthenticated visitor must get nothing through. Mutating
+  // methods are privileged — they always hit the durable revocation
+  // store and fail closed when it can't confirm the session is live.
+  const privileged = !["GET", "HEAD", "OPTIONS"].includes(req.method);
+  if (!(await checkSession(sessionCookieValue(req), { privileged }))) {
     return Response.json(
       { error: { message: "authentication required", type: "authentication_error" } },
       { status: 401 }

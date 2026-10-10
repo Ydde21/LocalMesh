@@ -181,6 +181,11 @@ func (h *Hub) HandleConnection(ctx context.Context, c *wsjson.Conn, node *store.
 		c.Close(websocket.StatusUnsupportedData, "protocol version")
 		return
 	}
+	if hello.ProtocolVersion < contracts.MinAgentProtocolVersion {
+		h.sendError(ctx, c, "protocol_version", "agent protocol is too old; upgrade the agent")
+		c.Close(websocket.StatusUnsupportedData, "protocol version too old")
+		return
+	}
 	if hello.NodeID != "" && hello.NodeID != node.ID {
 		h.log.Warn("hello node_id does not match credential", "claimed", hello.NodeID, "node", node.ID)
 		c.Close(websocket.StatusPolicyViolation, "node identity mismatch")
