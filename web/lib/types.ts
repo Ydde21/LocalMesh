@@ -73,6 +73,9 @@ export interface Node {
   online: boolean;
   stale_heartbeat: boolean;
   hardware: HardwareInfo;
+  // Top-level agent version (v0.5+). Older servers report it only inside
+  // `hardware.agent_version` — read `node.agent_version ?? hardware.agent_version`.
+  agent_version?: string;
   engines?: EngineInfo[];
   models?: Model[];
   metrics?: Metrics | null;
@@ -95,6 +98,13 @@ export interface Overview {
   active_requests: number;
   queued_or_active: number;
   models_distinct: number;
+  // v0.5+: control-plane base URL for agent join commands. Absent on older
+  // servers — fall back to a placeholder in the UI.
+  server_url?: string;
+  // v0.5+: server-side counts of model ops in flight / waiting. Absent on
+  // older servers — consumers compute them from useModelOps instead.
+  model_ops_active?: number;
+  model_ops_queued?: number;
 }
 
 // Cluster catalog entries are aggregated server-side from node model
@@ -218,7 +228,12 @@ export interface APIKey {
 // `detail` (engine status line) plus completed/total byte counters.
 // cancelled/interrupted are produced when an op is aborted or a node
 // drops mid-operation.
+//
+// v0.5 adds a queue: `queued` = waiting for a concurrency slot (or retry
+// backoff when `next_attempt_at` is set); `pending`/`completed` are legacy
+// spellings of `queued`/`succeeded` on old rows.
 export type ModelOpStatus =
+  | "queued"
   | "dispatched"
   | "pending"
   | "running"
@@ -238,9 +253,21 @@ export interface ModelOperation {
   detail: string;
   completed: number;
   total: number;
+  // `error` is the legacy field name; v0.5 emits `last_error`. Read
+  // `last_error || error` for display.
   error?: string;
+  last_error?: string;
   created_at: string;
   updated_at: string;
+  // v0.5 queue/retry/progress fields (all optional — absent on old rows):
+  attempt?: number;         // attempts made so far (0 = first try)
+  max_attempts?: number;    // configured retry ceiling
+  next_attempt_at?: string; // queued for retry — dispatch after this time
+  phase?: string;           // engine-reported phase ("downloading", "verifying")
+  rate_bps?: number;        // measured transfer rate, bytes/sec, while running
+  indeterminate?: boolean;  // total bytes unknown — never render 0/0
+  priority?: number;
+  finished_at?: string;     // terminal timestamp (duration = finished_at - created_at)
 }
 
 export interface AuditEntry {
@@ -250,4 +277,30 @@ export interface AuditEntry {
   target: string;
   meta: Record<string, string>;
   created_at: string;
+}
+
+// GET /api/v1/version — unauthenticated control-plane identity. Not present
+// on pre-v0.5 servers; consumers must tolerate a 404.
+export interface VersionInfo {
+  server_version: string;
+  protocol: number;
+  min_agent_protocol: number;
+}
+
+// GET /api/v1/discovery/status — LAN discovery (mDNS) state. The endpoint
+// may 404 entirely on servers built without the feature.
+export interface DiscoveryStatus {
+  enabled: boolean;
+  advertising: boolean;
+  cluster_name: string;
+  ca_fingerprint?: string;
+}
+
+// settings["modelops"] — v0.5 model-operation queue tuning. The whole
+// object is PUT back under /settings/modelops.
+export interface ModelOpsSettings {
+  global_concurrent?: number;  // max ops in flight cluster-wide (1-16)
+  per_node_concurrent?: number; // max ops in flight per node (1-4)
+  queue_max?: number;          // max queued ops before rejection (8-256)
+  max_attempts?: number;       // retry attempts per op (0-8)
 }

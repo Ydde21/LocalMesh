@@ -14,7 +14,8 @@ import {
   LogOut,
 } from "lucide-react";
 import { useClusterEvents, type ClusterEvent } from "@/lib/events";
-import { UNAUTHORIZED_EVENT } from "@/lib/api";
+import { UNAUTHORIZED_EVENT, useVersion } from "@/lib/api";
+import { fmtVersion } from "@/lib/format";
 
 const NAV = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
@@ -40,6 +41,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const { events, connected } = useClusterEvents();
+  // Absent on pre-v0.5 servers — the footer line simply stays hidden.
+  const { data: ver } = useVersion();
 
   // Any API call that comes back 401 means the session is gone.
   useEffect(() => {
@@ -106,6 +109,14 @@ export function Shell({ children }: { children: React.ReactNode }) {
                 <LogOut size={12} />
               </button>
             </div>
+            {ver && (
+              <div
+                className="mono mt-1.5 text-[10px] text-[var(--color-text-faint)]"
+                title={`server ${ver.server_version} · protocol ${ver.protocol} (agents ≥ ${ver.min_agent_protocol})`}
+              >
+                server {fmtVersion(ver.server_version)} · proto {ver.protocol}
+              </div>
+            )}
           </div>
         </aside>
 

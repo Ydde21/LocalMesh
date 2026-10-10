@@ -1,6 +1,6 @@
 "use client";
 
-import { useNodes, useWorkloads } from "@/lib/api";
+import { useNodes, useWorkloads, useModelOps } from "@/lib/api";
 import { TopologyGraph } from "@/components/topology-graph";
 import { Panel } from "@/components/ui";
 import { fmtAgo } from "@/lib/format";
@@ -10,6 +10,7 @@ export default function TopologyPage() {
   const { data: nodes } = useNodes();
   const { data: running } = useWorkloads("running");
   const { data: queued } = useWorkloads("queued");
+  const { data: ops } = useModelOps();
 
   const active = [...(running ?? []), ...(queued ?? [])];
 
@@ -22,7 +23,7 @@ export default function TopologyPage() {
         </p>
       </header>
 
-      <TopologyGraph nodes={nodes ?? []} workloads={active} />
+      <TopologyGraph nodes={nodes ?? []} workloads={active} ops={ops ?? []} />
 
       <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
         <Panel>
@@ -54,6 +55,10 @@ export default function TopologyPage() {
             <Legend color="var(--color-online)" label="Online, idle" />
             <Legend color="var(--color-idle)" label="Online, executing work" pulse />
             <Legend color="#3a3a44" label="Offline / unreachable" dashed />
+            <div className="flex items-center gap-2.5">
+              <span className="h-2 w-2 rounded-full bg-[var(--color-idle)] pulse" />
+              <span className="text-[var(--color-text-dim)]">Model op in progress</span>
+            </div>
             <div className="pt-1 text-[11px] leading-relaxed text-[var(--color-text-faint)]">
               Nodes connect outbound to the control plane over an encrypted
               channel — no inbound ports required. Work through Tailscale,

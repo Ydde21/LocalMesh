@@ -33,6 +33,48 @@ export function fmtUptime(sec?: number): string {
   return `${(sec / 86400).toFixed(1)}d`;
 }
 
+// Wall-clock duration between two ISO timestamps: "34s", "3m12s", "1h5m".
+// Used for op runtimes (finished_at - created_at).
+export function fmtDur(from?: string, to?: string): string {
+  if (!from || !to) return "—";
+  const ms = new Date(to).getTime() - new Date(from).getTime();
+  if (!isFinite(ms) || ms < 0) return "—";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return s % 60 ? `${m}m${s % 60}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `${h}h${m % 60}m` : `${h}h`;
+}
+
+// Countdown to a future ISO timestamp ("8s", "2m5s"); "now" once elapsed.
+// Used for op retry backoffs (next_attempt_at).
+export function fmtIn(iso?: string): string {
+  if (!iso) return "—";
+  const ms = new Date(iso).getTime() - Date.now();
+  if (!isFinite(ms)) return "—";
+  if (ms <= 0) return "now";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return s % 60 ? `${m}m${s % 60}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `${h}h${m % 60}m` : `${h}h`;
+}
+
+// Bare semver gets a "v" prefix ("0.5.0" → "v0.5.0"); already-prefixed or
+// non-semver strings ("dev") pass through untouched.
+export function fmtVersion(v?: string): string {
+  if (!v) return "—";
+  return /^\d/.test(v) ? `v${v}` : v;
+}
+
+// A node's agent version — emitted top-level on v0.5+ servers, only inside
+// the hardware snapshot on older ones. Empty = pre-version agent ("legacy").
+export function agentVersion(n: { agent_version?: string; hardware?: { agent_version?: string } }): string {
+  return n.agent_version || n.hardware?.agent_version || "";
+}
+
 export function osLabel(os: string): string {
   return os === "darwin" ? "macOS" : os;
 }

@@ -13,8 +13,9 @@ import {
   Handle,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import type { Node, Workload } from "@/lib/types";
+import type { ModelOperation, Node, Workload } from "@/lib/types";
 import { Hexagon, Cpu } from "lucide-react";
+import { agentVersion, fmtVersion } from "@/lib/format";
 
 // Custom node components ------------------------------------------------
 
@@ -33,8 +34,9 @@ function HubNode() {
   );
 }
 
-function DeviceNode({ data }: { data: { node: Node; busy: boolean } }) {
+function DeviceNode({ data }: { data: { node: Node; busy: boolean; op?: string } }) {
   const n = data.node;
+  const ver = agentVersion(n);
   const color = !n.online
     ? "var(--color-danger)"
     : data.busy
@@ -46,6 +48,11 @@ function DeviceNode({ data }: { data: { node: Node; busy: boolean } }) {
       <div className="flex items-center gap-2">
         <span className="h-2 w-2 rounded-full" style={{ background: n.online ? color : "var(--color-text-faint)", boxShadow: n.online ? `0 0 8px ${color}66` : undefined }} />
         <span className="text-[12.5px] font-semibold">{n.name}</span>
+        {ver && (
+          <span className="mono ml-auto text-[9.5px] text-[var(--color-text-faint)]" title={`agent ${ver}`}>
+            {fmtVersion(ver)}
+          </span>
+        )}
       </div>
       <div className="mt-1.5 flex items-center gap-1.5 text-[10.5px] text-[var(--color-text-dim)]">
         <Cpu size={10} />
@@ -56,6 +63,13 @@ function DeviceNode({ data }: { data: { node: Node; busy: boolean } }) {
       <div className="mt-1 text-[10px] text-[var(--color-text-faint)]">
         {n.online ? `${n.in_flight}/${n.max_concurrent} slots · ${(n.latency_ms ?? 0).toFixed(0)}ms` : "offline"}
       </div>
+      {/* Model pull/delete in flight on this node — pulsing marker */}
+      {data.op && (
+        <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-[var(--color-idle)]">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-idle)] pulse" />
+          <span className="truncate" title={data.op}>{data.op}</span>
+        </div>
+      )}
       <Handle type="target" position={Position.Top} className="!invisible" />
       <Handle type="source" position={Position.Top} className="!invisible" />
     </div>
@@ -66,7 +80,15 @@ const nodeTypes = { hub: HubNode, device: DeviceNode };
 
 // -----------------------------------------------------------------------
 
-export function TopologyGraph({ nodes, workloads }: { nodes: Node[]; workloads: Workload[] }) {
+export function TopologyGraph({
+  nodes,
+  workloads,
+  ops = [],
+}: {
+  nodes: Node[];
+  workloads: Workload[];
+  ops?: ModelOperation[];
+}) {
   // Map each node to the models it is actively executing (live routing).
   const activeByNode = useMemo(() => {
     const m = new Map<string, string[]>();
@@ -78,6 +100,21 @@ export function TopologyGraph({ nodes, workloads }: { nodes: Node[]; workloads: 
     return m;
   }, [workloads]);
   const busyNodes = useMemo(() => new Set(activeByNode.keys()), [activeByNode]);
+
+  // Map each node to its in-flight model ops ("pull llama3.2:1b"). Queued
+  // ops count too — the node is reserved for the work.
+  const opByNode = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const o of ops) {
+      if (
+        o.status === "queued" || o.status === "pending" ||
+        o.status === "dispatched" || o.status === "running"
+      ) {
+        m.set(o.node_id, `${o.op} ${o.model}`);
+      }
+    }
+    return m;
+  }, [ops]);
 
   const { rfNodes, rfEdges } = useMemo(() => {
     const rfNodes: RFNode[] = [
@@ -95,7 +132,7 @@ export function TopologyGraph({ nodes, workloads }: { nodes: Node[]; workloads: 
         id: n.id,
         type: "device",
         position: { x, y },
-        data: { node: n, busy },
+        data: { node: n, busy, op: opByNode.get(n.id) },
       });
       const active = activeByNode.get(n.id);
       rfEdges.push({
@@ -119,7 +156,7 @@ export function TopologyGraph({ nodes, workloads }: { nodes: Node[]; workloads: 
       });
     });
     return { rfNodes, rfEdges };
-  }, [nodes, busyNodes, activeByNode]);
+  }, [nodes, busyNodes, activeByNode, opByNode]);
 
   return (
     <div className="panel h-[calc(100vh-190px)] min-h-[420px] overflow-hidden">
