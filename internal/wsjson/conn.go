@@ -38,6 +38,13 @@ func (c *Conn) Close(code websocket.StatusCode, reason string) error {
 	return c.ws.Close(code, reason)
 }
 
+// CloseNow drops the connection without the close handshake. Use it
+// when the peer is already known dead — a graceful Close would wait up
+// to 5s for a close echo that can never arrive, stalling teardown.
+func (c *Conn) CloseNow() error {
+	return c.ws.CloseNow()
+}
+
 // Dial opens a client connection. If tlsCfg is non-nil it is used for
 // wss:// endpoints (CA pinning lives in tlsCfg.RootCAs).
 func Dial(ctx context.Context, rawurl string, header http.Header, tlsCfg *tls.Config) (*Conn, error) {
