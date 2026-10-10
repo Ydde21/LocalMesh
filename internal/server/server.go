@@ -227,6 +227,11 @@ func (s *Server) Start(ctx context.Context) error {
 	defer qcancel()
 	go s.modelOps.Run(qctx)
 	go s.updateMgr.Run(qctx)
+	// Second, pool-side loss detector: fires on a confirmed takeover
+	// (lock row re-stamped) even while the lock-session heartbeat is
+	// still waiting out its exec timeout. Never fires on read errors —
+	// a down database can't have been claimed.
+	dbLost := WatchOwnershipRow(qctx, st, own, time.Second, s.log)
 
 	if !s.cfg.Standby {
 		var err error
@@ -284,8 +289,11 @@ func (s *Server) Start(ctx context.Context) error {
 	if n, err := st.FailOrphanedModelOps(ctx, "interrupted by control-plane restart"); err == nil && n > 0 {
 		s.log.Warn("marked interrupted model operations failed", "count", n)
 	}
-	go s.reconcileLoop(ctx)
-	go s.drainLoop(ctx)
+	// Bookkeeping loops ride the queue ctx too: on ownership loss their
+	// unfenced writes must stop with the dispatch queues, not run on to
+	// process exit inside the drain window.
+	go s.reconcileLoop(qctx)
+	go s.drainLoop(qctx)
 
 	if err := s.bootstrapAdminKey(ctx); err != nil {
 		return err
@@ -328,7 +336,16 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		pctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
-		if err := s.st.Pool.Ping(pctx); err != nil {
+		// Readiness = Postgres reachable AND the lock row still names
+		// this owner+epoch. A fenced-but-draining instance flips to 503
+		// the moment a successor stamps its takeover, so health-checking
+		// routers stop splicing new connections to it immediately.
+		if s.owner == nil {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		held, err := s.st.OwnershipHeld(pctx, s.owner.InstanceID().String(), s.owner.Epoch())
+		if err != nil || !held {
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
@@ -400,7 +417,7 @@ func (s *Server) Start(ctx context.Context) error {
 			"event": "released", "epoch": own.Epoch(), "instance": own.InstanceID().String()})
 		st.Close()
 		return nil
-	case <-own.Lost():
+	case <-MergedLoss(own.Lost(), dbLost):
 		// Advisory-lock session died or the row was taken: another
 		// control plane may already be authoritative. Fence ourselves —
 		// kill the queue and every node conn — then exit so a
@@ -411,7 +428,13 @@ func (s *Server) Start(ctx context.Context) error {
 		shCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		s.httpSrv.Shutdown(shCtx)
-		s.st.FailOrphanedWorkloads(context.Background(), "control-plane ownership lost")
+		// The sweep is ownership-guarded: if a successor already holds
+		// the lock row it owns the bookkeeping — an unfenced mass-fail
+		// here could mark the new owner's fresh rows failed mid-dispatch.
+		s.st.FailOrphanedWorkloadsIfOwner(context.Background(),
+			"control-plane ownership lost", own.InstanceID().String())
+		s.st.FailOrphanedModelOpsIfOwner(context.Background(),
+			"control-plane ownership lost", own.InstanceID().String())
 		st.AddOwnershipEvent(context.Background(), own.InstanceID().String(),
 			own.Epoch(), "lost", "advisory-lock session failed")
 		s.ev.Publish("control-plane", map[string]any{
