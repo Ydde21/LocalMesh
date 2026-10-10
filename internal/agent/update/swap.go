@@ -77,6 +77,11 @@ func StageArtifact(src Source, name, target, wantHex string) (staged string, err
 func InstallBinary(staged, target string) (bak string, err error) {
 	bak = target + backupSuffix
 	if _, err := os.Stat(target); err == nil {
+		// Only the latest .bak is ever kept: a leftover backup from a
+		// previous update is removed first — os.Rename will not replace
+		// an existing destination on Windows (the helper's swaps run
+		// there), and even on unix a stale backup is dead weight.
+		os.Remove(bak)
 		if err := os.Rename(target, bak); err != nil {
 			return "", fmt.Errorf("cannot move %s aside%s: %w",
 				target, windowsBusyHint(), err)

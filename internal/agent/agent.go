@@ -43,6 +43,7 @@ type Agent struct {
 	upg          *upgradeJob             // the single in-flight upgrade (nil when idle)
 	bootReport   *contracts.UpgradeState // boot-time verdict queued for the first session
 	updTarget    string                  // test seam: binary target override for updates
+	updStageHook func()                  // test seam: fires between staging and the pre-install abort check
 }
 
 func New(cfg *Config, log *slog.Logger) *Agent {
@@ -226,11 +227,12 @@ func (a *Agent) session(ctx context.Context) error {
 		"heartbeat", heartbeat)
 
 	// Initial capability report (also the post-reconnect re-report).
-	a.reportCapabilities(ctx, c)
+	capOK := a.reportCapabilities(ctx, c)
 
 	// Post-restart update resolution: confirm the new binary is live
-	// (verify_health) or report that an old binary came back up.
-	a.postHelloUpgradeCheck(c)
+	// (verify_health, after a short healthy-session settle window) or
+	// report that an old binary came back up.
+	a.postHelloUpgradeCheck(ctx, c, capOK)
 
 	// Heartbeat loop.
 	hbDone := make(chan struct{})
@@ -360,8 +362,11 @@ func (a *Agent) engineSignature(ctx context.Context) string {
 	return sb.String()
 }
 
-// reportCapabilities pushes hardware + engine + model inventory.
-func (a *Agent) reportCapabilities(ctx context.Context, c *wsjson.Conn) {
+// reportCapabilities pushes hardware + engine + model inventory and
+// reports whether the frame was written — the post-restart update
+// check requires the inventory to have reached the server before it
+// calls the session healthy.
+func (a *Agent) reportCapabilities(ctx context.Context, c *wsjson.Conn) bool {
 	rep := contracts.CapabilityReport{Hardware: a.hw}
 	for _, e := range a.engines {
 		ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -391,10 +396,11 @@ func (a *Agent) reportCapabilities(ctx context.Context, c *wsjson.Conn) {
 		Payload: contracts.MarshalPayload(rep),
 	}); err != nil {
 		a.log.Warn("capability report failed", "err", err)
-		return
+		return false
 	}
 	a.log.Info("capability report sent",
 		"engines", len(rep.Engines), "models", len(rep.Models))
+	return true
 }
 
 // loadedModels returns warm model names and whether at least one engine

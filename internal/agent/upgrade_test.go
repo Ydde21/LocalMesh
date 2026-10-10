@@ -540,12 +540,22 @@ func TestPendingMarkerRoundTrip(t *testing.T) {
 	}
 }
 
+// shrinkSettle shortens the post-restart health window for the test —
+// production keeps it at seconds, tests at tens of milliseconds.
+func shrinkSettle(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := upgradeHealthSettle
+	upgradeHealthSettle = d
+	t.Cleanup(func() { upgradeHealthSettle = old })
+}
+
 // TestVerifyHealthOnConfirmingBoot: marker to_version == running
 // version → verify_health is reported and the marker is deleted.
 func TestVerifyHealthOnConfirmingBoot(t *testing.T) {
 	f := newFakeCP(t)
 	dir := t.TempDir()
 	a := upgradeTestAgent(t, f, dir, nil)
+	shrinkSettle(t, 50*time.Millisecond)
 	mkPath, _ := a.pendingMarkerPath()
 	if err := writePendingMarker(mkPath, pendingUpdate{
 		OperationID: "op-ok", FromVersion: "0.6.0",
@@ -742,9 +752,10 @@ func TestRolledBackMarkerReportsOnNextSession(t *testing.T) {
 	if st.OperationID != "op-rb2" || st.ToVersion != "0.7.0" {
 		t.Fatalf("rolled_back = %+v", st)
 	}
-	if _, ok, _ := readPendingMarker(mkPath); ok {
-		t.Fatal("marker not cleared after rolled_back landed")
-	}
+	waitFor(t, 5*time.Second, "marker clear after rolled_back", func() bool {
+		_, ok, _ := readPendingMarker(mkPath)
+		return !ok
+	})
 }
 
 // TestNoRollbackWithoutMarker: a protocol rejection with NO pending
@@ -907,5 +918,605 @@ func TestProxySourceReadAndNotFound(t *testing.T) {
 	}
 	if _, err := p.Read("../escape"); err == nil {
 		t.Fatal("traversal name should be rejected")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// disk-space gate (v0.8)
+// ---------------------------------------------------------------------------
+
+// TestCheckUpdateDisk: the headroom gate fails closed on insufficient
+// space and fails open on measurement problems.
+func TestCheckUpdateDisk(t *testing.T) {
+	dir := t.TempDir()
+	a := &Agent{cfg: &Config{}, log: testLogger()}
+	target := filepath.Join(dir, "localmesh-agent")
+
+	old := diskFreeFn
+	t.Cleanup(func() { diskFreeFn = old })
+
+	// Unmeasurable filesystem → proceed (doctor surfaces that separately).
+	diskFreeFn = func(string) (uint64, error) { return 0, errors.New("no such fs") }
+	if err := a.checkUpdateDisk(target, 100<<20); err != nil {
+		t.Fatalf("measurement failure must not block the update: %v", err)
+	}
+	// Under 2× the artifact → refuse with an "insufficient disk" error.
+	diskFreeFn = func(string) (uint64, error) { return 150 << 20, nil }
+	err := a.checkUpdateDisk(target, 100<<20)
+	if err == nil || !strings.Contains(err.Error(), "insufficient disk") {
+		t.Fatalf("low space must refuse, got %v", err)
+	}
+	// ≥2× → proceed.
+	diskFreeFn = func(string) (uint64, error) { return 1 << 30, nil }
+	if err := a.checkUpdateDisk(target, 100<<20); err != nil {
+		t.Fatalf("ample space must pass, got %v", err)
+	}
+	// Unknown artifact size → no gate.
+	diskFreeFn = func(string) (uint64, error) { return 0, nil }
+	if err := a.checkUpdateDisk(target, -1); err != nil {
+		t.Fatalf("unknown size must not block, got %v", err)
+	}
+}
+
+// TestUpgradeRefusesInsufficientDisk: a signed, trusted release is
+// still refused before any byte of the artifact is staged when the
+// target filesystem lacks headroom.
+func TestUpgradeRefusesInsufficientDisk(t *testing.T) {
+	f := newFakeCP(t)
+	files, pubData, keyID, _, _ := signRelease(t, "0.8.0", contracts.ProtocolVersion, 1)
+	f.releaseFiles = serveRelease("r1", files)
+	a := upgradeTestAgent(t, f, t.TempDir(), pubData)
+
+	// The test artifact is tens of bytes — 1 byte free always fails 2×.
+	old := diskFreeFn
+	diskFreeFn = func(string) (uint64, error) { return 1, nil }
+	t.Cleanup(func() { diskFreeFn = old })
+
+	dispatchUpgrade(f, contracts.AgentUpgrade{
+		OperationID: "op-disk", ReleaseID: "r1", Version: "0.8.0", KeyID: keyID,
+		Source:          "localmesh://releases/r1",
+		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
+	})
+	ch := runSession(a)
+	defer endSession(t, f, ch)
+
+	states := collectStates(t, f, upPhaseFailed, 8*time.Second)
+	st := lastPhase(states)
+	if st.OperationID != "op-disk" || !strings.Contains(st.Error, "insufficient disk") {
+		t.Fatalf("disk refusal = %+v", st)
+	}
+	// Nothing staged, nothing installed, no marker.
+	if _, err := os.Stat(a.updTarget + ".new"); !os.IsNotExist(err) {
+		t.Fatal("staged file exists despite the disk refusal")
+	}
+	mkPath, _ := a.pendingMarkerPath()
+	if _, ok, _ := readPendingMarker(mkPath); ok {
+		t.Fatal("marker exists despite pre-install refusal")
+	}
+	// The refusal is on record for status/doctor.
+	hp, _ := a.updateHistoryPath()
+	waitFor(t, 5*time.Second, "refusal in history", func() bool {
+		h, _ := readUpdateHistory(hp)
+		return len(h) > 0
+	})
+	h, err := readUpdateHistory(hp)
+	if err != nil || len(h) == 0 {
+		t.Fatalf("refusal not recorded in history: %v %v", h, err)
+	}
+	le := h[len(h)-1]
+	if le.Outcome != upOutcomeFailed || le.Restarted ||
+		!strings.Contains(le.Detail, "insufficient disk") {
+		t.Fatalf("history entry = %+v", le)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// redispatch loop guard (v0.8)
+// ---------------------------------------------------------------------------
+
+// TestUpgradeRefusesPreviouslyRolledBack: a release that already failed
+// post-install on this node is refused before any fetch — re-running it
+// would loop the same install→restart→rollback cycle.
+func TestUpgradeRefusesPreviouslyRolledBack(t *testing.T) {
+	f := newFakeCP(t)
+	files, pubData, keyID, _, _ := signRelease(t, "0.8.0", contracts.ProtocolVersion, 1)
+	f.releaseFiles = serveRelease("r1", files)
+	a := upgradeTestAgent(t, f, t.TempDir(), pubData)
+
+	a.recordUpdateOutcome(updateHistoryEntry{
+		OperationID: "op-old", ReleaseID: "r1", KeyID: keyID,
+		ToVersion: "0.8.0", Outcome: upOutcomeRolledBack, Restarted: true,
+	})
+	dispatchUpgrade(f, contracts.AgentUpgrade{
+		OperationID: "op-redispatch", ReleaseID: "r1", Version: "0.8.0", KeyID: keyID,
+		Source:          "localmesh://releases/r1",
+		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
+	})
+	ch := runSession(a)
+	defer endSession(t, f, ch)
+
+	states := collectStates(t, f, upPhaseFailed, 8*time.Second)
+	st := lastPhase(states)
+	if !strings.Contains(st.Error, "already rolled_back") ||
+		!strings.Contains(st.Error, "loop") {
+		t.Fatalf("loop-guard refusal = %+v", st)
+	}
+	if f.lastRelAuth.Load() != nil {
+		t.Fatal("release files were fetched despite the tripwire")
+	}
+	// The refusal itself is recorded (as a non-restarted failure — it
+	// can never arm the tripwire against itself).
+	hp, _ := a.updateHistoryPath()
+	waitFor(t, 5*time.Second, "refusal record", func() bool {
+		h, _ := readUpdateHistory(hp)
+		return len(h) > 1
+	})
+	h, _ := readUpdateHistory(hp)
+	le := h[len(h)-1]
+	if le.Outcome != upOutcomeFailed || le.Restarted {
+		t.Fatalf("refusal record = %+v", le)
+	}
+}
+
+// TestUpgradeRetriesAfterPreInstallFailure: a failure that never
+// reached the swap (disk, download, verification) must NOT block a
+// later redispatch — only post-install failures trip the guard.
+func TestUpgradeRetriesAfterPreInstallFailure(t *testing.T) {
+	f := newFakeCP(t)
+	dir := t.TempDir()
+	files, pubData, keyID, _, artBytes := signRelease(t, "0.8.0", contracts.ProtocolVersion, 1)
+	f.releaseFiles = serveRelease("r1", files)
+	a := upgradeTestAgent(t, f, dir, pubData)
+	if err := os.WriteFile(a.updTarget, []byte("old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seams := stubProcessSeams(t)
+	a.recordUpdateOutcome(updateHistoryEntry{
+		OperationID: "op-old", ReleaseID: "r1", KeyID: keyID,
+		ToVersion: "0.8.0", Outcome: upOutcomeFailed, Restarted: false,
+		Detail: "insufficient disk space",
+	})
+	dispatchUpgrade(f, contracts.AgentUpgrade{
+		OperationID: "op-retry", ReleaseID: "r1", Version: "0.8.0", KeyID: keyID,
+		Source:          "localmesh://releases/r1",
+		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
+	})
+	ch := runSession(a)
+	defer endSession(t, f, ch)
+
+	states := collectStates(t, f, upPhaseRestarting, 15*time.Second)
+	if lastPhase(states).Phase != upPhaseRestarting {
+		t.Fatalf("redispatch after a pre-install failure should proceed, got %v", phases(states))
+	}
+	if runtime.GOOS != "windows" {
+		got, err := os.ReadFile(a.updTarget)
+		if err != nil || string(got) != string(artBytes) {
+			t.Fatalf("install did not land: %v", err)
+		}
+	} else if seams.spawned.Load() == nil {
+		t.Fatal("windows helper was not spawned")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// artifact cleanup on exit paths (v0.8)
+// ---------------------------------------------------------------------------
+
+// TestPostStagingAbortRemovesStaged: an abort landing after the artifact
+// staged but before the swap reports "aborted" AND reclaims the .new —
+// no staged file may survive any exit path.
+func TestPostStagingAbortRemovesStaged(t *testing.T) {
+	f := newFakeCP(t)
+	files, pubData, keyID, _, _ := signRelease(t, "0.8.0", contracts.ProtocolVersion, 1)
+	f.releaseFiles = serveRelease("r1", files)
+	a := upgradeTestAgent(t, f, t.TempDir(), pubData)
+
+	// The stage hook fires in the gap between "staged" and the
+	// pre-install abort check — push the abort there and wait until it
+	// is honored so the check deterministically trips.
+	a.updStageHook = func() {
+		f.mu.Lock()
+		var srv *wsjson.Conn
+		if len(f.conns) > 0 {
+			srv = f.conns[0]
+		}
+		f.mu.Unlock()
+		if srv == nil {
+			return
+		}
+		srv.Write(context.Background(), contracts.Envelope{
+			ID:   "abort-2",
+			Type: contracts.MsgUpgradeAbort,
+			Payload: contracts.MarshalPayload(contracts.UpgradeAbort{
+				OperationID: "op-abort2",
+			}),
+		})
+		waitFor(t, 5*time.Second, "abort to be honored", func() bool {
+			a.upgMu.Lock()
+			defer a.upgMu.Unlock()
+			return a.upg != nil && a.upg.aborted.Load()
+		})
+	}
+	dispatchUpgrade(f, contracts.AgentUpgrade{
+		OperationID: "op-abort2", ReleaseID: "r1", Version: "0.8.0", KeyID: keyID,
+		Source:          "localmesh://releases/r1",
+		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
+	})
+	ch := runSession(a)
+	defer endSession(t, f, ch)
+
+	states := collectStates(t, f, upPhaseAborted, 15*time.Second)
+	if st := lastPhase(states); st.OperationID != "op-abort2" {
+		t.Fatalf("abort report = %+v", st)
+	}
+	// The report precedes the local cleanup by a hair — poll for it.
+	waitFor(t, 5*time.Second, "staged file removal", func() bool {
+		_, err := os.Stat(a.updTarget + ".new")
+		return os.IsNotExist(err)
+	})
+	mkPath, _ := a.pendingMarkerPath()
+	if _, ok, _ := readPendingMarker(mkPath); ok {
+		t.Fatal("marker written despite pre-install abort")
+	}
+	hp, _ := a.updateHistoryPath()
+	waitFor(t, 5*time.Second, "abort in history", func() bool {
+		h, _ := readUpdateHistory(hp)
+		return len(h) > 0
+	})
+	h, _ := readUpdateHistory(hp)
+	if le := h[len(h)-1]; le.Outcome != upOutcomeAborted {
+		t.Fatalf("abort outcome = %+v", le)
+	}
+}
+
+// TestInstallFailureCleansUp: a failed swap attempt must leave neither
+// the staged file nor the pending marker behind, and the failure goes
+// to history. Unix drives the failure with a non-empty directory at
+// <target>.bak (rename cannot displace it); Windows fails the helper
+// spawn instead — same observable contract.
+func TestInstallFailureCleansUp(t *testing.T) {
+	f := newFakeCP(t)
+	dir := t.TempDir()
+	files, pubData, keyID, _, _ := signRelease(t, "0.8.0", contracts.ProtocolVersion, 1)
+	f.releaseFiles = serveRelease("r1", files)
+	a := upgradeTestAgent(t, f, dir, pubData)
+
+	oldSpawn := spawnApplyFn
+	t.Cleanup(func() { spawnApplyFn = oldSpawn })
+	if runtime.GOOS == "windows" {
+		spawnApplyFn = func(applyRequest) error { return errors.New("spawn boom") }
+	} else {
+		// The outgoing binary exists and its .bak slot is blocked by a
+		// non-empty directory — the first rename must fail.
+		if err := os.WriteFile(a.updTarget, []byte("old-binary"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(a.updTarget+".bak", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(a.updTarget+".bak", "keep"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dispatchUpgrade(f, contracts.AgentUpgrade{
+		OperationID: "op-instfail", ReleaseID: "r1", Version: "0.8.0", KeyID: keyID,
+		Source:          "localmesh://releases/r1",
+		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
+	})
+	ch := runSession(a)
+	defer endSession(t, f, ch)
+
+	states := collectStates(t, f, upPhaseFailed, 15*time.Second)
+	st := lastPhase(states)
+	if st.OperationID != "op-instfail" {
+		t.Fatalf("install failure report = %+v", st)
+	}
+	if _, err := os.Stat(a.updTarget + ".new"); !os.IsNotExist(err) {
+		t.Fatal("staged file survived an install failure")
+	}
+	mkPath, _ := a.pendingMarkerPath()
+	if _, ok, _ := readPendingMarker(mkPath); ok {
+		t.Fatal("marker survived an install failure")
+	}
+	hp, _ := a.updateHistoryPath()
+	waitFor(t, 5*time.Second, "install failure in history", func() bool {
+		h, _ := readUpdateHistory(hp)
+		return len(h) > 0
+	})
+	h, _ := readUpdateHistory(hp)
+	if le := h[len(h)-1]; le.Outcome != upOutcomeFailed || le.Restarted {
+		t.Fatalf("install-failure history = %+v", le)
+	}
+	if runtime.GOOS != "windows" {
+		got, err := os.ReadFile(a.updTarget)
+		if err != nil || string(got) != "old-binary" {
+			t.Fatalf("live binary disturbed by the failed install: %v", err)
+		}
+	}
+}
+
+// TestSweepStaleUpdateFiles: the boot sweep reclaims update debris
+// (staged copies, tmp/bak leftovers) older than the grace window while
+// keeping fresh files, state files, and the live rollback copy.
+func TestSweepStaleUpdateFiles(t *testing.T) {
+	dir := t.TempDir()
+	a := &Agent{cfg: &Config{}, log: testLogger()}
+	a.SetConfigPath(filepath.Join(dir, "agent.json"))
+	a.updTarget = filepath.Join(dir, "localmesh-agent")
+
+	old := time.Now().Add(-2 * staleUpdateFileGrace)
+	put := func(p string, stale bool) string {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if stale {
+			if err := os.Chtimes(p, old, old); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return p
+	}
+	in := func(name string) string { return filepath.Join(dir, name) }
+	stale := []string{
+		put(in("leftover.new"), true), put(in("x.staged"), true),
+		put(in("y.tmp"), true), put(in("z.bak"), true),
+		put(a.updTarget+".new", true), // staged copy beside the binary
+	}
+	keep := []string{
+		put(in("recent.tmp"), false),      // too fresh to reclaim
+		put(in("agent.json"), false),      // config — wrong suffix anyway
+		put(in(pendingUpdateFile), false), // live marker
+		put(in(updateHistoryFile), false), // history
+		put(a.updTarget, true),            // the binary itself, whatever its age
+		put(a.updTarget+".bak", true),     // live rollback copy — kept despite age
+		put(in("protected.bak"), true),    // referenced by the pending marker
+		put(in("agent.json.bak"), true),   // dotted stem — operator backup, not debris
+	}
+	if err := writePendingMarker(filepath.Join(dir, pendingUpdateFile), pendingUpdate{
+		OperationID: "op-sweep", ToVersion: "0.8.0",
+		BakPath: filepath.Join(dir, "protected.bak"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	a.sweepStaleUpdateFiles()
+
+	for _, p := range stale {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("stale file survived the sweep: %s", p)
+		}
+	}
+	for _, p := range keep {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("file wrongly swept: %s (%v)", p, err)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// post-restart health depth (v0.8)
+// ---------------------------------------------------------------------------
+
+// TestSettleWindowConfirmsHealthy: verify_health is only reported once
+// the session has held for the settle window — and the confirmed
+// outcome lands in history.
+func TestSettleWindowConfirmsHealthy(t *testing.T) {
+	f := newFakeCP(t)
+	dir := t.TempDir()
+	a := upgradeTestAgent(t, f, dir, nil)
+	shrinkSettle(t, 80*time.Millisecond)
+	mkPath, _ := a.pendingMarkerPath()
+	if err := writePendingMarker(mkPath, pendingUpdate{
+		OperationID: "op-settle", FromVersion: "0.6.0", ToVersion: "dev",
+		ReleaseID: "r1", BakPath: filepath.Join(dir, "agent.bak"),
+		StagedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	ch := runSession(a)
+	defer endSession(t, f, ch)
+
+	states := collectStates(t, f, upPhaseVerifyHealth, 8*time.Second)
+	if st := lastPhase(states); st.OperationID != "op-settle" {
+		t.Fatalf("verify_health = %+v", st)
+	}
+	if el := time.Since(start); el < 80*time.Millisecond {
+		t.Fatalf("verify_health reported after %v — settle window skipped", el)
+	}
+	if _, ok, _ := readPendingMarker(mkPath); ok {
+		t.Fatal("marker not cleared after verify_health")
+	}
+	hp, _ := a.updateHistoryPath()
+	waitFor(t, 5*time.Second, "confirmation in history", func() bool {
+		h, _ := readUpdateHistory(hp)
+		return len(h) > 0
+	})
+	h, _ := readUpdateHistory(hp)
+	if le := h[len(h)-1]; le.Outcome != upOutcomeSucceeded || !le.Restarted {
+		t.Fatalf("confirmed history entry = %+v", le)
+	}
+}
+
+// TestSettleFailureConsumesAttemptBudget: a session dying inside the
+// settle window burns one attempt of the marker's budget — the same
+// bound a crash loop consumes — and the marker stays for a retry.
+func TestSettleFailureConsumesAttemptBudget(t *testing.T) {
+	f := newFakeCP(t)
+	f.closeAfter.Store(1) // server drops the conn right after the capability report
+	dir := t.TempDir()
+	a := upgradeTestAgent(t, f, dir, nil)
+	shrinkSettle(t, 10*time.Second) // the conn dies long before this
+	mkPath, _ := a.pendingMarkerPath()
+	if err := writePendingMarker(mkPath, pendingUpdate{
+		OperationID: "op-flap", FromVersion: "0.6.0", ToVersion: "dev",
+		BakPath: filepath.Join(dir, "agent.bak"), StagedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ch := runSession(a)
+	endSession(t, f, ch)
+
+	waitFor(t, 5*time.Second, "attempt to be counted", func() bool {
+		m, ok, _ := readPendingMarker(mkPath)
+		return ok && m.Attempts == 1
+	})
+	m, ok, _ := readPendingMarker(mkPath)
+	if !ok || m.RolledBack {
+		t.Fatalf("marker should persist unresolved after one settle failure: %+v", m)
+	}
+	// No verify_health frame may have escaped.
+	for {
+		select {
+		case env := <-f.gotEnv:
+			if env.Type == contracts.MsgUpgradeState {
+				var st contracts.UpgradeState
+				if env.Decode(&st) == nil && st.Phase == upPhaseVerifyHealth {
+					t.Fatal("verify_health escaped a session that died inside the settle window")
+				}
+			}
+		case <-time.After(50 * time.Millisecond):
+			return
+		}
+	}
+}
+
+// TestSettleExhaustionRollsBack: at the attempts budget a settle-window
+// failure stops retrying and restores the .bak — the node converges on
+// the known-good binary instead of flapping forever.
+func TestSettleExhaustionRollsBack(t *testing.T) {
+	f := newFakeCP(t)
+	f.closeAfter.Store(1)
+	dir := t.TempDir()
+	a := upgradeTestAgent(t, f, dir, nil)
+	seams := stubProcessSeams(t)
+	shrinkSettle(t, 10*time.Second)
+
+	target := a.updTarget
+	if err := os.WriteFile(target, []byte("new-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target+".bak", []byte("old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mkPath, _ := a.pendingMarkerPath()
+	if err := writePendingMarker(mkPath, pendingUpdate{
+		OperationID: "op-flapex", FromVersion: "0.6.0", ToVersion: "dev",
+		BakPath: target + ".bak", StagedAt: time.Now().UTC(),
+		Attempts: maxUpdateAttempts - 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ch := runSession(a)
+	endSession(t, f, ch)
+
+	// The dying session trips the budget → rollback is stamped, the
+	// restore runs, and the process re-execs/spawns into the old
+	// binary — that terminal step is the deterministic completion
+	// signal (the stamp alone precedes the restore).
+	if runtime.GOOS == "windows" {
+		waitFor(t, 5*time.Second, "rollback helper spawn", func() bool {
+			return seams.spawned.Load() != nil
+		})
+		req := seams.spawned.Load()
+		if req == nil || !req.Rollback || req.Target != target {
+			t.Fatalf("rollback spawn = %+v", req)
+		}
+		if seams.exits.Load() != 0 {
+			t.Fatalf("exit code = %d", seams.exits.Load())
+		}
+	} else {
+		waitFor(t, 5*time.Second, "rollback re-exec", func() bool {
+			execed, _ := seams.execed.Load().(string)
+			return execed == target
+		})
+		got, err := os.ReadFile(target)
+		if err != nil || string(got) != "old-binary" {
+			t.Fatalf("rollback restored %q, err %v", got, err)
+		}
+	}
+	if m, ok, _ := readPendingMarker(mkPath); !ok || !m.RolledBack {
+		t.Fatalf("marker should be stamped RolledBack, got %+v", m)
+	}
+	hp, _ := a.updateHistoryPath()
+	h, _ := readUpdateHistory(hp)
+	if le := h[len(h)-1]; le.Outcome != upOutcomeRolledBack || !le.Restarted {
+		t.Fatalf("rollback history = %+v", le)
+	}
+	// The restored binary's next session delivers the authoritative
+	// rolled_back and clears the marker.
+	ch2 := runSession(a)
+	states := collectStates(t, f, upPhaseRolledBack, 8*time.Second)
+	if st := lastPhase(states); st.OperationID != "op-flapex" {
+		t.Fatalf("rolled_back report = %+v", st)
+	}
+	endSession(t, f, ch2)
+	if _, ok, _ := readPendingMarker(mkPath); ok {
+		t.Fatal("marker not cleared after rolled_back landed")
+	}
+}
+
+// TestAttemptBudgetRollsBackAtBoot: the boot check resolves an
+// exhausted marker by restoring the .bak (not just reporting failed)
+// so the node converges on the known-good binary.
+func TestAttemptBudgetRollsBackAtBoot(t *testing.T) {
+	f := newFakeCP(t)
+	dir := t.TempDir()
+	a := upgradeTestAgent(t, f, dir, nil)
+	seams := stubProcessSeams(t)
+
+	target := a.updTarget
+	if err := os.WriteFile(target, []byte("new-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target+".bak", []byte("old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mkPath, _ := a.pendingMarkerPath()
+	if err := writePendingMarker(mkPath, pendingUpdate{
+		OperationID: "op-bootrb", FromVersion: "0.6.0", ToVersion: "0.7.0",
+		BakPath: target + ".bak", StagedAt: time.Now().UTC(),
+		Attempts: maxUpdateAttempts - 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	a.upgradeBootCheck()
+
+	m, ok, _ := readPendingMarker(mkPath)
+	if !ok || !m.RolledBack {
+		t.Fatalf("marker should be stamped RolledBack, got %+v ok=%v", m, ok)
+	}
+	if runtime.GOOS == "windows" {
+		req := seams.spawned.Load()
+		if req == nil || !req.Rollback || req.Target != target {
+			t.Fatalf("rollback spawn = %+v", req)
+		}
+	} else {
+		got, err := os.ReadFile(target)
+		if err != nil || string(got) != "old-binary" {
+			t.Fatalf("rollback restored %q, err %v", got, err)
+		}
+		if execed, _ := seams.execed.Load().(string); execed != target {
+			t.Fatalf("re-exec target = %q", execed)
+		}
+	}
+	if a.bootReport != nil {
+		t.Fatalf("a rollback should not also queue a failed report: %+v", a.bootReport)
+	}
+	hp, _ := a.updateHistoryPath()
+	h, _ := readUpdateHistory(hp)
+	if le := h[len(h)-1]; le.Outcome != upOutcomeRolledBack || !le.Restarted {
+		t.Fatalf("rollback history = %+v", le)
+	}
+	// The restored binary's session reports rolled_back and clears.
+	ch := runSession(a)
+	states := collectStates(t, f, upPhaseRolledBack, 8*time.Second)
+	if st := lastPhase(states); st.OperationID != "op-bootrb" {
+		t.Fatalf("rolled_back report = %+v", st)
+	}
+	endSession(t, f, ch)
+	if _, ok, _ := readPendingMarker(mkPath); ok {
+		t.Fatal("marker not cleared after rolled_back landed")
 	}
 }

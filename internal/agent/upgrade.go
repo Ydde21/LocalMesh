@@ -188,8 +188,16 @@ func (a *Agent) runUpgrade(ctx context.Context, c *wsjson.Conn, job *upgradeJob)
 	}()
 
 	u := job.up
+	record := func(outcome, detail string) {
+		a.recordUpdateOutcome(updateHistoryEntry{
+			OperationID: u.OperationID, ReleaseID: u.ReleaseID, KeyID: u.KeyID,
+			ToVersion: u.Version, Outcome: outcome, Detail: detail,
+		})
+	}
 	fail := func(format string, args ...any) {
-		a.reportPhase(c, job, upPhaseFailed, "", fmt.Sprintf(format, args...))
+		msg := fmt.Sprintf(format, args...)
+		a.reportPhase(c, job, upPhaseFailed, "", msg)
+		record(upOutcomeFailed, msg)
 	}
 	// aborted reports the admin-cancelled end state when the op ctx was
 	// cancelled by handleUpgradeAbort (a dead session just unwinds).
@@ -198,6 +206,7 @@ func (a *Agent) runUpgrade(ctx context.Context, c *wsjson.Conn, job *upgradeJob)
 			return false
 		}
 		a.reportPhase(c, job, upPhaseAborted, "", "aborted by administrator")
+		record(upOutcomeAborted, "aborted by administrator")
 		return true
 	}
 
@@ -229,6 +238,18 @@ func (a *Agent) runUpgrade(ctx context.Context, c *wsjson.Conn, job *upgradeJob)
 				u.ProtocolVersion, sp)
 			return
 		}
+	}
+
+	// --- redispatch loop guard ---
+	// This exact release already ran post-install on this node and
+	// failed (rolled back, or never proved healthy): re-running it
+	// would loop the same install→restart→rollback cycle, so refuse
+	// before fetching a single byte. Pre-install failures and aborts
+	// never trip this — those are worth retrying.
+	if e, blocked := a.blockedByHistory(u); blocked {
+		fail("update to %s already %s on this node at %s (op %s) — refusing a repeat that would loop; remove %s to force",
+			e.ToVersion, e.Outcome, e.FinishedAt.UTC().Format(time.RFC3339), e.OperationID, updateHistoryFile)
+		return
 	}
 
 	// --- resolve the release source ---
@@ -295,6 +316,14 @@ func (a *Agent) runUpgrade(ctx context.Context, c *wsjson.Conn, job *upgradeJob)
 		a.log.Warn("upgrade verification warning", "op", u.OperationID, "warning", w)
 	}
 
+	// --- disk headroom gate: the staged .new, live binary and .bak
+	// must coexist during the swap → refuse before fetching anything
+	// when margin× the artifact won't fit ---
+	if err := a.checkUpdateDisk(plan.Target, plan.Artifact.Size); err != nil {
+		fail("%v", err)
+		return
+	}
+
 	// --- download + stage the artifact (sha256 checked on write) ---
 	a.reportPhase(c, job, upPhaseDownloading,
 		fmt.Sprintf("%s (%d bytes)", plan.Artifact.File, plan.Artifact.Size), "")
@@ -308,10 +337,15 @@ func (a *Agent) runUpgrade(ctx context.Context, c *wsjson.Conn, job *upgradeJob)
 	}
 	a.reportPhase(c, job, upPhaseStaging, fmt.Sprintf("sha256 verified, staged at %s", staged), "")
 
+	if a.updStageHook != nil {
+		a.updStageHook() // test seam: land an abort in the post-staging window
+	}
+
 	// Last chance to honor a pre-install abort — after this point the
 	// swap is committed and aborts are refused (that's what rollback is
-	// for).
+	// for). The staged copy is reclaimed on this exit path too.
 	if aborted() {
+		os.Remove(staged)
 		return
 	}
 
@@ -320,16 +354,25 @@ func (a *Agent) runUpgrade(ctx context.Context, c *wsjson.Conn, job *upgradeJob)
 	// boot finds it and either confirms (verify_health) or rolls back.
 	mkPath, err := a.pendingMarkerPath()
 	if err != nil {
+		os.Remove(staged)
 		fail("cannot locate pending-update marker path: %v", err)
 		return
 	}
-	if err := writePendingMarker(mkPath, pendingUpdate{
+	// The create write rides the same mutex as the marker's
+	// read-modify-write sections so it can never interleave inside one.
+	updateStateMu.Lock()
+	err = writePendingMarker(mkPath, pendingUpdate{
 		OperationID: u.OperationID,
+		ReleaseID:   u.ReleaseID,
+		KeyID:       u.KeyID,
 		FromVersion: Current().Version,
 		ToVersion:   u.Version,
 		BakPath:     update.BackupPath(plan.Target),
 		StagedAt:    time.Now().UTC(),
-	}); err != nil {
+	})
+	updateStateMu.Unlock()
+	if err != nil {
+		os.Remove(staged)
 		fail("cannot record pending update: %v", err)
 		return
 	}
@@ -351,8 +394,14 @@ func (a *Agent) installAndRestart(ctx context.Context, c *wsjson.Conn, job *upgr
 			Service: managed, Relaunch: !managed,
 		}); err != nil {
 			clearPendingMarker(mkPath)
-			a.reportPhase(c, job, upPhaseFailed, "",
-				fmt.Sprintf("cannot spawn update-apply helper: %v", err))
+			os.Remove(staged)
+			msg := fmt.Sprintf("cannot spawn update-apply helper: %v", err)
+			a.reportPhase(c, job, upPhaseFailed, "", msg)
+			a.recordUpdateOutcome(updateHistoryEntry{
+				OperationID: job.up.OperationID, ReleaseID: job.up.ReleaseID,
+				KeyID: job.up.KeyID, ToVersion: job.up.Version,
+				Outcome: upOutcomeFailed, Detail: msg,
+			})
 			return
 		}
 		a.reportPhase(c, job, upPhaseRestarting, "helper will swap the binary and restart the agent", "")
@@ -363,7 +412,14 @@ func (a *Agent) installAndRestart(ctx context.Context, c *wsjson.Conn, job *upgr
 	a.reportPhase(c, job, upPhaseInstalling, "", "")
 	if _, err := update.InstallBinary(staged, target); err != nil {
 		clearPendingMarker(mkPath)
-		a.reportPhase(c, job, upPhaseFailed, "", fmt.Sprintf("install failed: %v", err))
+		os.Remove(staged)
+		msg := fmt.Sprintf("install failed: %v", err)
+		a.reportPhase(c, job, upPhaseFailed, "", msg)
+		a.recordUpdateOutcome(updateHistoryEntry{
+			OperationID: job.up.OperationID, ReleaseID: job.up.ReleaseID,
+			KeyID: job.up.KeyID, ToVersion: job.up.Version,
+			Outcome: upOutcomeFailed, Detail: msg,
+		})
 		return
 	}
 	a.reportPhase(c, job, upPhaseRestarting, "", "")
