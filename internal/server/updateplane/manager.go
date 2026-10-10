@@ -211,6 +211,15 @@ type Manager struct {
 	online map[string]bool // last observed connectivity per node with live updates
 	epoch  int64           // control-plane fencing token; claims need it
 
+	// createMu serializes rollout creation against the advance sweep:
+	// CreateRollout commits cohort rows one at a time, and a tick that
+	// ran mid-insert could misjudge the campaign — all-created-so-far
+	// rows terminal reads as "fully done" → wrongly 'succeeded' with a
+	// stranded pending row, or a pending-first cohort gets claimed
+	// before the gate is evaluated. Advance takes the same mutex; a
+	// create in flight simply delays one sweep.
+	createMu sync.Mutex
+
 	wake chan struct{} // event-driven nudge (capacity 1)
 }
 

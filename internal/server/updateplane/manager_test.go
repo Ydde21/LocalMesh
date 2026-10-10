@@ -1643,3 +1643,40 @@ func TestSendFailureInterrupted(t *testing.T) {
 		t.Fatalf("sends = %d, want exactly 1 (no retry)", e.disp.sentCount())
 	}
 }
+
+// TestCreateRolloutAdvanceRace: a kick fired by a skip-finish mid-create
+// must never let an advance tick evaluate a half-inserted cohort.
+// Regression for the v0.9 chaos finding — before createMu, a parallel
+// advance could see only the terminal rows committed so far and land the
+// rollout 'succeeded' with a stranded pending update. Skip-first ordering
+// is the sharpest probe: finishing node A fires exactly that kick while
+// B..F are not yet inserted.
+func TestCreateRolloutAdvanceRace(t *testing.T) {
+	e := newEnv(t, fastCfg(), true)
+	rel := e.release(t, "9.9.9")
+
+	for i := 0; i < 12; i++ {
+		skipID := e.node(t, fmt.Sprintf("skip-%d", i), "9.9.9", true, false)
+		var ids []string
+		ids = append(ids, skipID)
+		for j := 0; j < 5; j++ {
+			ids = append(ids, e.node(t, fmt.Sprintf("p-%d-%d", i, j), "1.0.0", true, false))
+		}
+		r, err := e.m.CreateRollout(e.ctx, rel.ID, StrategyParallel, ids, 0, 0, "test")
+		if err != nil {
+			t.Fatalf("create rollout %d: %v", i, err)
+		}
+		// Let any queued advance pass run, then assert the invariant that
+		// used to break: a terminal rollout may never carry live rows.
+		time.Sleep(30 * time.Millisecond)
+		state := e.getRollout(t, r.ID).State
+		switch state {
+		case store.RolloutSucceeded, store.RolloutFailed, store.RolloutCancelled:
+			for _, u := range e.updatesFor(t, r.ID) {
+				if u.FinishedAt == nil {
+					t.Fatalf("iter %d: rollout %s carries live update %s (%s)", i, state, u.ID, u.Phase)
+				}
+			}
+		}
+	}
+}

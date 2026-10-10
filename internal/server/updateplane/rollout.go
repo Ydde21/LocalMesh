@@ -124,6 +124,11 @@ func (m *Manager) CreateRollout(ctx context.Context, releaseID, strategy string,
 		}
 		skip[id] = s
 	}
+	// Hold the advance sweep for the whole cohort insert — a tick
+	// running between row commits must never evaluate a rollout whose
+	// updates don't all exist yet.
+	m.createMu.Lock()
+	defer m.createMu.Unlock()
 	r, err := m.st.CreateRollout(ctx, releaseID, strategy, canaryCount, batchSize, createdBy)
 	if err != nil {
 		return nil, err
@@ -188,6 +193,8 @@ func (m *Manager) validateUpdateTarget(ctx context.Context, rel *store.Release, 
 // rollouts. Paused rollouts are swept too — advanceRollout's early
 // return is what freezes them.
 func (m *Manager) advanceRollouts(ctx context.Context) {
+	m.createMu.Lock()
+	defer m.createMu.Unlock()
 	rollouts, err := m.st.ListRollouts(ctx, 200)
 	if err != nil {
 		m.log.Debug("list rollouts", "err", err)
