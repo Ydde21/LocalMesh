@@ -161,9 +161,9 @@ func (d *DB) GetAgentUpdate(ctx context.Context, id string) (*AgentUpdate, error
 		`SELECT `+updateCols+updateJoin+` WHERE u.id=$1`, id))
 }
 
-// ListAgentUpdates returns update rows, newest first; optional rollout
-// and phase filters. Limit clamps to [1,500].
-func (d *DB) ListAgentUpdates(ctx context.Context, rolloutID, phase string, limit int) ([]*AgentUpdate, error) {
+// ListAgentUpdates returns update rows, newest first; optional rollout,
+// node, and phase filters. Limit clamps to [1,500].
+func (d *DB) ListAgentUpdates(ctx context.Context, rolloutID, nodeID, phase string, limit int) ([]*AgentUpdate, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
@@ -172,6 +172,10 @@ func (d *DB) ListAgentUpdates(ctx context.Context, rolloutID, phase string, limi
 	if rolloutID != "" {
 		args = append(args, rolloutID)
 		q += fmt.Sprintf(` AND u.rollout_id=$%d`, len(args))
+	}
+	if nodeID != "" {
+		args = append(args, nodeID)
+		q += fmt.Sprintf(` AND u.node_id=$%d`, len(args))
 	}
 	if phase != "" {
 		args = append(args, phase)
