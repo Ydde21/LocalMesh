@@ -6,7 +6,7 @@ BIN           := bin
 VERSION       ?= dev
 LDFLAGS       := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build test vet tidy clean clean-test-resources release dashboard dev-up dev-down verify verify-fast
+.PHONY: all build test vet tidy clean clean-test-resources bench release dashboard dev-up dev-down verify verify-fast
 
 all: build
 
@@ -56,6 +56,12 @@ clean:
 # Reports dangling leftovers for manual review; never blanket-prunes.
 clean-test-resources:
 	@bash scripts/clean-test-resources.sh
+
+# Infrastructure benchmarks — scheduler scale, op-claim latency,
+# gateway overhead vs engine, conn churn. Real postgres containers;
+# ~2-3 min. Override: BENCHTIME=500ms COUNT=2 make bench
+bench:
+	@bash scripts/bench.sh
 
 # Cross-compile node agents for the supported platforms.
 release:
