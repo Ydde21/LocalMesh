@@ -2,12 +2,14 @@
 
 import { useState } from "react";
 import {
-  useEnrollTokens, useEnrollments, useAPIKeys, useSettings, useAudit, api,
+  useEnrollTokens, useEnrollments, useAPIKeys, useSettings, useAudit,
+  useDiagnostics, api,
 } from "@/lib/api";
-import { fmtAgo } from "@/lib/format";
+import { fmtAgo, fmtMs, fmtUptime, fmtVersion } from "@/lib/format";
 import { Panel, Copyable } from "@/components/ui";
 import { useSWRConfig } from "swr";
-import { Plus, KeyRound, Ticket, Check, X, Copy } from "lucide-react";
+import { Plus, KeyRound, Ticket, Check, X, Copy, Info, Download, AlertTriangle } from "lucide-react";
+import type { Diagnostics } from "@/lib/types";
 
 export default function SettingsPage() {
   return (
@@ -23,6 +25,7 @@ export default function SettingsPage() {
         <APIKeysSection />
         <SchedulingSection />
         <ModelOpsSection />
+        <DiagnosticsSection />
         <AuditSection />
       </div>
     </div>
@@ -438,6 +441,131 @@ function WeightInput({ name, value, onChange }: { name: string; value: number; o
       <input className="input mono w-[70px]" type="number" step={0.1} min={0} defaultValue={value}
         onBlur={(e) => onChange(Number(e.target.value))} />
     </label>
+  );
+}
+
+// ---- Diagnostics ------------------------------------------------------------
+//
+// v0.6+ redacted operational snapshot (GET /diagnostics). The whole
+// section is gated on the endpoint existing — pre-v0.6 servers 404 and
+// nothing renders.
+
+function DiagnosticsSection() {
+  const { data: diag } = useDiagnostics();
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  if (!diag) return null; // also covers settings still loading
+
+  const certDays = diag.tls?.server_days_remaining;
+  const certWarn = certDays !== undefined && certDays < 30;
+
+  const exportJson = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      // Pull a fresh bundle at click time — the exported file should
+      // reflect the cluster right now, not the last render.
+      const fresh = await api<Diagnostics>("GET", "/diagnostics");
+      const blob = new Blob([JSON.stringify(fresh, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `localmesh-diagnostics-${new Date()
+        .toISOString()
+        .replace(/[:.]/g, "-")}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Section icon={Info} title="Diagnostics"
+      desc="Redacted operational snapshot — versions, ownership, DB health, cert expiry, node/ops state. Attach it to bug reports; credentials and prompts are never included.">
+      <div className="grid max-w-[560px] grid-cols-2 gap-x-6 gap-y-2.5">
+        <DiagRow label="Server" value={`${fmtVersion(diag.server_version)} · proto ${diag.protocol}`} />
+        <DiagRow label="Cluster" value={diag.cluster_name || "—"} />
+        <DiagRow label="Uptime" value={fmtUptime(diag.uptime_seconds)} />
+        <DiagRow
+          label="Database"
+          value={
+            diag.database
+              ? diag.database.reachable
+                ? `reachable · ${fmtMs(diag.database.latency_ms)}`
+                : "unreachable"
+              : "—"
+          }
+        />
+        {diag.control_plane && (
+          <DiagRow
+            label="Control plane"
+            value={`epoch ${diag.control_plane.epoch} · since ${fmtAgo(diag.control_plane.started_at)}`}
+          />
+        )}
+        {diag.discovery && (
+          <DiagRow
+            label="LAN discovery"
+            value={
+              diag.discovery.advertising
+                ? `advertising${diag.discovery.cluster_name ? ` “${diag.discovery.cluster_name}”` : ""}`
+                : diag.discovery.enabled
+                  ? "enabled"
+                  : "off"
+            }
+          />
+        )}
+        {diag.nodes && (
+          <DiagRow
+            label="Nodes"
+            value={`${diag.nodes.filter((n) => n.online).length} online / ${diag.nodes.length} total`}
+          />
+        )}
+      </div>
+
+      {/* Cert expiry — quiet until the leaf is inside 30 days. */}
+      {certWarn && (
+        <div className="mt-3.5 flex max-w-[560px] items-center gap-2.5 rounded-md border border-[var(--color-warn)]/25 bg-[var(--color-warn-soft)] px-3 py-2 text-[12px] text-[var(--color-warn)]">
+          <AlertTriangle size={13} className="shrink-0" />
+          <span>
+            Server TLS certificate expires in {certDays}d
+            {diag.tls?.server_expires_at &&
+              ` (${new Date(diag.tls.server_expires_at).toLocaleDateString()})`}
+            {" "}— renew before agents can no longer verify the control plane.
+          </span>
+          <span className="badge badge-warn ml-auto shrink-0">cert expiry</span>
+        </div>
+      )}
+
+      {err && (
+        <div className="mt-3 max-w-[560px] rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+          {err}
+        </div>
+      )}
+
+      <div className="mt-4 flex items-center gap-3">
+        <button className="btn btn-sm" disabled={busy} onClick={exportJson}>
+          <Download size={12} /> {busy ? "Exporting…" : "Export diagnostics"}
+        </button>
+        <span className="text-[11px] text-[var(--color-text-faint)]">
+          Downloads a JSON snapshot of everything above.
+        </span>
+      </div>
+    </Section>
+  );
+}
+
+function DiagRow({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 text-[12px]">
+      <span className="text-[var(--color-text-faint)]">{label}</span>
+      <span className="mono text-[var(--color-text-dim)]">{value}</span>
+    </div>
   );
 }
 

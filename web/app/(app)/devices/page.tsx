@@ -3,14 +3,16 @@
 import { Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
-  useNodes, useNode, useEnrollments, useDiscoveryStatus, useOverview, api,
+  useNodes, useNode, useEnrollments, useDiscoveryStatus, useOverview,
+  useNodeEvents, useVersion, api,
 } from "@/lib/api";
 import { fmtBytes, fmtAgo, fmtMs, fmtUptime, fmtVersion, agentVersion, osLabel } from "@/lib/format";
 import { Panel, Meter, Empty } from "@/components/ui";
 import { NodeBadge } from "@/components/status";
 import type { Node } from "@/lib/types";
 import {
-  X, Cpu, HardDrive, Zap, RefreshCw, Plus, Copy, Check, Wifi, Package,
+  X, Cpu, HardDrive, Zap, RefreshCw, Plus, Copy, Check, Wifi, WifiOff,
+  Package,
 } from "lucide-react";
 import { useSWRConfig } from "swr";
 
@@ -67,7 +69,45 @@ function DevicesInner() {
   );
 }
 
+// Agent version/compat tag: mono version for reporting agents, a "legacy"
+// pill for pre-v0.5 ones, and a quiet warn pill when the agent build
+// differs from the server. serverVersion is absent on pre-v0.5 servers —
+// no comparison is made then.
+function AgentVersionTag({ node, serverVersion }: { node: Node; serverVersion?: string }) {
+  const av = agentVersion(node);
+  if (!av) {
+    return (
+      <span
+        className="badge badge-neutral !px-1.5 !py-0"
+        title="agent predates version reporting (pre-v0.5) — still compatible"
+      >
+        legacy
+      </span>
+    );
+  }
+  const mismatch = !!serverVersion && av !== serverVersion;
+  return (
+    <>
+      <span
+        className="mono text-[11px] text-[var(--color-text-faint)]"
+        title={`agent ${av}`}
+      >
+        {fmtVersion(av)}
+      </span>
+      {mismatch && (
+        <span
+          className="badge badge-warn !px-1.5 !py-0"
+          title={`agent ${av} differs from server ${serverVersion} — still protocol-compatible; upgrade when convenient`}
+        >
+          mismatch
+        </span>
+      )}
+    </>
+  );
+}
+
 function NodeRow({ node, selected }: { node: Node; selected: boolean }) {
+  const { data: ver } = useVersion();
   const m = node.metrics;
   const memUsed = m?.memory_used_bytes ?? 0;
   const memTotal = m?.memory_total_bytes ?? node.hardware.memory_bytes;
@@ -87,21 +127,7 @@ function NodeRow({ node, selected }: { node: Node; selected: boolean }) {
         <div className="flex items-center gap-2.5">
           <div className="text-[14px] font-medium">{node.name}</div>
           <NodeBadge node={node} />
-          {agentVersion(node) ? (
-            <span
-              className="mono text-[11px] text-[var(--color-text-faint)]"
-              title={`agent ${agentVersion(node)}`}
-            >
-              {fmtVersion(agentVersion(node))}
-            </span>
-          ) : (
-            <span
-              className="badge badge-neutral !px-1.5 !py-0"
-              title="agent predates version reporting (pre-v0.5) — still compatible"
-            >
-              legacy
-            </span>
-          )}
+          <AgentVersionTag node={node} serverVersion={ver?.server_version} />
         </div>
         <div className="mt-0.5 text-[11.5px] text-[var(--color-text-faint)]">
           {osLabel(node.hardware.os)} {node.hardware.arch} · {node.hardware.hostname}
@@ -200,6 +226,7 @@ function MeterRow({ label, value }: { label: string; value: number | null }) {
 function DeviceDrawer({ id }: { id: string }) {
   const router = useRouter();
   const { data: node, mutate } = useNode(id);
+  const { data: ver } = useVersion();
   const { mutate: globalMutate } = useSWRConfig();
   const [busy, setBusy] = useState(false);
   const [maxConc, setMaxConc] = useState("");
@@ -239,6 +266,7 @@ function DeviceDrawer({ id }: { id: string }) {
             <div className="flex items-center gap-2.5">
               <h2 className="text-[16px] font-semibold">{node.name}</h2>
               <NodeBadge node={node} />
+              <AgentVersionTag node={node} serverVersion={ver?.server_version} />
             </div>
             <div className="mono mt-1 text-[11px] text-[var(--color-text-faint)]">{node.id}</div>
           </div>
@@ -398,6 +426,9 @@ function DeviceDrawer({ id }: { id: string }) {
             </div>
           </section>
 
+          {/* Connection history (v0.6+; absent endpoint renders nothing) */}
+          <ConnectionHistory id={node.id} />
+
           {/* Controls */}
           <section>
             <div className="label mb-2.5">Concurrency</div>
@@ -457,6 +488,52 @@ function DeviceDrawer({ id }: { id: string }) {
         </div>
       </div>
     </div>
+  );
+}
+
+// Recent connect/disconnect rows from node_events — the audit trail for
+// "why did this machine drop". Hidden entirely on pre-v0.6 servers (404)
+// so the drawer doesn't show a dead section.
+function ConnectionHistory({ id }: { id: string }) {
+  const { data: events } = useNodeEvents(id);
+  if (!events) return null;
+  const rows = events.slice(0, 10);
+  return (
+    <section>
+      <div className="label mb-2.5">Connection history</div>
+      {rows.length === 0 ? (
+        <div className="text-[12px] text-[var(--color-text-faint)]">No events recorded yet</div>
+      ) : (
+        <div>
+          {rows.map((e) => {
+            const up = e.event === "connected";
+            return (
+              <div
+                key={e.id}
+                className="row-line flex items-baseline gap-2.5 py-1.5"
+                style={{ borderColor: "var(--color-border)" }}
+                title={e.agent_version ? `agent ${e.agent_version}` : undefined}
+              >
+                {up ? (
+                  <Wifi size={12} className="relative top-px shrink-0 text-[var(--color-online)]" />
+                ) : (
+                  <WifiOff size={12} className="relative top-px shrink-0 text-[var(--color-text-faint)]" />
+                )}
+                <span className="mono w-[54px] shrink-0 text-[10.5px] text-[var(--color-text-faint)]">
+                  {fmtAgo(e.created_at)}
+                </span>
+                <span className="text-[12px] text-[var(--color-text)]">{e.event}</span>
+                {e.reason && (
+                  <span className="truncate text-[11px] text-[var(--color-text-faint)]">
+                    {e.reason}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 

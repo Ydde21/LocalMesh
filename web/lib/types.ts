@@ -304,3 +304,68 @@ export interface ModelOpsSettings {
   queue_max?: number;          // max queued ops before rejection (8-256)
   max_attempts?: number;       // retry attempts per op (0-8)
 }
+
+// GET /api/v1/nodes/{id}/events — connection lifecycle history, newest
+// first. v0.6+; a 404 means the node is gone or the server predates the
+// endpoint. `reason` is empty on "connected"; on "disconnected" it is e.g.
+// "connection closed by agent" / "replaced by new connection" /
+// "control plane shutting down" / a revoke reason.
+export interface NodeEvent {
+  id: number;
+  node_id: string;
+  event: "connected" | "disconnected" | string;
+  reason: string;
+  agent_version: string;
+  created_at: string;
+}
+
+// Node summary inside the diagnostics bundle — same fields the hub
+// snapshot exposes, minus labels/capacity knobs.
+export interface DiagnosticsNode {
+  id: string;
+  name: string;
+  status: NodeStatus;
+  online: boolean;
+  in_flight: number;
+  latency_ms?: number;
+  stale_heartbeat: boolean;
+  hardware?: HardwareInfo;
+  engines?: EngineInfo[] | null;
+  models?: Model[] | null;
+  metrics?: Metrics | null;
+  last_seen_at?: string;
+}
+
+// GET /api/v1/diagnostics — v0.6+ redacted operational snapshot for
+// troubleshooting/bug reports. 404 on older servers — gate UI on
+// presence. Go serializes nil slices as null: guard arrays with `?? []`.
+export interface Diagnostics {
+  generated_at: string;
+  server_version: string;
+  protocol: number;
+  min_agent_protocol: number;
+  uptime_seconds: number;
+  cluster_name: string;
+  discovery?: DiscoveryStatus;
+  control_plane?: {
+    owner_id: string;
+    epoch: number;
+    started_at: string;
+    heartbeat_at: string;
+  };
+  database?: {
+    reachable: boolean;
+    latency_ms: number;
+  };
+  tls?: {
+    ca_fingerprint?: string;
+    ca_expires_at?: string;
+    server_expires_at?: string;
+    server_days_remaining?: number;
+  };
+  nodes?: DiagnosticsNode[] | null;
+  modelops_config?: ModelOpsSettings;
+  modelops_recent_status?: Record<string, number> | null;
+  model_operations?: ModelOperation[] | null;
+  recent_audit?: AuditEntry[] | null;
+}
