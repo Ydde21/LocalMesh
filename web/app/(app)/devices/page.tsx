@@ -1,14 +1,16 @@
 "use client";
 
 import { Suspense, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
   useNodes, useNode, useEnrollments, useDiscoveryStatus, useOverview,
   useNodeEvents, useVersion, useReleases, useAgentUpdates, api,
 } from "@/lib/api";
 import { fmtBytes, fmtAgo, fmtMs, fmtUptime, fmtVersion, agentVersion, osLabel, versionGt } from "@/lib/format";
-import { Panel, Meter, Empty } from "@/components/ui";
+import { Panel, Meter, Empty, LoadingRows, ErrorState } from "@/components/ui";
 import { NodeBadge, StatusBadge } from "@/components/status";
+import { ConfirmDialog } from "@/components/confirm";
 import { UpdatePhaseStepper } from "@/components/update-phase";
 import type { Node, Release } from "@/lib/types";
 import {
@@ -28,7 +30,7 @@ export default function DevicesPage() {
 function DevicesInner() {
   const params = useSearchParams();
   const selectedId = params.get("id");
-  const { data: nodes } = useNodes();
+  const { data: nodes, error: nodesErr, mutate: nodesMutate } = useNodes();
   const [addOpen, setAddOpen] = useState(false);
 
   return (
@@ -45,7 +47,15 @@ function DevicesInner() {
         </button>
       </header>
 
-      {(!nodes || nodes.length === 0) ? (
+      {nodesErr ? (
+        <Panel>
+          <ErrorState error={nodesErr} onRetry={() => nodesMutate()} />
+        </Panel>
+      ) : !nodes ? (
+        <Panel>
+          <LoadingRows rows={3} />
+        </Panel>
+      ) : nodes.length === 0 ? (
         <Panel>
           <Empty
             title="No devices connected"
@@ -175,6 +185,34 @@ function AgentVersionTag({ node, serverVersion }: { node: Node; serverVersion?: 
   );
 }
 
+// Why a node takes no new work at all — mirrors the server-side
+// scheduler's node-level filters (filterReason in scheduler.go):
+// approval → maintenance → online → heartbeat freshness, in that order.
+// Per-request gates (model installed, labels, slot capacity, memory fit)
+// can't be evaluated here — they depend on the request.
+function schedBlock(n: Node): string | null {
+  if (n.status === "pending") return "not schedulable — enrollment pending";
+  if (n.status === "revoked") return "not schedulable — revoked";
+  // `maintenance` is absent entirely on pre-v0.7 servers — skip the
+  // maintenance gates then, don't fabricate a reason.
+  if (n.maintenance) {
+    const reason = n.maintenance_reason ? ` — ${n.maintenance_reason}` : "";
+    switch (n.maintenance) {
+      case "draining":
+        return `not schedulable — draining${reason}`;
+      case "maintenance":
+        return `not schedulable — in maintenance${reason}`;
+      case "updating":
+        return "not schedulable — agent update in progress";
+      default:
+        return `not schedulable — ${n.maintenance}`;
+    }
+  }
+  if (!n.online) return "not schedulable — offline";
+  if (n.stale_heartbeat) return "not schedulable — stale heartbeat";
+  return null;
+}
+
 function NodeRow({ node, selected }: { node: Node; selected: boolean }) {
   const { data: ver } = useVersion();
   const m = node.metrics;
@@ -184,15 +222,16 @@ function NodeRow({ node, selected }: { node: Node; selected: boolean }) {
   const hasGPU = (node.hardware.gpus?.length ?? 0) > 0;
   const loadedCount = (node.models ?? []).filter((mo) => mo.loaded).length;
   const saturated = node.max_concurrent > 0 && node.in_flight >= node.max_concurrent;
+  const blocked = schedBlock(node);
 
   return (
-    <a
+    <Link
       href={`/devices?id=${node.id}`}
-      className={`panel panel-hover fade-up grid grid-cols-12 items-center gap-4 px-5 py-4 ${
+      className={`panel panel-hover fade-up grid grid-cols-1 gap-3 px-5 py-4 md:grid-cols-12 md:items-center md:gap-4 ${
         selected ? "border-[var(--color-accent)]" : ""
       }`}
     >
-      <div className="col-span-4">
+      <div className="md:col-span-4">
         <div className="flex items-center gap-2.5">
           <div className="text-[14px] font-medium">{node.name}</div>
           <NodeBadge node={node} />
@@ -215,9 +254,12 @@ function NodeRow({ node, selected }: { node: Node; selected: boolean }) {
             ))}
           </div>
         )}
+        {blocked && (
+          <div className="mt-1.5 text-[10.5px] text-[var(--color-warn)]">{blocked}</div>
+        )}
       </div>
 
-      <div className="col-span-3">
+      <div className="md:col-span-3">
         <div className="text-[12px] text-[var(--color-text-dim)]">{node.hardware.cpu_model}</div>
         <div className="text-[11px] text-[var(--color-text-faint)]">
           {node.hardware.cpu_cores} cores · {fmtBytes(node.hardware.memory_bytes)}
@@ -226,7 +268,7 @@ function NodeRow({ node, selected }: { node: Node; selected: boolean }) {
         </div>
       </div>
 
-      <div className="col-span-3">
+      <div className="md:col-span-3">
         {!node.online ? (
           <span className="text-[11px] text-[var(--color-text-faint)]">
             {node.last_seen_at ? `last seen ${fmtAgo(node.last_seen_at)}` : "offline"}
@@ -256,7 +298,7 @@ function NodeRow({ node, selected }: { node: Node; selected: boolean }) {
         )}
       </div>
 
-      <div className="col-span-2 text-right">
+      <div className="md:col-span-2 md:text-right">
         <div
           className={`mono text-[12px] ${
             saturated ? "text-[var(--color-warn)]" : "text-[var(--color-text-dim)]"
@@ -268,7 +310,7 @@ function NodeRow({ node, selected }: { node: Node; selected: boolean }) {
           {(node.models ?? []).length} models{loadedCount > 0 ? ` · ${loadedCount} loaded` : ""}
         </div>
       </div>
-    </a>
+    </Link>
   );
 }
 
@@ -300,6 +342,8 @@ function DeviceDrawer({ id }: { id: string }) {
   const [busy, setBusy] = useState(false);
   const [maxConc, setMaxConc] = useState("");
   const [err, setErr] = useState("");
+  const [confirmRevoke, setConfirmRevoke] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
 
   if (!node) return null;
 
@@ -339,7 +383,9 @@ function DeviceDrawer({ id }: { id: string }) {
             </div>
             <div className="mono mt-1 text-[11px] text-[var(--color-text-faint)]">{node.id}</div>
           </div>
-          <a href="/devices" className="btn btn-sm"><X size={14} /></a>
+          <Link href="/devices" className="btn btn-sm" aria-label="Close device details">
+            <X size={14} />
+          </Link>
         </div>
 
         <div className="space-y-5 px-5 py-5">
@@ -500,7 +546,7 @@ function DeviceDrawer({ id }: { id: string }) {
 
           {/* Maintenance + agent update (v0.7+; each self-hides when the
               server doesn't expose the capability) */}
-          <MaintenanceSection node={node} busy={busy} act={act} />
+          <MaintenanceSection node={node} busy={busy} act={act} err={err} />
           <UpdateSection node={node} busy={busy} act={act} />
 
           {/* Controls */}
@@ -534,7 +580,7 @@ function DeviceDrawer({ id }: { id: string }) {
             <div className="flex gap-2">
               {node.status === "approved" ? (
                 <button className="btn btn-danger btn-sm" disabled={busy}
-                  onClick={() => act(() => api("POST", `/nodes/${node.id}/revoke`))}>
+                  onClick={() => { setErr(""); setConfirmRevoke(true); }}>
                   Revoke access
                 </button>
               ) : node.status === "revoked" ? (
@@ -544,12 +590,7 @@ function DeviceDrawer({ id }: { id: string }) {
                 </button>
               ) : null}
               <button className="btn btn-danger btn-sm" disabled={busy}
-                onClick={() => {
-                  if (confirm(`Remove ${node.name} from the cluster? Its credential stops working immediately.`)) {
-                    act(() => api("DELETE", `/nodes/${node.id}`));
-                    router.push("/devices");
-                  }
-                }}>
+                onClick={() => { setErr(""); setConfirmRemove(true); }}>
                 Remove node
               </button>
             </div>
@@ -561,6 +602,46 @@ function DeviceDrawer({ id }: { id: string }) {
           </div>
         </div>
       </div>
+
+      {confirmRevoke && (
+        <ConfirmDialog
+          title="Revoke node access"
+          confirmLabel="Revoke"
+          busy={busy}
+          error={err}
+          onClose={() => !busy && setConfirmRevoke(false)}
+          onConfirm={() =>
+            act(async () => {
+              await api("POST", `/nodes/${node.id}/revoke`);
+              setConfirmRevoke(false);
+            })
+          }
+        >
+          Revoke <span className="text-[var(--color-text)]">{node.name}</span>? Its
+          credential stops working immediately — the node disconnects and can no
+          longer receive work until reinstated.
+        </ConfirmDialog>
+      )}
+      {confirmRemove && (
+        <ConfirmDialog
+          title="Remove node"
+          confirmLabel="Remove permanently"
+          busy={busy}
+          error={err}
+          onClose={() => !busy && setConfirmRemove(false)}
+          onConfirm={() =>
+            act(async () => {
+              await api("DELETE", `/nodes/${node.id}`);
+              setConfirmRemove(false);
+              router.push("/devices");
+            })
+          }
+        >
+          Remove <span className="text-[var(--color-text)]">{node.name}</span> from
+          the cluster? The record and its credential are deleted permanently — the
+          agent must re-enroll to rejoin.
+        </ConfirmDialog>
+      )}
     </div>
   );
 }
@@ -619,12 +700,15 @@ function MaintenanceSection({
   node,
   busy,
   act,
+  err,
 }: {
   node: Node;
   busy: boolean;
   act: (fn: () => Promise<unknown>) => Promise<void>;
+  err: string;
 }) {
   const [reason, setReason] = useState("");
+  const [confirming, setConfirming] = useState(false);
   if (node.maintenance === undefined) return null;
   const st = node.maintenance;
   return (
@@ -638,15 +722,12 @@ function MaintenanceSection({
               placeholder="reason (optional)"
               value={reason}
               onChange={(e) => setReason(e.target.value)}
-              onKeyDown={(e) =>
-                e.key === "Enter" &&
-                act(() => api("POST", `/nodes/${node.id}/maintenance`, { reason }))
-              }
+              onKeyDown={(e) => e.key === "Enter" && setConfirming(true)}
             />
             <button
               className="btn btn-sm"
               disabled={busy}
-              onClick={() => act(() => api("POST", `/nodes/${node.id}/maintenance`, { reason }))}
+              onClick={() => setConfirming(true)}
             >
               <Wrench size={12} /> Enter maintenance
             </button>
@@ -683,6 +764,31 @@ function MaintenanceSection({
             <Check size={12} /> Resume service
           </button>
         </>
+      )}
+      {confirming && (
+        <ConfirmDialog
+          title="Enter maintenance"
+          confirmLabel="Enter maintenance"
+          busy={busy}
+          error={err}
+          onClose={() => !busy && setConfirming(false)}
+          onConfirm={() =>
+            act(async () => {
+              await api("POST", `/nodes/${node.id}/maintenance`, { reason });
+              setConfirming(false);
+              setReason("");
+            })
+          }
+        >
+          Take <span className="text-[var(--color-text)]">{node.name}</span> out of
+          service? It stops accepting new work immediately; in-flight requests
+          finish first, then the node is marked in maintenance.
+          {reason.trim() && (
+            <span className="mt-2 block text-[11.5px]">
+              Reason recorded: <span className="text-[var(--color-text)]">{reason.trim()}</span>
+            </span>
+          )}
+        </ConfirmDialog>
       )}
     </section>
   );

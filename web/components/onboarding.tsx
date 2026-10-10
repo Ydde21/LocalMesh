@@ -137,6 +137,7 @@ export function OnboardingChecklist() {
             className="rounded p-1 text-[var(--color-text-faint)] transition-colors hover:bg-white/[0.06] hover:text-[var(--color-text)]"
             onClick={() => setCollapsed((c) => !c)}
             title={collapsed ? "Expand checklist" : "Collapse checklist"}
+            aria-label={collapsed ? "Expand checklist" : "Collapse checklist"}
           >
             {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
           </button>
@@ -144,6 +145,7 @@ export function OnboardingChecklist() {
             className="rounded p-1 text-[var(--color-text-faint)] transition-colors hover:bg-white/[0.06] hover:text-[var(--color-text)]"
             onClick={dismiss}
             title="Dismiss checklist"
+            aria-label="Dismiss checklist"
           >
             <X size={13} />
           </button>

@@ -1,9 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useOverview, useNodes, useWorkloads, useModelOps, useControlPlane } from "@/lib/api";
-import { fmtBytes, fmtAgo, fmtUptime, osLabel, fmtVersion, agentVersion } from "@/lib/format";
-import { Panel, Stat, Meter, Empty } from "@/components/ui";
+import {
+  useOverview, useNodes, useWorkloads, useModelOps, useControlPlane,
+  useDiagnostics,
+} from "@/lib/api";
+import { fmtBytes, fmtAgo, fmtMs, fmtUptime, osLabel, fmtVersion, agentVersion } from "@/lib/format";
+import { Panel, Stat, Meter, Empty, LoadingRows, ErrorState } from "@/components/ui";
 import { NodeBadge } from "@/components/status";
 import { ActivityFeed } from "@/components/activity-feed";
 import { MetricsChart } from "@/components/metrics-chart";
@@ -12,9 +15,9 @@ import { ArrowRight } from "lucide-react";
 import type { Node } from "@/lib/types";
 
 export default function OverviewPage() {
-  const { data: ov } = useOverview();
-  const { data: nodes } = useNodes();
-  const { data: activeWls } = useWorkloads("running");
+  const { data: ov, error: ovErr, mutate: ovMutate } = useOverview();
+  const { data: nodes, error: nodesErr, mutate: nodesMutate } = useNodes();
+  const { data: activeWls, error: wlsErr, mutate: wlsMutate } = useWorkloads("running");
   const { data: ops } = useModelOps();
 
   const memPct = ov && ov.memory_bytes > 0 ? (ov.memory_used / ov.memory_bytes) * 100 : 0;
@@ -42,6 +45,12 @@ export default function OverviewPage() {
 
       {/* First-run setup checklist — self-hides once the cluster is live */}
       <OnboardingChecklist />
+
+      {ovErr && (
+        <Panel className="fade-up mb-3">
+          <ErrorState error={ovErr} onRetry={() => ovMutate()} />
+        </Panel>
+      )}
 
       {/* Top stats */}
       <div className={`grid grid-cols-2 gap-3 ${opsTotal > 0 ? "md:grid-cols-5" : "md:grid-cols-4"}`}>
@@ -127,11 +136,15 @@ export default function OverviewPage() {
             </Link>
           </div>
           <div className="max-h-[300px] overflow-y-auto">
-            {(!activeWls || activeWls.length === 0) && (
+            {wlsErr ? (
+              <ErrorState error={wlsErr} onRetry={() => wlsMutate()} />
+            ) : !activeWls ? (
+              <LoadingRows rows={2} />
+            ) : activeWls.length === 0 ? (
               <div className="px-4 py-8 text-center text-[12px] text-[var(--color-text-faint)]">
                 No requests currently executing
               </div>
-            )}
+            ) : null}
             {activeWls?.map((w) => (
               <Link
                 key={w.id}
@@ -159,7 +172,11 @@ export default function OverviewPage() {
             Manage →
           </Link>
         </div>
-        {(!nodes || nodes.length === 0) ? (
+        {nodesErr ? (
+          <ErrorState error={nodesErr} onRetry={() => nodesMutate()} />
+        ) : !nodes ? (
+          <LoadingRows rows={3} />
+        ) : nodes.length === 0 ? (
           <Empty
             title="No devices yet"
             hint="Generate an enrollment token in Settings, then run `localmesh-agent join` on another machine."
@@ -274,12 +291,19 @@ function FleetHealthStrip({ nodes }: { nodes: Node[] }) {
 // servers — the whole panel stays hidden then. `events` is the ownership
 // history (newest first); `owner` is the live lease row. A promoted
 // standby still reports role "active" — `promoted_from_standby` says how
-// it got there.
+// it got there. DB reachability comes from the diagnostics bundle (a real
+// Pool.Ping server-side); heartbeat staleness is derived from
+// heartbeat_age_seconds — the owner heartbeats every 2s, so >10s means
+// the row is going cold.
 function ControlPlanePanel() {
   const { data: cp } = useControlPlane();
+  const { data: diag } = useDiagnostics();
   if (!cp) return null;
   const events = (cp.events ?? []).slice(0, 6);
   const instanceId = cp.instance_id || cp.owner?.instance_id || "";
+  const hbAge = cp.owner?.heartbeat_age_seconds;
+  const hbStale = hbAge !== undefined && hbAge > 10;
+  const promotedAt = (cp.events ?? []).find((e) => e.event === "promoted")?.at;
   return (
     <Panel className="px-4 py-4">
       <div className="label mb-3">Control plane</div>
@@ -305,6 +329,19 @@ function ControlPlanePanel() {
           </span>
         </div>
         {cp.epoch !== undefined && <Row label="Epoch" value={String(cp.epoch)} />}
+        {promotedAt && <Row label="Last promotion" value={fmtAgo(promotedAt)} />}
+        {diag?.database && (
+          <div className="flex items-baseline justify-between">
+            <span className="text-[12px] text-[var(--color-text-dim)]">Database</span>
+            {diag.database.reachable ? (
+              <span className="mono text-[13px] font-medium">
+                reachable · {fmtMs(diag.database.latency_ms)}
+              </span>
+            ) : (
+              <span className="badge badge-danger"><span className="dot" />unreachable</span>
+            )}
+          </div>
+        )}
         {instanceId && (
           <div className="flex items-baseline justify-between">
             <span className="text-[12px] text-[var(--color-text-dim)]">Instance</span>
@@ -317,7 +354,24 @@ function ControlPlanePanel() {
           <Row label="Owner since" value={fmtAgo(cp.owner.started_at)} />
         )}
         {cp.owner && (
-          <Row label="Heartbeat" value={`${cp.owner.heartbeat_age_seconds}s ago`} />
+          <div className="flex items-baseline justify-between">
+            <span className="text-[12px] text-[var(--color-text-dim)]">Heartbeat</span>
+            <span className="flex items-center gap-1.5">
+              {hbStale && (
+                <span
+                  className="badge badge-warn !px-1.5 !py-0"
+                  title="owner heartbeat is stale — expected every ~2s; database writes may be failing or the owner is dead"
+                >
+                  stale
+                </span>
+              )}
+              <span
+                className={`mono text-[13px] font-medium ${hbStale ? "text-[var(--color-warn)]" : ""}`}
+              >
+                {hbAge}s ago
+              </span>
+            </span>
+          </div>
         )}
         {cp.uptime_seconds !== undefined && (
           <Row label="Uptime" value={fmtUptime(cp.uptime_seconds)} />

@@ -5,7 +5,7 @@ import {
   useModels, useModelOps, useNodes, usePlacement, api, MODEL_OPS_KEY,
 } from "@/lib/api";
 import { fmtBytes, fmtAgo, fmtDur, fmtIn } from "@/lib/format";
-import { Panel, Empty, Meter } from "@/components/ui";
+import { Panel, Empty, Meter, ErrorState } from "@/components/ui";
 import { StatusBadge } from "@/components/status";
 import { ConfirmDialog } from "@/components/confirm";
 import { useSWRConfig } from "swr";
@@ -39,7 +39,7 @@ interface RemoveTarget {
 }
 
 export default function ModelsPage() {
-  const { data: models } = useModels();
+  const { data: models, error: modelsErr, mutate: modelsMutate } = useModels();
   const { data: ops } = useModelOps();
   const { data: nodes } = useNodes();
   const { data: placement } = usePlacement();
@@ -215,7 +215,9 @@ export default function ModelsPage() {
         <div className="border-b px-4 py-3" style={{ borderColor: "var(--color-border)" }}>
           <div className="label">Installed models ({models?.length ?? 0})</div>
         </div>
-        {models === undefined ? (
+        {modelsErr ? (
+          <ErrorState error={modelsErr} onRetry={() => modelsMutate()} />
+        ) : models === undefined ? (
           <SkeletonRows />
         ) : (models ?? []).length === 0 ? (
           <Empty

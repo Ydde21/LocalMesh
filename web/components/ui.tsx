@@ -3,6 +3,7 @@
 import { ReactNode } from "react";
 import { clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
+import { RefreshCw } from "lucide-react";
 
 export function cn(...args: Parameters<typeof clsx>) {
   return twMerge(clsx(...args));
@@ -91,13 +92,56 @@ export function Empty({
 }
 
 export function Copyable({ text, mono = true }: { text: string; mono?: boolean }) {
+  // A real <button> — click-to-copy must be keyboard-operable.
   return (
-    <code
+    <button
+      type="button"
       className={`${mono ? "mono" : ""} cursor-pointer rounded bg-white/[0.06] px-1.5 py-0.5 text-[11px] text-[var(--color-text-dim)] transition-colors hover:bg-white/[0.1]`}
       title="Click to copy"
       onClick={() => navigator.clipboard.writeText(text)}
     >
       {text}
-    </code>
+    </button>
+  );
+}
+
+// Loading placeholder for list/table panels — pulse bars in place of rows.
+export function LoadingRows({ rows = 4 }: { rows?: number }) {
+  return (
+    <div role="status" aria-label="Loading">
+      <span className="sr-only">Loading…</span>
+      {Array.from({ length: rows }).map((_, i) => (
+        <div key={i} className="row-line flex items-center gap-5 px-4 py-4">
+          <div className="h-3 w-44 animate-pulse rounded bg-white/[0.06]" />
+          <div className="h-3 w-14 animate-pulse rounded bg-white/[0.06]" />
+          <div className="h-3 flex-1 animate-pulse rounded bg-white/[0.06]" />
+          <div className="h-3 w-16 animate-pulse rounded bg-white/[0.06]" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Fetch-failure state with a retry affordance — pass SWR's mutate() so a
+// click revalidates instead of reloading the page.
+export function ErrorState({
+  error,
+  onRetry,
+}: {
+  error: unknown;
+  onRetry?: () => void;
+}) {
+  const msg = error instanceof Error ? error.message : String(error ?? "request failed");
+  return (
+    <div className="flex flex-col items-center justify-center gap-3 py-10 text-center">
+      <div className="text-[12.5px] text-[var(--color-danger)]">
+        Couldn&apos;t load — {msg}
+      </div>
+      {onRetry && (
+        <button className="btn btn-sm" onClick={onRetry}>
+          <RefreshCw size={12} /> Retry
+        </button>
+      )}
+    </div>
   );
 }

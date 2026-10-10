@@ -1,6 +1,6 @@
 "use client";
 
-import { ReactNode, useEffect, useState } from "react";
+import { ReactNode, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 
 // ConfirmDialog is a modal confirmation step for destructive actions.
@@ -27,6 +27,7 @@ export function ConfirmDialog({
 }) {
   const [typed, setTyped] = useState("");
   const canConfirm = requireText ? typed.trim() === requireText : true;
+  const boxRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -36,17 +37,47 @@ export function ConfirmDialog({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // Without a type-to-confirm input, focus lands on the dialog itself so
+  // screen readers announce it (the input autofocuses on its own).
+  useEffect(() => {
+    if (!requireText) boxRef.current?.focus();
+  }, [requireText]);
+
+  // Minimal focus trap: Tab/Shift+Tab cycle the focusable controls
+  // inside the dialog instead of leaking to the page behind it.
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== "Tab" || !boxRef.current) return;
+    const els = boxRef.current.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    );
+    if (els.length === 0) return;
+    const first = els[0];
+    const last = els[els.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || active === boxRef.current)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 backdrop-blur-[2px]"
       onClick={onClose}
     >
       <div
+        ref={boxRef}
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="panel fade-up w-full max-w-[420px] px-5 py-5"
+        aria-describedby="confirm-dialog-body"
+        tabIndex={-1}
+        className="panel fade-up w-full max-w-[420px] px-5 py-5 outline-none"
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={onKeyDown}
       >
         <div className="flex items-start justify-between">
           <h2 className="text-[15px] font-semibold">{title}</h2>
@@ -59,7 +90,10 @@ export function ConfirmDialog({
           </button>
         </div>
 
-        <div className="mt-2 text-[12.5px] leading-relaxed text-[var(--color-text-dim)]">
+        <div
+          id="confirm-dialog-body"
+          className="mt-2 text-[12.5px] leading-relaxed text-[var(--color-text-dim)]"
+        >
           {children}
         </div>
 
