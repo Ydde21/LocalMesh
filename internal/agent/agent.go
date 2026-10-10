@@ -54,17 +54,49 @@ var errAuthRejected = errors.New("node credential rejected")
 // agent hammering the control plane forever.
 const maxAuthRejects = 3
 
+// Reconnect timing. The backoff doubles from reconnectMinDelay to
+// reconnectMaxDelay; a session that stayed up at least stableSession
+// resets the grown delay — a long-lived connection proves the path
+// works, so a drop after it retries fast instead of riding out a stale
+// 30s wait.
+const (
+	reconnectMinDelay = 1 * time.Second
+	reconnectMaxDelay = 30 * time.Second
+	stableSession     = 1 * time.Minute
+)
+
+// Connect-phase bounds, declared as vars so tests can shrink them —
+// production values never change.
+var (
+	// dialTimeout bounds the TCP+TLS+HTTP upgrade.
+	dialTimeout = 15 * time.Second
+	// handshakeTimeout bounds the hello exchange. Without it a peer
+	// that accepts the upgrade but never answers hello_ack wedges the
+	// session before the heartbeat loop even starts.
+	handshakeTimeout = 15 * time.Second
+	// pingTimeout bounds one protocol-level ping round trip.
+	pingTimeout = 5 * time.Second
+)
+
+// maxInboundFrame bounds a single server→agent message. The gateway
+// accepts prompt bodies up to 4MiB, which arrive as infer_req
+// envelopes; this leaves headroom for the envelope itself. The ws
+// library default (32KiB) would drop legitimately large requests.
+const maxInboundFrame = 8 << 20
+
 // Run connects to the control plane and serves until ctx is cancelled.
-// Reconnects with exponential backoff (±20% jitter) on failures.
+// Reconnects with bounded exponential backoff (±20% jitter) on
+// failures; each reconnect log line carries a classified cause.
 func (a *Agent) Run(ctx context.Context) error {
 	a.hw = hardware.Detect(ctx)
 	a.log.Info("hardware detected",
 		"cpu", a.hw.CPUModel, "cores", a.hw.CPUCores,
 		"mem_gb", a.hw.MemoryBytes/(1<<30), "gpus", len(a.hw.GPUs))
 
-	backoff := time.Second
+	backoff := reconnectMinDelay
 	authRejects := 0
 	for {
+		started := time.Now()
 		err := a.session(ctx)
 		if ctx.Err() != nil {
 			return nil
@@ -77,18 +109,41 @@ func (a *Agent) Run(ctx context.Context) error {
 		} else {
 			authRejects = 0
 		}
+		backoff = backoffAfterSession(backoff, time.Since(started))
 		sleep := jittered(backoff)
-		a.log.Warn("connection lost, reconnecting", "err", err, "in", sleep)
+		a.log.Warn("connection lost, reconnecting",
+			"err", err, "cause", ConnectCauseOf(err), "in", sleep)
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-time.After(sleep):
 		}
-		backoff *= 2
-		if backoff > 30*time.Second {
-			backoff = 30 * time.Second
-		}
+		backoff = growBackoff(backoff)
 	}
+}
+
+// backoffAfterSession returns the delay basis for the retry scheduled
+// after a session ends. Sessions that survived stableSession reset to
+// reconnectMinDelay; shorter (flapping) sessions keep the grown value
+// so exponential backoff still applies to real outages.
+func backoffAfterSession(cur, sessionLen time.Duration) time.Duration {
+	if sessionLen >= stableSession {
+		return reconnectMinDelay
+	}
+	return cur
+}
+
+// growBackoff doubles a backoff delay, capped at reconnectMaxDelay and
+// floored at reconnectMinDelay.
+func growBackoff(d time.Duration) time.Duration {
+	if d < reconnectMinDelay {
+		return reconnectMinDelay
+	}
+	d *= 2
+	if d > reconnectMaxDelay {
+		return reconnectMaxDelay
+	}
+	return d
 }
 
 // jittered applies ±20% jitter to a backoff interval.
@@ -98,11 +153,13 @@ func jittered(d time.Duration) time.Duration {
 
 // dialWS opens the control-plane socket. When the upgrade is rejected
 // with 401/403 the error wraps errAuthRejected so Run can stop retrying;
-// anything else is a transient failure worth backing off for.
+// anything else is a transient failure worth backing off for, wrapped in
+// a *ConnectError so logs can report the failure class (dns, tls,
+// refused, timeout, ...) instead of a raw Go error chain.
 func (a *Agent) dialWS(ctx context.Context) (*wsjson.Conn, error) {
 	u, err := url.Parse(a.cfg.WSURL())
 	if err != nil {
-		return nil, err
+		return nil, &ConnectError{Cause: CauseConfig, Op: "dial", Err: err}
 	}
 	hdr := http.Header{}
 	hdr.Set("Authorization", "Bearer "+a.cfg.NodeToken)
@@ -116,55 +173,43 @@ func (a *Agent) dialWS(ctx context.Context) (*wsjson.Conn, error) {
 			reason := strings.TrimSpace(readLimit(resp.Body, 256))
 			return nil, fmt.Errorf("%w: HTTP %d %s", errAuthRejected, resp.StatusCode, reason)
 		}
-		return nil, fmt.Errorf("dial %s: %w", u.Redacted(), err)
+		if resp != nil {
+			return nil, &ConnectError{Cause: CauseHTTP, Op: "dial", Addr: u.Redacted(),
+				Err: fmt.Errorf("websocket upgrade rejected: %s", resp.Status)}
+		}
+		return nil, &ConnectError{Cause: classifyConnectErr(err), Op: "dial", Addr: u.Redacted(), Err: err}
 	}
 	return wsjson.Wrap(ws), nil
 }
 
 // session runs one connection lifecycle.
 func (a *Agent) session(ctx context.Context) error {
-	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	// Session scope: when the socket dies, in-flight inference and model
+	// ops lose their delivery channel (the server marks them interrupted
+	// and requeues retryable work). Cancelling them here stops ghost
+	// goroutines computing undeliverable results and frees the engine.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	dctx, dialCancel := context.WithTimeout(ctx, dialTimeout)
 	c, err := a.dialWS(dctx)
-	cancel()
+	dialCancel()
 	if err != nil {
 		return err
 	}
 	defer c.Close(websocket.StatusNormalClosure, "bye")
+	c.SetReadLimit(maxInboundFrame)
 
-	// Hello handshake.
-	if err := c.Write(ctx, contracts.Envelope{
-		ID:   uuid.NewString(),
-		Type: contracts.MsgHello,
-		Payload: contracts.MarshalPayload(contracts.Hello{
-			NodeID:          a.cfg.NodeID,
-			ProtocolVersion: contracts.ProtocolVersion,
-			AgentVersion:    a.hw.AgentVersion,
-		}),
-	}); err != nil {
-		return err
-	}
-	env, err := c.Read(ctx)
+	hctx, hcancel := context.WithTimeout(ctx, handshakeTimeout)
+	heartbeat, err := a.handshake(hctx, c)
+	hcancel()
 	if err != nil {
 		return err
-	}
-	if env.Type == contracts.MsgError {
-		var e contracts.ErrorPayload
-		env.Decode(&e)
-		return errors.New("server rejected connection: " + e.Message)
-	}
-	if env.Type != contracts.MsgHelloAck {
-		return errors.New("expected hello_ack, got " + env.Type)
-	}
-	var ack contracts.HelloAck
-	env.Decode(&ack)
-	heartbeat := time.Duration(ack.HeartbeatSeconds) * time.Second
-	if heartbeat <= 0 {
-		heartbeat = 10 * time.Second
 	}
 	a.log.Info("connected to control plane", "server", a.cfg.ServerURL,
 		"heartbeat", heartbeat)
 
-	// Initial capability report.
+	// Initial capability report (also the post-reconnect re-report).
 	a.reportCapabilities(ctx, c)
 
 	// Heartbeat loop.
@@ -182,6 +227,43 @@ func (a *Agent) session(ctx context.Context) error {
 	}
 }
 
+// handshake performs the hello exchange and returns the negotiated
+// heartbeat interval. Callers bound it with handshakeTimeout.
+func (a *Agent) handshake(ctx context.Context, c *wsjson.Conn) (time.Duration, error) {
+	if err := c.Write(ctx, contracts.Envelope{
+		ID:   uuid.NewString(),
+		Type: contracts.MsgHello,
+		Payload: contracts.MarshalPayload(contracts.Hello{
+			NodeID:          a.cfg.NodeID,
+			ProtocolVersion: contracts.ProtocolVersion,
+			AgentVersion:    a.hw.AgentVersion,
+		}),
+	}); err != nil {
+		return 0, err
+	}
+	env, err := c.Read(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if env.Type == contracts.MsgError {
+		var e contracts.ErrorPayload
+		env.Decode(&e)
+		return 0, &ConnectError{Cause: CauseProtocol, Op: "hello",
+			Err: errors.New("server rejected connection: " + e.Message)}
+	}
+	if env.Type != contracts.MsgHelloAck {
+		return 0, &ConnectError{Cause: CauseProtocol, Op: "hello",
+			Err: errors.New("expected hello_ack, got " + env.Type)}
+	}
+	var ack contracts.HelloAck
+	env.Decode(&ack)
+	heartbeat := time.Duration(ack.HeartbeatSeconds) * time.Second
+	if heartbeat <= 0 {
+		heartbeat = 10 * time.Second
+	}
+	return heartbeat, nil
+}
+
 func (a *Agent) heartbeatLoop(ctx context.Context, c *wsjson.Conn, every time.Duration, done <-chan struct{}) {
 	t := time.NewTicker(every)
 	defer t.Stop()
@@ -197,12 +279,15 @@ func (a *Agent) heartbeatLoop(ctx context.Context, c *wsjson.Conn, every time.Du
 			// half-dead socket (e.g. after sleep/wake) within one
 			// heartbeat interval instead of waiting on TCP timeouts.
 			// Closing the conn unblocks the session read loop.
-			pctx, pcancel := context.WithTimeout(ctx, 5*time.Second)
+			pctx, pcancel := context.WithTimeout(ctx, pingTimeout)
 			err := c.Ping(pctx)
 			pcancel()
 			if err != nil {
 				a.log.Warn("control plane ping failed, reconnecting", "err", err)
-				c.Close(websocket.StatusInternalError, "ping timeout")
+				// The peer is already dead — a graceful Close would
+				// stall ~5s waiting for a close echo, delaying the
+				// session's unwind and the next reconnect.
+				c.CloseNow()
 				return
 			}
 			loaded, measured := a.loadedModels(ctx)

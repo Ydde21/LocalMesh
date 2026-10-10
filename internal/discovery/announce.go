@@ -49,6 +49,7 @@ type Announcer struct {
 	instance string
 	port     int
 	txt      []string
+	done     chan struct{} // closed by Close; releases the ctx watcher
 	once     sync.Once
 }
 
@@ -99,13 +100,18 @@ func Announce(ctx context.Context, opts AnnounceOptions) (*Announcer, error) {
 		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 
-	a := &Announcer{srv: srv, instance: opts.Instance, port: opts.Port, txt: txt}
+	a := &Announcer{srv: srv, instance: opts.Instance, port: opts.Port, txt: txt,
+		done: make(chan struct{})}
 	// Tie the announcement's lifetime to the caller's context (skipped
-	// for non-cancelable contexts like context.Background()).
+	// for non-cancelable contexts like context.Background()). The done
+	// channel keeps a manual Close from parking this goroutine forever.
 	if ctx.Done() != nil {
 		go func() {
-			<-ctx.Done()
-			a.Close()
+			select {
+			case <-ctx.Done():
+				a.Close()
+			case <-a.done:
+			}
 		}()
 	}
 	return a, nil
@@ -123,7 +129,10 @@ func (a *Announcer) TXT() []string { return a.txt }
 // Close unregisters the service (multicast goodbye) and releases the
 // sockets. Safe to call more than once.
 func (a *Announcer) Close() error {
-	a.once.Do(func() { a.srv.Shutdown() })
+	a.once.Do(func() {
+		close(a.done)
+		a.srv.Shutdown()
+	})
 	return nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/grandcat/zeroconf"
 )
@@ -172,6 +173,130 @@ func TestCollectEntryBadCAFP(t *testing.T) {
 	if c.TXT["ca_fp"] != "bogus" {
 		t.Error("raw TXT should still be preserved")
 	}
+}
+
+// TestCollectEntryRefresh: a re-announcement of the same
+// instance+host+port refreshes the entry in place — SeenAt advances and
+// the latest TXT replaces the old one — rather than producing a
+// duplicate. This is what keeps a long browse window from surfacing
+// stale advertisements.
+func TestCollectEntryRefresh(t *testing.T) {
+	found := map[clusterKey]*Cluster{}
+	var order []clusterKey
+	ip := net.ParseIP("192.168.1.10")
+
+	collectEntry(found, &order, entry("alpha", "srv.local.", 8443,
+		[]string{"v=1", "ca_fp=" + strings.Repeat("aa", 32)}, []net.IP{ip}, nil))
+	first := found[clusterKey{"alpha", "srv.local", 8443}].SeenAt
+
+	time.Sleep(2 * time.Millisecond)
+	collectEntry(found, &order, entry("alpha", "srv.local.", 8443,
+		[]string{"v=1", "ca_fp=" + strings.Repeat("bb", 32)}, []net.IP{ip}, nil))
+
+	clusters := sortedClusters(found, order)
+	if len(clusters) != 1 {
+		t.Fatalf("re-announce produced %d clusters, want 1 deduped", len(clusters))
+	}
+	c := clusters[0]
+	if !c.SeenAt.After(first) {
+		t.Error("re-announce did not refresh SeenAt")
+	}
+	if c.CAFingerprint != "sha256:"+strings.Repeat("bb", 32) {
+		t.Errorf("latest ca_fp should win, got %q", c.CAFingerprint)
+	}
+}
+
+// TestCollectEntryMalformedTXT hammers the advertiser→collector path
+// with foreign/malformed TXT metadata. Nothing may panic, entries are
+// still collected when instance+port are sane, and an unparseable
+// ca_fp can never become a fingerprint.
+func TestCollectEntryMalformedTXT(t *testing.T) {
+	cases := []struct {
+		name string
+		text []string
+	}{
+		{"empty", nil},
+		{"empty strings", []string{"", "", ""}},
+		{"no keys", []string{"=", "=", "=x"}},
+		{"no format version", []string{"cluster=x", "proto=9"}},
+		{"giant value", []string{"ca_fp=" + strings.Repeat("ab", 32), "pad=" + strings.Repeat("z", 64<<10)}},
+		{"giant record count", func() []string {
+			out := make([]string, 2000)
+			for i := range out {
+				out[i] = "k=v"
+			}
+			return out
+		}()},
+		{"duplicate keys", []string{"ca_fp=11", "ca_fp=22", "ca_fp=33"}},
+		{"binary garbage", []string{"\x00\x01\x02=\xff\xfe", "ca_fp=\x00\xff"}},
+		{"utf8 junk", []string{"ca_fp=☃☃☃", "cluster=☃"}},
+		{"ca_fp wrong length", []string{"ca_fp=abcd"}},
+		{"ca_fp nonhex", []string{"ca_fp=" + strings.Repeat("zz", 32)}},
+		{"ca_fp prefixed", []string{"ca_fp=sha256:" + strings.Repeat("ab", 32)}},
+		{"ca_fp upper", []string{"ca_fp=" + strings.ToUpper(strings.Repeat("ab", 32))}},
+		{"sneaky keys", []string{"token=abc", "secret=x", "node_token=lmn_x"}},
+	}
+	for _, tc := range cases {
+		found := map[clusterKey]*Cluster{}
+		var order []clusterKey
+		collectEntry(found, &order, entry("adv", "h.local.", 8443, tc.text, nil, nil))
+		c := found[clusterKey{"adv", "h.local", 8443}]
+		if c == nil {
+			t.Errorf("%s: sane instance+port must still collect", tc.name)
+			continue
+		}
+		if c.CAFingerprint != "" {
+			// Only genuinely valid sha256 hex may ever survive.
+			if _, err := NormalizeCAFingerprint(c.CAFingerprint); err != nil {
+				t.Errorf("%s: invalid CAFingerprint %q escaped", tc.name, c.CAFingerprint)
+			}
+		}
+		switch tc.name {
+		case "ca_fp wrong length", "ca_fp nonhex", "binary garbage", "utf8 junk":
+			if c.CAFingerprint != "" {
+				t.Errorf("%s: malformed ca_fp produced fingerprint %q", tc.name, c.CAFingerprint)
+			}
+		case "ca_fp prefixed", "ca_fp upper":
+			if c.CAFingerprint != "sha256:"+strings.Repeat("ab", 32) {
+				t.Errorf("%s: valid ca_fp not normalized: %q", tc.name, c.CAFingerprint)
+			}
+		}
+	}
+}
+
+// FuzzTXTSafety feeds arbitrary bytes through parseTXT and the
+// ca_fp/NormalizeCAFingerprint pipeline. Invariants: never panic, never
+// emit an empty key, and a fingerprint is always "sha256:" + 64 hex or
+// empty — an attacker-controlled advertisement can never synthesize a
+// valid pin.
+func FuzzTXTSafety(f *testing.F) {
+	for _, s := range []string{
+		"v=1", "ca_fp=" + strings.Repeat("ab", 32), "ca_fp=", "=", "==",
+		"a=b=c", "\x00=\xff", "cluster", "k" + strings.Repeat("x", 300),
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		m := parseTXT([]string{s, "ca_fp=" + s})
+		for k := range m {
+			if k == "" {
+				t.Fatalf("parseTXT emitted an empty key for %q", s)
+			}
+		}
+		fp := caFingerprint(m)
+		if fp != "" {
+			if _, err := NormalizeCAFingerprint(fp); err != nil {
+				t.Fatalf("caFingerprint(%q) = %q fails normalization", s, fp)
+			}
+		}
+		// Round-trip stability: any input that normalizes must produce
+		// the canonical "sha256:<64 lowercase hex>" form.
+		if norm, err := NormalizeCAFingerprint(s); err == nil {
+			if !strings.HasPrefix(norm, "sha256:") || len(norm) != 7+64 {
+				t.Fatalf("NormalizeCAFingerprint(%q) = %q not canonical", s, norm)
+			}
+		}
+	})
 }
 
 func TestEndpoint(t *testing.T) {
