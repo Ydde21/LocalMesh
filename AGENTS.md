@@ -28,6 +28,11 @@ make build                      # → bin/localmesh-{server,agent}
 make release                    # cross-compile agents → dist/
 cd web && npm run lint && npm run build
 
+# live-stack verification (docker required; each starts its own postgres)
+bash scripts/ci-e2e-smoke.sh    # enroll→infer→standby promotion→post-failover infer
+bash scripts/ci-update-smoke.sh # signed release → rollout → agent self-update e2e
+bash scripts/ci-agent-smoke.sh  # agent CLI/service lifecycle contract checks
+
 # dev stack
 make dev-up                     # postgres on :5433
 LOCALMESH_DEV_INSECURE_HTTP=1 \
