@@ -45,20 +45,29 @@ binary, six flags; every flag has a `LOCALMESH_ROUTER_*` env equivalent.
 | `-ca /path/ca.pem` | `LOCALMESH_ROUTER_CA` | — | verify backend TLS for `https` backends — **recommended**: use the cluster CA |
 | `-insecure` | `LOCALMESH_ROUTER_INSECURE` | off | skip backend TLS verification — dev only |
 | `-interval` | `LOCALMESH_ROUTER_INTERVAL` | `1s` | backend health-poll cadence |
-| `-status host:port` | `LOCALMESH_ROUTER_STATUS` | off | optional status listener returning JSON `{active, backends[]}` |
+| `-wait` | `LOCALMESH_ROUTER_WAIT` | `10s` | how long an accepted connection waits for a ready backend |
+| `-rise` | `LOCALMESH_ROUTER_RISE` | `2` | consecutive healthy probes required to elect a backend |
+| `-fall` | `LOCALMESH_ROUTER_FALL` | `3` | consecutive failed probes required to demote a backend |
+| `-max-conns` | `LOCALMESH_ROUTER_MAX_CONNS` | `4096` | bound on simultaneously held client connections |
+| `-drain` | `LOCALMESH_ROUTER_DRAIN` | `30s` | post-EOF window for the surviving splice direction |
+| `-status host:port` | `LOCALMESH_ROUTER_STATUS` | off | optional diagnostics listener: `/status` JSON `{active, backends[]}`, `/statusz`, `/metrics` (Prometheus), `/healthz` |
 
 Behavior notes:
 
 - Each `-interval`, every backend's `GET /readyz` is probed. A backend
-  answering `200` is the active control plane and receives proxied
-  connections; anything else (503 standby, unreachable) receives none.
+  answering `200` `-rise` times in a row is the active control plane
+  and receives proxied connections; anything else (503 standby,
+  unreachable) receives none. `-fall` consecutive failures are required
+  before demotion — transient probe flaps do not flap the election.
 - The router holds no state of its own — its whole world is the last
-  probe result per backend. Restarting it is harmless and instant.
+  probe results per backend. Restarting it is harmless and instant.
 - `-ca` is strongly recommended: without it an `https` backend check
   either needs `-insecure` (dev) or system roots. The cluster CA is the
   same `ca.pem` agents pin — mount the data dir read-only.
 - `-status` is intended for localhost/operator inspection and
   automation; do not publish it as the client port.
+- Full reference incl. failure modes and redundancy options (a single
+  router remains a SPOF): `docs/router.md`.
 
 ## Deployment recipe
 
