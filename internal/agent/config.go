@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Config is the persisted agent state.
@@ -18,6 +19,15 @@ type Config struct {
 	CAPEM     string `json:"ca_pem,omitempty"`
 	Name      string `json:"name"`
 	OllamaURL string `json:"ollama_url,omitempty"`
+	// DiscoveryEnabled records that this node joined via mDNS
+	// discovery. Informational only — server_url and ca_pem remain
+	// authoritative; reconnects do not re-discover.
+	DiscoveryEnabled bool `json:"discovery_enabled,omitempty"`
+	// DiscoveredCluster is the advertised instance name of the cluster
+	// joined through discovery.
+	DiscoveredCluster string `json:"discovered_cluster,omitempty"`
+	// DiscoveredAt is when the discovery-assisted join happened.
+	DiscoveredAt time.Time `json:"discovered_at,omitempty"`
 }
 
 // DefaultDir returns the agent config directory.
