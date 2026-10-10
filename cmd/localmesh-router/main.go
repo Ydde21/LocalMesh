@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -34,7 +35,11 @@ func main() {
 	insecure := flag.Bool("insecure", env("INSECURE", "") == "1", "skip backend TLS verification (dev only)")
 	interval := flag.Duration("interval", mustDuration(env("INTERVAL", "1s")), "backend health-check interval")
 	wait := flag.Duration("wait", mustDuration(env("WAIT", "10s")), "how long an accepted connection waits for a ready backend")
-	status := flag.String("status", env("STATUS", ""), "optional status listener (e.g. 127.0.0.1:9100 serves /status + /healthz)")
+	drain := flag.Duration("drain", mustDuration(env("DRAIN", "30s")), "grace window for the surviving direction of a half-closed splice")
+	rise := flag.Int("rise", mustInt(env("RISE", "2")), "consecutive healthy probes before a backend counts ready")
+	fall := flag.Int("fall", mustInt(env("FALL", "3")), "consecutive failed probes before a ready backend is demoted")
+	maxConns := flag.Int("max-conns", mustInt(env("MAX_CONNS", "4096")), "maximum simultaneous client connections")
+	status := flag.String("status", env("STATUS", ""), "optional diagnostics listener (e.g. 127.0.0.1:9100 serves /status, /statusz, /metrics, /healthz)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -49,6 +54,10 @@ func main() {
 		Insecure:   *insecure,
 		Interval:   *interval,
 		Wait:       *wait,
+		Drain:      *drain,
+		Rise:       *rise,
+		Fall:       *fall,
+		MaxConns:   *maxConns,
 		StatusAddr: *status,
 	})
 	if err != nil {
@@ -72,4 +81,12 @@ func mustDuration(s string) time.Duration {
 		return time.Second
 	}
 	return d
+}
+
+func mustInt(s string) int {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
+	}
+	return n
 }
