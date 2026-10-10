@@ -616,7 +616,18 @@ func TestCancelDrainingClearsMaintenance(t *testing.T) {
 	n := e.node(t, "n1", "0.6.0", true, false)
 
 	_, u := e.driveDispatchedWait(n, rel, t)
-	st, _ := e.maintenance(t, n)
+	// phase='draining' commits one statement before the maintenance
+	// marker in claim() — wait for the marker rather than asserting in
+	// the gap (the gap is real, just sub-ms under normal scheduling).
+	deadline := time.Now().Add(10 * time.Second)
+	var st string
+	for {
+		st, _ = e.maintenance(t, n)
+		if st == store.MaintUpdating || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if st != store.MaintUpdating {
 		t.Fatalf("maintenance = %q during drain", st)
 	}
