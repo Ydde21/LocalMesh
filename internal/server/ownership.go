@@ -39,6 +39,7 @@ type Ownership struct {
 	conn       *pgx.Conn
 	instanceID uuid.UUID
 	epoch      int64
+	backendPID uint32 // pg backend pid of the lock session
 	log        *slog.Logger
 	lost       chan struct{}
 	stop       chan struct{}
@@ -95,6 +96,11 @@ func AcquireOwnership(ctx context.Context, dsn string, log *slog.Logger) (*Owner
 	}
 
 	instanceID := uuid.New()
+	var pid uint32
+	if err := conn.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&pid); err != nil {
+		conn.Close(ctx)
+		return nil, fmt.Errorf("ownership backend pid: %w", err)
+	}
 	var epoch int64
 	err = conn.QueryRow(ctx,
 		`INSERT INTO control_plane_lock (id, owner_id, epoch)
@@ -114,6 +120,7 @@ func AcquireOwnership(ctx context.Context, dsn string, log *slog.Logger) (*Owner
 		conn:       conn,
 		instanceID: instanceID,
 		epoch:      epoch,
+		backendPID: pid,
 		log:        log,
 		lost:       make(chan struct{}),
 		stop:       make(chan struct{}),
@@ -126,6 +133,10 @@ func AcquireOwnership(ctx context.Context, dsn string, log *slog.Logger) (*Owner
 
 // Epoch is the fencing token authoritative writes must carry.
 func (o *Ownership) Epoch() int64 { return o.epoch }
+
+// BackendPID is the Postgres backend pid of the lock session — lets a
+// peer connection kill it precisely (tests, admin tooling).
+func (o *Ownership) BackendPID() uint32 { return o.backendPID }
 
 // Lost closes when the advisory-lock session fails. Exactly once.
 func (o *Ownership) Lost() <-chan struct{} { return o.lost }

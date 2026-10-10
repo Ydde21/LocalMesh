@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/localmesh/localmesh/internal/contracts"
 	"github.com/localmesh/localmesh/internal/server/store"
 	"github.com/localmesh/localmesh/internal/testutil"
@@ -95,8 +97,19 @@ func TestOwnershipCrashRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Simulate process crash: conn drops, Release never runs.
-	o1.conn.Close(context.Background())
+	// Simulate process crash: kill the lock session from a peer
+	// connection — the real shape of a dead TCP conn (pgx.Conn is not
+	// concurrent-safe; a racing Close would test the harness, not the
+	// semantics).
+	killConn, err := pgx.Connect(context.Background(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := killConn.Exec(context.Background(),
+		"SELECT pg_terminate_backend($1)", o1.BackendPID()); err != nil {
+		t.Fatal(err)
+	}
+	killConn.Close(context.Background())
 
 	o2, err := AcquireOwnership(context.Background(), dsn, testLog())
 	if err != nil {
@@ -163,7 +176,15 @@ func TestOwnershipLostOnConnDeath(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer o.Release(context.Background())
-	o.conn.Close(context.Background())
+	killConn, err := pgx.Connect(context.Background(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := killConn.Exec(context.Background(),
+		"SELECT pg_terminate_backend($1)", o.BackendPID()); err != nil {
+		t.Fatal(err)
+	}
+	killConn.Close(context.Background())
 
 	select {
 	case <-o.Lost():
@@ -175,7 +196,7 @@ func TestOwnershipLostOnConnDeath(t *testing.T) {
 // A second full Server on the same database fails startup clearly —
 // this is the split-brain prevention the milestone requires.
 func TestSecondServerRefused(t *testing.T) {
-	_, dsn := ownershipStore(t)
+	st, dsn := ownershipStore(t)
 	old := ownershipAcquireBudget
 	ownershipAcquireBudget = 500 * time.Millisecond
 	defer func() { ownershipAcquireBudget = old }()
@@ -202,9 +223,10 @@ func TestSecondServerRefused(t *testing.T) {
 	done1 := make(chan error, 1)
 	go func() { done1 <- s1.Start(ctx) }()
 
-	// Wait for s1 to hold ownership (it acquires before listening).
+	// Wait for s1 to hold ownership — observed via the DB row (reading
+	// s1.owner directly would race Start's write).
 	deadline := time.Now().Add(10 * time.Second)
-	for s1.owner == nil && time.Now().Before(deadline) {
+	for currentEpoch(t, st) < 1 && time.Now().Before(deadline) {
 		select {
 		case err := <-done1:
 			t.Fatalf("s1 exited: %v", err)
@@ -212,7 +234,7 @@ func TestSecondServerRefused(t *testing.T) {
 			time.Sleep(25 * time.Millisecond)
 		}
 	}
-	if s1.owner == nil {
+	if currentEpoch(t, st) < 1 {
 		t.Fatal("s1 never acquired ownership")
 	}
 
