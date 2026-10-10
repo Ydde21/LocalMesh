@@ -90,3 +90,7 @@ prefixing and hashing, the approval gate, update signature trust, and
 what a compromised control plane can and cannot do — is documented in
 [docs/security.md](docs/security.md). Reading it first will likely
 answer whether your finding is a bug or the design working as intended.
+
+Operators hardening a deployment should start with
+[docs/production-hardening.md](docs/production-hardening.md); the
+pre-beta security audit is [docs/security-audit-v09.md](docs/security-audit-v09.md).
