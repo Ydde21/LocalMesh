@@ -298,6 +298,9 @@ export interface VersionInfo {
   server_version: string;
   protocol: number;
   min_agent_protocol: number;
+  // Emitted only by standby instances ("standby") — the active instance's
+  // version payload has no role key at all, so presence is the signal.
+  role?: string;
 }
 
 // GET /api/v1/discovery/status — LAN discovery (mDNS) state. The endpoint
@@ -397,6 +400,11 @@ export interface Rollout {
   created_by: string;
   created_at: string;
   updated_at: string;
+  // Durable canary approval (v0.8+): recorded atomically with the
+  // awaiting_approval→running transition. Absent on older servers and on
+  // rollouts that never waited for approval.
+  approved_by?: string;
+  approved_at?: string;
   total: number;
   succeeded: number;
   failed: number;
@@ -440,21 +448,40 @@ export interface AgentUpdate {
   finished_at?: string;
 }
 
-// GET /control-plane — single-active ownership/HA status. 404 on older
-// servers. `promotions` is the recent ownership-event history (newest
-// first); Go nil slices serialize as null.
-export interface ControlPlaneStatus {
-  role: "active" | "standby" | "unknown";
+// One row of control-plane ownership history (ownership_events table),
+// embedded in the /control-plane payload. `owner_id` is the ephemeral
+// instance UUID — display it only truncated, if at all.
+export interface ControlPlaneEvent {
+  id: number;
+  owner_id?: string;
   epoch: number;
-  owner_started_at?: string;
-  heartbeat_at?: string;
-  standby?: boolean;
-  promotions?: {
-    event: string; // acquired|released|lost|promoted|refused
+  event: string; // acquired|released|lost|promoted|refused
+  detail?: string;
+  at: string;
+}
+
+// GET /control-plane — single-active ownership/HA status. 404 on older
+// servers. A promoted standby reports role "active" (the role it holds
+// now) with `promoted_from_standby` recording how it got there. `events`
+// is the recent ownership-event history (newest first); Go nil slices
+// serialize as null.
+export interface ControlPlaneStatus {
+  role: "active" | "standby" | "unknown" | string;
+  standby_capable?: boolean;
+  promoted_from_standby?: boolean;
+  uptime_seconds?: number;
+  // This instance's ephemeral UUID + fencing epoch — present once the
+  // instance holds (or held) ownership.
+  instance_id?: string;
+  epoch?: number;
+  // The live owner row, when the store has one.
+  owner?: {
+    instance_id: string;
     epoch: number;
-    detail: string;
-    at: string;
-  }[] | null;
+    started_at: string;
+    heartbeat_age_seconds: number;
+  } | null;
+  events?: ControlPlaneEvent[] | null;
 }
 
 // Node summary inside the diagnostics bundle — same fields the hub

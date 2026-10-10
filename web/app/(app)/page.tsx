@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useOverview, useNodes, useWorkloads, useModelOps, useControlPlane } from "@/lib/api";
-import { fmtBytes, fmtAgo, osLabel, fmtVersion, agentVersion } from "@/lib/format";
+import { fmtBytes, fmtAgo, fmtUptime, osLabel, fmtVersion, agentVersion } from "@/lib/format";
 import { Panel, Stat, Meter, Empty } from "@/components/ui";
 import { NodeBadge } from "@/components/status";
 import { ActivityFeed } from "@/components/activity-feed";
@@ -271,39 +271,80 @@ function FleetHealthStrip({ nodes }: { nodes: Node[] }) {
 }
 
 // Single-active ownership / HA state (v0.7+). The endpoint 404s on older
-// servers — the whole panel stays hidden then.
+// servers — the whole panel stays hidden then. `events` is the ownership
+// history (newest first); `owner` is the live lease row. A promoted
+// standby still reports role "active" — `promoted_from_standby` says how
+// it got there.
 function ControlPlanePanel() {
   const { data: cp } = useControlPlane();
   if (!cp) return null;
-  const last = (cp.promotions ?? [])[0]; // newest first
+  const events = (cp.events ?? []).slice(0, 6);
+  const instanceId = cp.instance_id || cp.owner?.instance_id || "";
   return (
     <Panel className="px-4 py-4">
       <div className="label mb-3">Control plane</div>
       <div className="space-y-3">
         <div className="flex items-baseline justify-between">
           <span className="text-[12px] text-[var(--color-text-dim)]">Role</span>
-          {cp.role === "active" ? (
-            <span className="badge badge-ok"><span className="dot" />active</span>
-          ) : cp.role === "standby" ? (
-            <span className="badge badge-neutral"><span className="dot" />standby</span>
-          ) : (
-            <span className="badge badge-neutral"><span className="dot" />{cp.role || "unknown"}</span>
-          )}
+          <span className="flex items-center gap-1.5">
+            {cp.promoted_from_standby && (
+              <span
+                className="badge badge-accent !px-1.5 !py-0"
+                title="this instance was promoted from standby"
+              >
+                promoted
+              </span>
+            )}
+            {cp.role === "active" ? (
+              <span className="badge badge-ok"><span className="dot" />active</span>
+            ) : cp.role === "standby" ? (
+              <span className="badge badge-warn"><span className="dot" />standby</span>
+            ) : (
+              <span className="badge badge-neutral"><span className="dot" />{cp.role || "unknown"}</span>
+            )}
+          </span>
         </div>
-        <Row label="Epoch" value={String(cp.epoch)} />
-        {cp.owner_started_at && (
-          <Row label="Owner since" value={fmtAgo(cp.owner_started_at)} />
-        )}
-        {cp.heartbeat_at && <Row label="Heartbeat" value={fmtAgo(cp.heartbeat_at)} />}
-        {last && (
+        {cp.epoch !== undefined && <Row label="Epoch" value={String(cp.epoch)} />}
+        {instanceId && (
           <div className="flex items-baseline justify-between">
-            <span className="text-[12px] text-[var(--color-text-dim)]">Last event</span>
-            <span
-              className="mono text-[12px] font-medium"
-              title={`${last.event} · epoch ${last.epoch}${last.detail ? ` — ${last.detail}` : ""}`}
-            >
-              {last.event} · {fmtAgo(last.at)}
+            <span className="text-[12px] text-[var(--color-text-dim)]">Instance</span>
+            <span className="mono text-[12px] font-medium" title={instanceId}>
+              {instanceId.length > 12 ? `${instanceId.slice(0, 8)}…` : instanceId}
             </span>
+          </div>
+        )}
+        {cp.owner?.started_at && (
+          <Row label="Owner since" value={fmtAgo(cp.owner.started_at)} />
+        )}
+        {cp.owner && (
+          <Row label="Heartbeat" value={`${cp.owner.heartbeat_age_seconds}s ago`} />
+        )}
+        {cp.uptime_seconds !== undefined && (
+          <Row label="Uptime" value={fmtUptime(cp.uptime_seconds)} />
+        )}
+        {events.length > 0 && (
+          <div>
+            <div className="mb-1.5 text-[12px] text-[var(--color-text-dim)]">
+              Ownership history
+            </div>
+            <div>
+              {events.map((e) => (
+                <div
+                  key={e.id}
+                  className="row-line flex items-baseline gap-2 py-1"
+                  style={{ borderColor: "var(--color-border)" }}
+                  title={e.detail || undefined}
+                >
+                  <span className="text-[12px] text-[var(--color-text)]">{e.event}</span>
+                  <span className="mono text-[10.5px] text-[var(--color-text-faint)]">
+                    epoch {e.epoch}
+                  </span>
+                  <span className="ml-auto text-[10.5px] text-[var(--color-text-faint)]">
+                    {fmtAgo(e.at)}
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>

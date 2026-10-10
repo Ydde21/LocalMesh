@@ -702,19 +702,22 @@ function UpdateSection({
   act: (fn: () => Promise<unknown>) => Promise<void>;
 }) {
   const { data: releases } = useReleases();
-  const { data: updates } = useAgentUpdates({ node_id: node.id, limit: 1 });
+  const { data: updates } = useAgentUpdates({ node_id: node.id, limit: 6 });
   const { mutate: gm } = useSWRConfig();
   const [relId, setRelId] = useState("");
 
   const approved = (releases ?? []).filter((r) => r.status === "approved");
-  // Endpoint ordering isn't contractual — take newest by created_at.
-  const latest = (updates ?? [])
+  // Endpoint ordering isn't contractual — sort newest-first by created_at.
+  const rows = (updates ?? [])
     .slice()
-    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+    .sort((a, b) => b.created_at.localeCompare(a.created_at));
+  const latest = rows[0];
   const live = !!latest && !latest.finished_at;
+  // Finished rows listed under the controls (the live one shows above).
+  const history = rows.slice(live ? 1 : 0, 5);
 
   if (!releases && !updates) return null; // pre-v0.7 server
-  if (approved.length === 0 && !latest) return null; // nothing to act on
+  if (approved.length === 0 && rows.length === 0) return null; // nothing to act on
 
   // Default the picker to the newest approved release (semver-ish).
   const newest = approved.reduce<Release | null>(
@@ -729,7 +732,9 @@ function UpdateSection({
     <section>
       <div className="label mb-2.5">Agent update</div>
       {live && latest ? (
-        <UpdatePhaseStepper update={latest} />
+        <div className="rounded-md bg-white/[0.03] px-3 py-2.5">
+          <UpdatePhaseStepper update={latest} />
+        </div>
       ) : (
         <>
           {approved.length > 0 ? (
@@ -782,22 +787,18 @@ function UpdateSection({
               No approved releases — register one on the Releases page.
             </div>
           )}
-          {latest && (
-            <div className="mt-2.5 flex flex-wrap items-center gap-2 text-[11px] text-[var(--color-text-faint)]">
-              <span>last update:</span>
-              <span className="mono text-[var(--color-text-dim)]">
-                {latest.from_version || "?"} → {latest.to_version || latest.release_version || "?"}
-              </span>
-              <StatusBadge status={latest.phase} />
-              <span>{fmtAgo(latest.finished_at)}</span>
-              {latest.error && (
-                <span className="max-w-[220px] truncate text-[var(--color-danger)]" title={latest.error}>
-                  {latest.error}
-                </span>
-              )}
-            </div>
-          )}
         </>
+      )}
+
+      {/* Per-node update history — same stepper the rollout drawer uses. */}
+      {history.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {history.map((u) => (
+            <div key={u.id} className="rounded-md bg-white/[0.03] px-3 py-2.5">
+              <UpdatePhaseStepper update={u} />
+            </div>
+          ))}
+        </div>
       )}
     </section>
   );

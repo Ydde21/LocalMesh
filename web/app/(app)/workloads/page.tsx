@@ -53,7 +53,8 @@ function WorkloadsInner() {
             hint="Send a request to POST /v1/chat/completions on the control plane to see routing here."
           />
         ) : (
-          <table className="w-full text-left">
+          <div className="overflow-x-auto">
+          <table className="w-full min-w-[780px] text-left">
             <thead>
               <tr className="border-b text-[11px]" style={{ borderColor: "var(--color-border)" }}>
                 <Th>Model</Th>
@@ -78,7 +79,17 @@ function WorkloadsInner() {
                     {w.streaming && <span className="ml-2 badge badge-neutral !py-0">stream</span>}
                   </Td>
                   <Td><span className="text-[12px]">{w.node_name || "—"}</span></Td>
-                  <Td><StatusBadge status={w.status} /></Td>
+                  <Td>
+                    <StatusBadge status={w.status} />
+                    {w.error && (
+                      <span
+                        className="ml-1.5 inline-block max-w-[160px] truncate align-middle text-[11px] text-[var(--color-danger)]"
+                        title={w.error}
+                      >
+                        {w.error}
+                      </span>
+                    )}
+                  </Td>
                   <Td><span className="mono text-[11.5px]">{fmtMs(w.ttft_ms)}</span></Td>
                   <Td><span className="mono text-[11.5px]">{fmtMs(w.total_ms)}</span></Td>
                   <Td>
@@ -98,6 +109,7 @@ function WorkloadsInner() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </Panel>
 
@@ -151,6 +163,8 @@ function WorkloadDetail({ id }: { id: string }) {
             <DetailStat label="Stream" value={w.streaming ? "yes" : "no"} />
             <DetailStat label="Prompt tokens" value={w.prompt_tokens?.toString() ?? "—"} />
             <DetailStat label="Completion" value={w.completion_tokens?.toString() ?? "—"} />
+            <DetailStat label="Prompt chars" value={String(w.prompt_chars)} />
+            {w.api_key_id && <DetailStat label="API key" value={w.api_key_id.slice(0, 8)} />}
           </section>
 
           {w.error && (
