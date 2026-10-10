@@ -1020,7 +1020,7 @@ func (a *API) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handlePutSetting(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	allowed := map[string]bool{"scheduling": true, "privacy": true, "cluster": true}
+	allowed := map[string]bool{"scheduling": true, "privacy": true, "cluster": true, "modelops": true}
 	if !allowed[key] {
 		writeErr(w, http.StatusBadRequest, "unknown settings key")
 		return
@@ -1150,6 +1150,22 @@ func validateSetting(key string, v json.RawMessage) string {
 				}
 			} else if _, present := m[lk]; present {
 				return lk + " must be an object"
+			}
+		}
+	case "modelops":
+		bounds := map[string][2]float64{
+			"global_concurrent":   {1, 16},
+			"per_node_concurrent": {1, 4},
+			"queue_max":           {8, 256},
+			"max_attempts":        {0, 8},
+		}
+		for k, b := range bounds {
+			if f, ok := numAt(k); ok {
+				if f < b[0] || f > b[1] || f != math.Trunc(f) {
+					return k + " must be an integer in [" +
+						strconv.FormatFloat(b[0], 'f', -1, 64) + "," +
+						strconv.FormatFloat(b[1], 'f', -1, 64) + "]"
+				}
 			}
 		}
 	}
