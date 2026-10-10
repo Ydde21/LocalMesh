@@ -1,10 +1,16 @@
 # Control-plane HA: active-standby design
 
-**Status: design only — nothing here is built.** v0.5 ships a
-single-instance control plane plus restart-resilience coverage
-(`internal/server/restart_test.go`, `resilience_test.go`). This document
-is the agreed shape of a *future* active-standby pair for operators who
-need sub-minute failover instead of "restart the container."
+**Status: partially built (v0.6).** The leader-lease half of this design
+**is implemented**: a dedicated session holds `pg_advisory_lock`, the
+owner stamps a fencing `epoch` into `control_plane_lock`, model-op
+claims are gated on that epoch, heartbeat loss fences the process into
+shutdown, and a second instance on the same database is refused with an
+actionable error — see `docs/reliability.md` § control-plane ownership
+and `internal/server/ownership.go`. What remains **design only** is the
+standby machinery below: a hot second instance that polls for the lock
+and promotes itself into a full boot. Today "failover" = the
+orchestrator restarting the container (agents reconnect in seconds —
+live-verified).
 
 The control plane stays deliberately single-writer. There is no
 consensus protocol, no etcd, no Raft — PostgreSQL is already the only

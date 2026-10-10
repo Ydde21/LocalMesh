@@ -74,8 +74,10 @@ from the `settings` rows at boot).
 ## Health endpoints
 
 - `GET /healthz` — liveness only: 200 once the listener is up. It does
-  **not** check Postgres or express readiness; a `/readyz` that pings
-  the DB is a proposed follow-up (see `docs/ha-design.md`).
+  **not** check Postgres.
+- `GET /readyz` (v0.6) — readiness: 200 only while the server's real
+  dependencies answer (Postgres ping); 503 when the DB is unreachable —
+  wire a load balancer/orchestrator here, not to `/healthz`.
 - `GET /api/v1/overview` (auth) — nodes online/total, in-flight counts.
 - `GET /api/v1/events` (auth, SSE) — `node.*`, `workload.*`,
   `model.operation`, `settings.*` events; good for alerting on

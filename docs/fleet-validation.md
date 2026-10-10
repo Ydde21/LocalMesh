@@ -12,7 +12,8 @@ results table at the end.
 - Two **different physical machines** ran the agent — not two processes on
   one host, not VMs on the same laptop.
 - Each machine ran the agent binary **built for its own OS/arch** (e.g.
-  `dist/localmesh-agent-darwin-arm64` and `dist/localmesh-agent-linux-amd64`).
+  `dist/localmesh-agent-<ver>-darwin-arm64` and
+  `dist/localmesh-agent-<ver>-linux-amd64`).
 - Traffic between the agents and the control plane crossed a **real
   network** (LAN, Wi-Fi, or an overlay like Tailscale) — not loopback.
 - `GET /api/v1/workloads` shows `node_name` values from **both** machines.
@@ -129,9 +130,9 @@ On device 1:
 # Option A — installer script:
 curl -fsSL https://raw.githubusercontent.com/localmesh/localmesh/main/scripts/install-agent.sh | sh
 
-# Option B — release binary matching this machine:
-chmod +x localmesh-agent-darwin-arm64
-sudo install -m755 localmesh-agent-darwin-arm64 /usr/local/bin/localmesh-agent
+# Option B — release binary matching this machine (versioned name):
+chmod +x localmesh-agent-<ver>-darwin-arm64
+sudo install -m755 localmesh-agent-<ver>-darwin-arm64 /usr/local/bin/localmesh-agent
 
 # Option C — from source:
 make build   # → bin/localmesh-agent
@@ -161,7 +162,7 @@ saw; compare it against the server log before approving.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/localmesh/localmesh/main/scripts/install-agent.sh | sh
-# or: sudo install -m755 localmesh-agent-linux-amd64 /usr/local/bin/localmesh-agent
+# or: sudo install -m755 localmesh-agent-<ver>-linux-amd64 /usr/local/bin/localmesh-agent
 
 localmesh-agent join \
   -server https://<control-plane-host>:8443 \
