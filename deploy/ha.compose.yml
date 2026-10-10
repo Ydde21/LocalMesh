@@ -111,8 +111,13 @@ services:
       LOCALMESH_ROUTER_BACKENDS: https://server:8443,https://server-standby:8443
       LOCALMESH_ROUTER_CA: /data/ca.pem
       LOCALMESH_ROUTER_INTERVAL: ${LOCALMESH_ROUTER_INTERVAL:-1s}
-      # Operator/automation status JSON {active, backends[]} — published
-      # on loopback below, not to the LAN.
+      # Election hysteresis: RISE consecutive healthy probes to elect,
+      # FALL consecutive failures to demote — suppresses backend flap.
+      LOCALMESH_ROUTER_RISE: ${LOCALMESH_ROUTER_RISE:-2}
+      LOCALMESH_ROUTER_FALL: ${LOCALMESH_ROUTER_FALL:-3}
+      LOCALMESH_ROUTER_MAX_CONNS: ${LOCALMESH_ROUTER_MAX_CONNS:-4096}
+      # Operator/automation status JSON {active, backends[]} + /statusz
+      # + /metrics — published on loopback below, not to the LAN.
       LOCALMESH_ROUTER_STATUS: 0.0.0.0:9443
     volumes:
       - localmesh-data:/data:ro

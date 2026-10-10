@@ -4,6 +4,7 @@ package server
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -86,7 +87,32 @@ func (c Config) Validate() error {
 	if c.AdminKey != "" && len(c.AdminKey) < 16 {
 		return fmt.Errorf("LOCALMESH_ADMIN_KEY must be at least 16 characters")
 	}
+	if c.DevInsecureHTTP && !loopbackListen(c.Listen) {
+		return fmt.Errorf("LOCALMESH_DEV_INSECURE_HTTP serves plaintext with no TLS — refusing to bind non-loopback address %q; use a loopback listen address or drop the dev flag", c.Listen)
+	}
 	return nil
+}
+
+// loopbackListen reports whether a listen address targets loopback only.
+// Bare ":port" (wildcard) is accepted — it's the documented dev default,
+// and the dev-insecure flag is itself the explicit downgrade. An
+// explicitly routable host (0.0.0.0, a LAN IP, a hostname) is refused:
+// that combination means someone tried to expose plaintext on purpose.
+func loopbackListen(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return strings.HasPrefix(addr, ":") // ":port" wildcard or nothing parseable
+	}
+	if host == "" {
+		return true // ":port" wildcard — dev default, accepted
+	}
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func envStr(k, def string) string {

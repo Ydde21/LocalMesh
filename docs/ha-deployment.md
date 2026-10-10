@@ -190,9 +190,11 @@ same stable endpoint:
 - **Cloud TCP/NLB** with an HTTPS health check on `/readyz`.
 
 Requirements are the same whatever fronts the pair: check `/readyz`
-(not `/healthz` — a standby's `/healthz` also fails, but `/readyz` is
-the documented "am I the active, DB-connected leader" signal), pass TLS
-through unterminated, and keep the stable name in `LOCALMESH_HOSTNAMES`.
+(not `/healthz` — a standby's `/healthz` answers 200 because the
+*process* is healthy, while `/readyz` 503s until promotion; `/readyz`
+is the documented "am I the active, DB-connected leader" signal), pass
+TLS through unterminated, and keep the stable name in
+`LOCALMESH_HOSTNAMES`.
 
 ## Limitations
 

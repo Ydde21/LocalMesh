@@ -384,6 +384,7 @@ func (s *Server) Start(ctx context.Context) error {
 		scheme := "https"
 		if s.cfg.DevInsecureHTTP {
 			scheme = "http"
+			s.log.Warn("LOCALMESH_DEV_INSECURE_HTTP active — serving plaintext with no TLS; dev/test only, never production")
 		}
 		s.log.Info("localmesh control plane listening",
 			"addr", ln.Addr().String(), "scheme", scheme)

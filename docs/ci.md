@@ -1,6 +1,7 @@
 # What CI proves — and what it doesn't
 
-`.github/workflows/ci.yml` has five jobs:
+`.github/workflows/ci.yml` has five jobs, plus a separate runtime matrix
+in `ci-runtime.yml`:
 
 | Job | Runs on | What it does |
 |---|---|---|
@@ -9,6 +10,7 @@
 | `agent-smoke` | ubuntu, macos, windows | native `go vet` + `go test` on `internal/agent/...`, `go test -race`, then `scripts/ci-agent-smoke.sh` — builds the real binary, runs it headless, and exercises the service-manager lifecycle + doctor/config contracts |
 | `agent-integration` | ubuntu (+postgres:16-alpine service) | `scripts/ci-e2e-smoke.sh` — real binaries end to end: server + agent + fakeollama over real postgres: enroll → approve → WS connect → capability report → `/v1/chat/completions` (buffered + SSE) |
 | `web` | ubuntu | `npm ci`, lint, production build |
+| `agent-runtime` (ci-runtime.yml) | ubuntu, macos, windows | `scripts/ci-agent-runtime.sh` — native `go build` of agent **and** fakeollama, then real-executable checks: per-subcommand `-h`, unenrolled `status`/`doctor` degradation, config round-trip, join/update/service argument contracts, a fakeollama engine leg, bounded `run` + SIGTERM, `discover -json`, and the `report -json` redaction gate. Proves binaries *execute* on each hosted OS — still not physical-fleet validation |
 
 The `agent-smoke` matrix exists because cross-compile only proves the
 agent *builds* for Windows/Linux — not that it *runs*. On each OS,

@@ -78,6 +78,23 @@ func TestRoleEnforcement(t *testing.T) {
 		{http.MethodPost, "/api/v1/api-keys"},
 		{http.MethodDelete, "/api/v1/api-keys/any"},
 		{http.MethodPut, "/api/v1/settings/scheduling"},
+		// v0.9 audit sweep — the release/update control surface must
+		// stay admin-only: any one of these degrading to readonly is a
+		// remote-code-distribution hole.
+		{http.MethodPost, "/api/v1/release-keys"},
+		{http.MethodPost, "/api/v1/release-keys/any/revoke"},
+		{http.MethodPost, "/api/v1/releases"},
+		{http.MethodPost, "/api/v1/releases/any/revoke"},
+		{http.MethodDelete, "/api/v1/releases/any"},
+		{http.MethodPut, "/api/v1/releases/any/artifacts/any"},
+		{http.MethodPost, "/api/v1/rollouts"},
+		{http.MethodPost, "/api/v1/rollouts/any/approve"},
+		{http.MethodPost, "/api/v1/rollouts/any/cancel"},
+		{http.MethodPost, "/api/v1/rollouts/any/pause"},
+		{http.MethodPost, "/api/v1/rollouts/any/resume"},
+		{http.MethodPost, "/api/v1/agent-updates/any/cancel"},
+		{http.MethodPost, "/api/v1/nodes/any/maintenance"},
+		{http.MethodPost, "/api/v1/nodes/any/resume"},
 	}
 	for _, m := range mutations {
 		if code, _ := keyReq(t, e, m.method, m.path, roKey, map[string]any{}); code != http.StatusForbidden && code != http.StatusUnauthorized {
