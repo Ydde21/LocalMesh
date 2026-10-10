@@ -1,0 +1,112 @@
+# OPTIONAL observability layer: Prometheus + Grafana for LocalMesh.
+#
+# This stack is strictly additive — nothing in LocalMesh depends on it.
+# It composes onto either shipped compose file with -f stacking:
+#
+#   # onto the HA control plane (recommended — scrapes both instances):
+#   docker compose -f deploy/ha.compose.yml -f deploy/monitoring.compose.yml up -d
+#
+#   # onto the single-server stack:
+#   docker compose -f docker-compose.yml -f deploy/monitoring.compose.yml up -d
+#
+# Two things must exist before Prometheus scrapes succeed (everything
+# still starts without them; scrapes just stay down until they do):
+#
+#   1. A scrape token — an lmk_ API key with the `readonly` role, in a
+#      file (one line, no newline issues tolerated). Mint it with the
+#      admin API and write it to deploy/monitoring/scrape-token, or
+#      point LOCALMESH_SCRAPE_TOKEN_FILE at any path:
+#        curl -sk --cacert <ca.pem> -X POST https://localhost:8443/api/v1/api-keys \
+#          -H "Authorization: Bearer $ADMIN_KEY" -H "Content-Type: application/json" \
+#          -d '{"name":"prometheus","role":"readonly"}'
+#      See docs/observability.md for the full walkthrough.
+#
+#   2. The cluster CA (ca.pem) — read from the shared `localmesh-data`
+#      volume, mounted read-only below. It exists once a control-plane
+#      server has booted.
+#
+# Relative config paths resolve against the COMPOSE PROJECT DIRECTORY
+# (the directory of the first -f file). The defaults below assume the
+# project directory is deploy/ — true for the ha.compose.yml command
+# above and for running this file standalone. When stacking on the
+# root docker-compose.yml (project dir = repo root), set:
+#   LOCALMESH_MONITORING_DIR=./deploy/monitoring
+#   LOCALMESH_SCRAPE_TOKEN_FILE=deploy/monitoring/scrape-token
+# (the leading ./ on LOCALMESH_MONITORING_DIR is required — without it
+# Compose reads the path as a named volume)
+#
+# Grafana defaults to admin/admin — set GRAFANA_ADMIN_PASSWORD in .env
+# (or export it) before exposing this anywhere. Both UIs bind to
+# loopback only; reach them via SSH tunnel or your own proxy.
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # How long Prometheus keeps samples. The LocalMesh counters are
+      # process-local, so this is the ONLY place event history lives —
+      # see docs/observability.md "what resets on restart".
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+      # POST /-/reload re-reads config + the mounted token file without
+      # a container restart (key rotation).
+      - --web.enable-lifecycle
+    volumes:
+      - ${LOCALMESH_MONITORING_DIR:-./monitoring}/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Shared cluster-data volume — read-only, for ca.pem only. The
+      # same mount the router and dashboard use.
+      - localmesh-data:/etc/localmesh-ca:ro
+      - prometheus-data:/prometheus
+    secrets:
+      - localmesh_scrape_token
+    ports:
+      # Loopback only — the metrics it serves reveal operational detail.
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    networks: [localmesh]
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # Dev default mirrors Grafana's own; set GRAFANA_ADMIN_PASSWORD
+      # before this is reachable beyond localhost.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+    volumes:
+      - ${LOCALMESH_MONITORING_DIR:-./monitoring}/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ${LOCALMESH_MONITORING_DIR:-./monitoring}/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      # 3001 on the host so it never collides with the LocalMesh web
+      # dashboard's default :3000. Loopback only.
+      - "127.0.0.1:${GRAFANA_PORT:-3001}:3000"
+    networks: [localmesh]
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  # Declared by the base compose files too; re-declared here so this
+  # file also validates standalone. Read-only consumers only.
+  localmesh-data:
+
+networks:
+  localmesh:
+    driver: bridge
+
+secrets:
+  # The lmk_ readonly API key Prometheus sends as
+  # `Authorization: Bearer …`. File content IS the token — mint it via
+  # POST /api/v1/api-keys. Default path is relative to the compose
+  # project directory (deploy/ for the ha.compose.yml stack). deploy/
+  # monitoring/.gitignore keeps the real file out of git.
+  localmesh_scrape_token:
+    file: ${LOCALMESH_SCRAPE_TOKEN_FILE:-./monitoring/scrape-token}

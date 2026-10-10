@@ -1,0 +1,70 @@
+# Prometheus scrape configuration for the optional LocalMesh
+# observability layer (deploy/monitoring.compose.yml).
+#
+# The control plane exposes a Prometheus-text endpoint at
+# GET /api/v1/metrics (internal/server/metrics). It is behind the same
+# auth middleware as the rest of the admin API: Authorization: Bearer
+# <lmk_ API key>, readonly role or higher. The token is supplied via a
+# file (never inline) — see deploy/monitoring/README.md and
+# docs/observability.md for how to mint the key and where the file
+# comes from.
+#
+# TLS: every compose-deployed control plane serves HTTPS with a cert
+# signed by the cluster CA that lives in the shared `localmesh-data`
+# volume. Prometheus mounts that volume read-only and verifies against
+# /etc/localmesh-ca/ca.pem. The default LOCALMESH_HOSTNAMES in
+# ha.compose.yml include `server` and `server-standby`, so cert SAN
+# verification succeeds against both targets as shipped.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+  external_labels:
+    monitor: localmesh
+
+scrape_configs:
+  # Prometheus itself — gives a baseline `up` and process_* series so
+  # the monitoring stack's own health is visible next to LocalMesh.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Control-plane instances. Each compose service is a separate scrape
+  # target; labels do not claim a role because roles change at failover
+  # — `localmesh_control_plane_active`/`localmesh_control_plane_epoch`
+  # identify the current owner, not DNS names.
+  #
+  # Behavior notes (see docs/observability.md for the full semantics):
+  #   - `server`        — the primary control-plane container.
+  #   - `server-standby`— the HA standby container. While it is waiting
+  #     for ownership its mux answers /api/v1/metrics with 503, so this
+  #     target's `up` is 0 by design; it flips to 1 on promotion.
+  #     On the single-server docker-compose.yml stack the target does
+  #     not resolve and simply stays down — that is expected, delete it
+  #     if it bothers you.
+  - job_name: localmesh-control-plane
+    scheme: https
+    metrics_path: /api/v1/metrics
+    bearer_token_file: /run/secrets/localmesh_scrape_token
+    tls_config:
+      ca_file: /etc/localmesh-ca/ca.pem
+    static_configs:
+      - targets: ["server:8443"]
+      - targets: ["server-standby:8443"]
+
+  # NOT scraped, deliberately:
+  #   - localmesh-router — has no Prometheus endpoint. It serves a JSON
+  #     operator snapshot at GET /status on LOCALMESH_ROUTER_STATUS
+  #     (default 127.0.0.1:9443). Wiring that into Prometheus needs a
+  #     metrics endpoint in internal/router — tracked as a follow-up in
+  #     docs/observability.md.
+  #   - postgres — needs an exporter sidecar (e.g.
+  #     prometheuscommunity/postgres-exporter) plus a dedicated DB role;
+  #     intentionally not included. Add it in your own override if you
+  #     want engine stats.
+  #   - node agents — they are outbound WebSocket clients with no
+  #     listener; per-node liveness is visible via
+  #     localmesh_events_total{event="node.metrics"} (one event per
+  #     heartbeat, ~10s cadence) and the nodes_online/nodes_total
+  #     gauges.

@@ -1,0 +1,276 @@
+{
+  "uid": "localmesh-overview",
+  "title": "LocalMesh — Overview",
+  "description": "Control-plane health, fleet, and inference. Every panel queries metrics actually emitted by GET /api/v1/metrics (internal/server/metrics) — see docs/observability.md for the full inventory and the metrics that do NOT exist yet.",
+  "tags": ["localmesh"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "annotations": {"list": []},
+  "templating": {"list": []},
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Control plane",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Fencing epoch",
+      "description": "localmesh_control_plane_epoch — the ownership fencing token. Bumps on every ownership acquisition/promotion.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 1},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": null}]}
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "none", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"refId": "A", "expr": "max(localmesh_control_plane_epoch)", "instant": true}]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Control planes reporting active (expect 1)",
+      "description": "Only the ownership-holding instance serves /api/v1/metrics — the standby 503s it until promoted. 0 = no owner serving; >1 would signal dual-active.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 5},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}, {"color": "red", "value": 2}]}
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"refId": "A", "expr": "sum(localmesh_control_plane_active)", "instant": true}]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Metrics endpoint reachable (up)",
+      "description": "Per-instance scrape health. server-standby stays 0 while waiting for ownership (its mux 503s /api/v1/metrics) and flips to 1 on promotion; after a failover the old primary exits to a restart loop and reads 0 — that is expected, see docs/observability.md.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 9, "x": 6, "y": 1},
+      "fieldConfig": {
+        "defaults": {"unit": "none", "min": 0, "max": 1, "custom": {"drawStyle": "line", "fillOpacity": 15, "showPoints": "never", "lineInterpolation": "stepAfter"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "up{job=\"localmesh-control-plane\"}", "legendFormat": "{{instance}}"}]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Ownership transitions",
+      "description": "localmesh_ownership_transitions_total — control-plane lifecycle events: acquired (initial ownership), promoted (standby takeover), released (clean shutdown), lost (fenced).",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 9, "x": 15, "y": 1},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "min": 0, "custom": {"drawStyle": "bars", "fillOpacity": 60, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (event) (increase(localmesh_ownership_transitions_total[10m]))", "legendFormat": "{{event}}"}]
+    },
+    {
+      "id": 6,
+      "type": "row",
+      "title": "Fleet",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 9},
+      "panels": []
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Nodes online",
+      "description": "localmesh_nodes_online — agents holding a live WebSocket right now.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 10},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"refId": "A", "expr": "localmesh_nodes_online", "instant": true}]
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Nodes known",
+      "description": "localmesh_nodes_total — every enrolled agent record in the cluster.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 14},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": null}]}
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "none", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"refId": "A", "expr": "localmesh_nodes_total", "instant": true}]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Nodes online / known",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 18, "x": 6, "y": 10},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "min": 0, "decimals": 0, "custom": {"drawStyle": "line", "fillOpacity": 12, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "localmesh_nodes_online", "legendFormat": "online {{instance}}"},
+        {"refId": "B", "expr": "localmesh_nodes_total", "legendFormat": "known {{instance}}"}
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Connect / disconnect churn",
+      "description": "Agent WebSocket lifecycle. Reconnect storms show as coupled spikes in both series.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 9, "x": 6, "y": 18},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "min": 0, "custom": {"drawStyle": "bars", "fillOpacity": 50, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "sum(increase(localmesh_node_connected_total[15m]))", "legendFormat": "connected"},
+        {"refId": "B", "expr": "sum(increase(localmesh_node_disconnected_total[15m]))", "legendFormat": "disconnected"}
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Maintenance events",
+      "description": "localmesh_node_maintenance_events_total — state ∈ draining | maintenance | updating | none (marker cleared). Mostly flat; spikes = admins draining nodes or updates fencing them.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 9, "x": 15, "y": 18},
+      "fieldConfig": {
+        "defaults": {"unit": "short", "min": 0, "custom": {"drawStyle": "bars", "fillOpacity": 50, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (state) (increase(localmesh_node_maintenance_events_total[15m]))", "legendFormat": "{{state}}"}]
+    },
+    {
+      "id": 12,
+      "type": "row",
+      "title": "Inference",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 26},
+      "panels": []
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Request rate",
+      "description": "Chat-completion requests accepted into the queue per second.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 27},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": null}]}
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "none", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"refId": "A", "expr": "sum(rate(localmesh_workloads_queued_total[5m]))", "instant": true}]
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Completion ratio (15m)",
+      "description": "completed / all terminal statuses among *evented* finishes. Note: workloads failed by DB sweeps (restart cleanup, reconcile) never emit events — see docs/observability.md caveats.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 31},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.9}, {"color": "green", "value": 0.98}]}
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"refId": "A", "expr": "sum(rate(localmesh_workloads_finished_total{status=\"completed\"}[15m])) / sum(rate(localmesh_workloads_finished_total[15m]))", "instant": true}]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Queued vs dispatched",
+      "description": "workloads_queued = accepted; workloads_started = sent to a node. A growing gap means requests are waiting on capacity.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 9, "x": 6, "y": 27},
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "min": 0, "custom": {"drawStyle": "line", "fillOpacity": 15, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(localmesh_workloads_queued_total[5m]))", "legendFormat": "queued"},
+        {"refId": "B", "expr": "sum(rate(localmesh_workloads_started_total[5m]))", "legendFormat": "dispatched"}
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Finished by status",
+      "description": "Terminal workload outcomes emitted by the gateway: completed | failed | cancelled.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 9, "x": 15, "y": 27},
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "min": 0, "custom": {"drawStyle": "line", "fillOpacity": 15, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (status) (rate(localmesh_workloads_finished_total[5m]))", "legendFormat": "{{status}}"}]
+    },
+    {
+      "id": 17,
+      "type": "row",
+      "title": "Event stream",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 35},
+      "panels": []
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Broker events (top 10)",
+      "description": "localmesh_events_total — every event on the internal broker. node.metrics fires once per agent heartbeat (~10s per node) so it dominates; watch for sudden silence (dead control plane) or storms.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 36},
+      "fieldConfig": {
+        "defaults": {"unit": "ops", "min": 0, "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}},
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "topk(10, sum by (event) (rate(localmesh_events_total[5m])))", "legendFormat": "{{event}}"}]
+    }
+  ]
+}
