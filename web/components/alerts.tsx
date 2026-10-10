@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import {
   useVersion, useRollouts, useAgentUpdates, useNodes, useDiagnostics,
+  useControlPlane, useModelOps,
 } from "@/lib/api";
 import { fmtVersion } from "@/lib/format";
 
@@ -27,13 +28,31 @@ const FAILED_UPDATE_PHASES = new Set(["failed", "rolled_back", "interrupted"]);
 // live endpoint (nothing fabricated): pre-v0.6/0.7 servers 404 the newer
 // hooks and those alerts simply never appear. Dismissals are per-session
 // (component state inside the Shell — a full reload brings them back).
-export function OperationalAlerts() {
+export function OperationalAlerts({ connected }: { connected: boolean }) {
   const { data: ver } = useVersion();
   const { data: rollouts } = useRollouts();
   const { data: updates } = useAgentUpdates({ limit: 20 });
   const { data: nodes } = useNodes();
   const { data: diag } = useDiagnostics();
+  const { data: cp } = useControlPlane();
+  const { data: ops } = useModelOps();
   const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set());
+
+  // SSE dropouts are usually momentary (EventSource auto-reconnects) —
+  // only flag the stream after 8s of continuous outage. Reconnect resets
+  // via the documented render-phase adjustment (no effect needed for
+  // prop-derived state).
+  const [sseStale, setSseStale] = useState(false);
+  const [prevConnected, setPrevConnected] = useState(connected);
+  if (prevConnected !== connected) {
+    setPrevConnected(connected);
+    if (connected && sseStale) setSseStale(false);
+  }
+  useEffect(() => {
+    if (connected) return;
+    const t = setTimeout(() => setSseStale(true), 8000);
+    return () => clearTimeout(t);
+  }, [connected]);
 
   const alerts: Alert[] = [];
 
@@ -47,18 +66,40 @@ export function OperationalAlerts() {
     });
   }
 
+  // Live event stream down — panels keep showing the last poll but
+  // nothing invalidates; honest "data may be stale" signal.
+  if (sseStale) {
+    alerts.push({
+      id: "sse-down",
+      sev: "warn",
+      text: "Live event stream interrupted — data may be stale. Retrying connection…",
+    });
+  }
+
+  // Ownership heartbeat runs every 2s (server-side); a row this stale
+  // means the owner's DB writes are failing or it is dead — a standby
+  // could take over at any moment.
+  const hbAge = cp?.owner?.heartbeat_age_seconds;
+  if (hbAge !== undefined && hbAge > 15) {
+    alerts.push({
+      id: "cp-heartbeat",
+      sev: "warn",
+      text: `Control-plane owner heartbeat is ${hbAge}s stale — database connectivity may be failing and a standby could promote`,
+      href: "/",
+      linkLabel: "Overview",
+    });
+  }
+
   // Rollouts needing attention. Awaiting approval is actionable (link
-  // lands on the drawer's Approve button); failed is a record.
+  // lands on the drawer's Approve button); failed/cancelled are records —
+  // a cancelled rollout may have left nodes mid-update.
   const rs = (rollouts ?? [])
     .slice()
     .sort((a, b) => (b.updated_at || b.created_at).localeCompare(a.updated_at || a.created_at));
-  const rolloutAlerts = [
-    ...rs.filter((r) => r.state === "awaiting_approval"),
-    ...rs.filter((r) => r.state === "failed"),
-  ].slice(0, 4);
-  const extraRollouts =
-    rs.filter((r) => r.state === "awaiting_approval" || r.state === "failed").length -
-    rolloutAlerts.length;
+  const needsAttention = (r: (typeof rs)[number]) =>
+    r.state === "awaiting_approval" || r.state === "failed" || r.state === "cancelled";
+  const rolloutAlerts = rs.filter(needsAttention).slice(0, 4);
+  const extraRollouts = rs.filter(needsAttention).length - rolloutAlerts.length;
   for (const r of rolloutAlerts) {
     const rv = fmtVersion(r.release_version || "");
     if (r.state === "awaiting_approval") {
@@ -68,6 +109,14 @@ export function OperationalAlerts() {
         text: `Rollout ${rv} is waiting for approval to continue`,
         href: `/releases?id=${r.id}`,
         linkLabel: "Review",
+      });
+    } else if (r.state === "cancelled") {
+      alerts.push({
+        id: `rollout-cancelled-${r.id}`,
+        sev: "warn",
+        text: `Rollout ${rv} was cancelled — ${r.succeeded}/${r.total} nodes updated`,
+        href: `/releases?id=${r.id}`,
+        linkLabel: "View",
       });
     } else {
       alerts.push({
@@ -106,6 +155,28 @@ export function OperationalAlerts() {
     });
   }
 
+  // Recent failed/interrupted model operations (shared 60-row ops feed).
+  const failedOps = (ops ?? []).filter(
+    (o) => o.status === "failed" || o.status === "interrupted"
+  );
+  if (failedOps.length > 0) {
+    const allNames = [...new Set(failedOps.map((o) => o.model))];
+    const names = allNames.slice(0, 3);
+    alerts.push({
+      id: "modelops-failed",
+      sev: "warn",
+      text: `${failedOps.length} model operation${failedOps.length === 1 ? "" : "s"} failed or interrupted (${names.join(", ")}${allNames.length > names.length ? "…" : ""})`,
+      title: failedOps
+        .map((o) => {
+          const e = o.last_error || o.error;
+          return `${o.op} ${o.model} → ${o.node_name || o.node_id}: ${o.status}${e ? ` — ${e}` : ""}`;
+        })
+        .join("\n"),
+      href: "/models",
+      linkLabel: "View",
+    });
+  }
+
   // Nodes out of service (approved nodes only — pending/revoked aren't
   // expected to serve). Offline is danger; any maintenance state is warn.
   const approved = (nodes ?? []).filter((n) => n.status === "approved");
@@ -131,6 +202,58 @@ export function OperationalAlerts() {
       id: "nodes-maintenance",
       sev: "warn",
       text: `${maint.length} node${maint.length === 1 ? "" : "s"} out of service — ${parts.join(", ")}`,
+      href: "/devices",
+      linkLabel: "View",
+    });
+  }
+
+  // Engine failures block scheduling for every model hosted on that
+  // engine — surfaced verbatim from the node's own health report.
+  const badEngine = approved.filter(
+    (n) => n.online && (n.engines ?? []).some((e) => !e.healthy)
+  );
+  if (badEngine.length > 0) {
+    const names = badEngine.slice(0, 3).map((n) => n.name).join(", ");
+    alerts.push({
+      id: "engine-unhealthy",
+      sev: "warn",
+      text: `Inference engine unhealthy on ${badEngine.length} node${badEngine.length === 1 ? "" : "s"}: ${names}${badEngine.length > 3 ? "…" : ""}`,
+      title: badEngine
+        .map(
+          (n) =>
+            `${n.name}: ${(n.engines ?? [])
+              .filter((e) => !e.healthy)
+              .map((e) => e.type)
+              .join(", ")}`
+        )
+        .join("\n"),
+      href: "/devices",
+      linkLabel: "View",
+    });
+  }
+
+  // Memory pressure — the scheduler gates on memory_available_bytes; a
+  // node under ~10% free will start refusing new work. Only nodes whose
+  // agent actually measured availability count (never infer from used%).
+  const memPressure = approved.filter((n) => {
+    const m = n.metrics;
+    if (!n.online || !m || m.mem_avail_measured !== true) return false;
+    const avail = m.memory_available_bytes ?? m.memory_total_bytes - m.memory_used_bytes;
+    return m.memory_total_bytes > 0 && avail / m.memory_total_bytes < 0.1;
+  });
+  if (memPressure.length > 0) {
+    const names = memPressure.slice(0, 3).map((n) => n.name).join(", ");
+    alerts.push({
+      id: "mem-pressure",
+      sev: "warn",
+      text: `Memory nearly exhausted on ${memPressure.length} node${memPressure.length === 1 ? "" : "s"}: ${names}${memPressure.length > 3 ? "…" : ""}`,
+      title: memPressure
+        .map((n) => {
+          const m = n.metrics!;
+          const avail = m.memory_available_bytes ?? m.memory_total_bytes - m.memory_used_bytes;
+          return `${n.name}: ${Math.round((avail / m.memory_total_bytes) * 100)}% free`;
+        })
+        .join("\n"),
       href: "/devices",
       linkLabel: "View",
     });

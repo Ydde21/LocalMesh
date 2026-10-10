@@ -1,10 +1,11 @@
 "use client";
 
 import { Suspense, useState } from "react";
+import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useWorkloads, useWorkload } from "@/lib/api";
 import { fmtMs, fmtAgo } from "@/lib/format";
-import { Panel, Empty, Meter } from "@/components/ui";
+import { Panel, Empty, Meter, LoadingRows, ErrorState } from "@/components/ui";
 import { StatusBadge } from "@/components/status";
 import type { CandidateReport } from "@/lib/types";
 import { X } from "lucide-react";
@@ -22,7 +23,7 @@ function WorkloadsInner() {
   const router = useRouter();
   const selId = params.get("id");
   const [filter, setFilter] = useState("");
-  const { data: workloads } = useWorkloads(filter || undefined);
+  const { data: workloads, error: wlsErr, mutate: wlsMutate } = useWorkloads(filter || undefined);
 
   return (
     <div className="mx-auto max-w-[1200px] px-6 py-6">
@@ -47,7 +48,11 @@ function WorkloadsInner() {
       </header>
 
       <Panel className="fade-up">
-        {(!workloads || workloads.length === 0) ? (
+        {wlsErr ? (
+          <ErrorState error={wlsErr} onRetry={() => wlsMutate()} />
+        ) : !workloads ? (
+          <LoadingRows rows={5} />
+        ) : workloads.length === 0 ? (
           <Empty
             title="No workloads"
             hint="Send a request to POST /v1/chat/completions on the control plane to see routing here."
@@ -127,11 +132,29 @@ function Td({ children }: { children?: React.ReactNode }) {
 
 // ---------------------------------------------------------------------------
 
+// Reasons the reconciler/startup sweeps write into `error` when a
+// workload dies without the node finishing it — these are interruptions
+// of the control plane or the connection, not model/dispatch failures.
+const INTERRUPTED_REASONS = [
+  "interrupted by control-plane restart",
+  "control-plane shutting down",
+  "control-plane ownership lost",
+  "node disconnected",
+];
+
 function WorkloadDetail({ id }: { id: string }) {
   const router = useRouter();
   const { data: w } = useWorkload(id);
   if (!w) return null;
   const d = w.decision;
+  const interrupted =
+    w.status === "failed" &&
+    !!w.error &&
+    INTERRUPTED_REASONS.some((r) => w.error!.includes(r));
+  const noCapacity =
+    w.status === "failed" &&
+    !!w.error &&
+    w.error.startsWith("no eligible node");
 
   return (
     <div className="fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px]"
@@ -147,7 +170,9 @@ function WorkloadDetail({ id }: { id: string }) {
             </div>
             <div className="mono mt-1 text-[11px] text-[var(--color-text-faint)]">{w.id}</div>
           </div>
-          <a href="/workloads" className="btn btn-sm"><X size={14} /></a>
+          <Link href="/workloads" className="btn btn-sm" aria-label="Close workload details">
+            <X size={14} />
+          </Link>
         </div>
 
         <div className="space-y-5 px-5 py-5">
@@ -167,12 +192,45 @@ function WorkloadDetail({ id }: { id: string }) {
             {w.api_key_id && <DetailStat label="API key" value={w.api_key_id.slice(0, 8)} />}
           </section>
 
+          {/* Outcome context: "cancelled" means the client hung up
+              (context.Canceled server-side) — not a failure. Failed rows
+              are split into interrupted-by-infrastructure (warn) vs a
+              genuine dispatch/model error (danger). */}
+          {w.status === "cancelled" && (
+            <section>
+              <div className="label mb-1.5">Outcome</div>
+              <div className="rounded-md border border-[var(--color-border)] bg-white/[0.03] px-3 py-2 text-[12px] text-[var(--color-text-dim)]">
+                Cancelled — the client disconnected before the response
+                finished. Nothing failed on the node.
+              </div>
+            </section>
+          )}
           {w.error && (
             <section>
-              <div className="label mb-1.5">Error</div>
-              <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 mono text-[12px] text-red-300">
-                {w.error}
+              <div className="label mb-1.5">
+                {interrupted ? "Interrupted" : noCapacity ? "No capacity" : "Error"}
               </div>
+              {interrupted ? (
+                <div className="rounded-md border border-[var(--color-warn)]/30 bg-[var(--color-warn-soft)] px-3 py-2 text-[12px] text-[var(--color-warn)]">
+                  {w.error}
+                  <div className="mt-1 text-[11px] text-[var(--color-text-dim)]">
+                    The request died with the infrastructure around it — not a
+                    model or dispatch failure. Safe to retry.
+                  </div>
+                </div>
+              ) : noCapacity ? (
+                <div className="rounded-md border border-[var(--color-warn)]/30 bg-[var(--color-warn-soft)] px-3 py-2 text-[12px] text-[var(--color-warn)]">
+                  {w.error}
+                  <div className="mt-1 text-[11px] text-[var(--color-text-dim)]">
+                    No node could take this request — check model placement and
+                    node availability.
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 mono text-[12px] text-red-300">
+                  {w.error}
+                </div>
+              )}
             </section>
           )}
 

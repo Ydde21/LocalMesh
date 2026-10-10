@@ -158,6 +158,9 @@ export function useDiagnostics() {
   return useSWR<T.Diagnostics>("/diagnostics", fetcher, {
     shouldRetryOnError: false,
     errorRetryCount: 0,
+    // Slow poll keeps DB-reachability / cert-expiry signals honest without
+    // a second hook — consumers still gate on `data` being present.
+    refreshInterval: 15000,
   });
 }
 

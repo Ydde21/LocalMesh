@@ -7,9 +7,10 @@ import {
 } from "@/lib/api";
 import { fmtAgo, fmtMs, fmtUptime, fmtVersion } from "@/lib/format";
 import { Panel, Copyable } from "@/components/ui";
+import { ConfirmDialog } from "@/components/confirm";
 import { useSWRConfig } from "swr";
 import { Plus, KeyRound, Ticket, Check, X, Copy, Info, Download, AlertTriangle } from "lucide-react";
-import type { Diagnostics } from "@/lib/types";
+import type { APIKey, Diagnostics, EnrollmentToken } from "@/lib/types";
 
 export default function SettingsPage() {
   return (
@@ -61,6 +62,24 @@ function EnrollmentSection() {
   const [newToken, setNewToken] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [revokingTok, setRevokingTok] = useState<EnrollmentToken | null>(null);
+  const [tokBusy, setTokBusy] = useState(false);
+  const [tokErr, setTokErr] = useState("");
+
+  const confirmRevokeTok = async () => {
+    if (!revokingTok) return;
+    setTokBusy(true);
+    setTokErr("");
+    try {
+      await api("DELETE", `/enrollment-tokens/${revokingTok.id}`);
+      setRevokingTok(null);
+      mutTokens();
+    } catch (e) {
+      setTokErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTokBusy(false);
+    }
+  };
 
   const createToken = async () => {
     setBusy(true); setErr("");
@@ -158,7 +177,7 @@ function EnrollmentSection() {
                   <span className="badge badge-neutral">expired</span>
                 )}
                 <button className="btn btn-sm btn-danger ml-auto"
-                  onClick={() => api("DELETE", `/enrollment-tokens/${t.id}`).then(() => mutTokens())}
+                  onClick={() => { setTokErr(""); setRevokingTok(t); }}
                   disabled={!!t.revoked_at}>
                   Revoke
                 </button>
@@ -166,6 +185,24 @@ function EnrollmentSection() {
             ))}
           </div>
         </div>
+      )}
+
+      {revokingTok && (
+        <ConfirmDialog
+          title="Revoke enrollment token"
+          confirmLabel="Revoke token"
+          busy={tokBusy}
+          error={tokErr}
+          onClose={() => !tokBusy && setRevokingTok(null)}
+          onConfirm={confirmRevokeTok}
+        >
+          Revoke token{" "}
+          <span className="mono text-[var(--color-text)]">
+            {revokingTok.label || revokingTok.prefix + "…"}
+          </span>
+          ? Devices can no longer enroll with it — mint a new token to add more
+          machines.
+        </ConfirmDialog>
       )}
     </Section>
   );
@@ -179,6 +216,23 @@ function APIKeysSection() {
   const [role, setRole] = useState("inference");
   const [newKey, setNewKey] = useState("");
   const [busy, setBusy] = useState(false);
+  const [revoking, setRevoking] = useState<APIKey | null>(null);
+  const [revErr, setRevErr] = useState("");
+
+  const confirmRevoke = async () => {
+    if (!revoking) return;
+    setBusy(true);
+    setRevErr("");
+    try {
+      await api("DELETE", `/api-keys/${revoking.id}`);
+      setRevoking(null);
+      mutate();
+    } catch (e) {
+      setRevErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const create = async () => {
     if (!name.trim()) return;
@@ -238,7 +292,7 @@ function APIKeysSection() {
               {k.last_used_at ? `used ${fmtAgo(k.last_used_at)}` : "never used"}
             </span>
             <button className="btn btn-sm btn-danger ml-auto" disabled={!!k.revoked_at}
-              onClick={() => api("DELETE", `/api-keys/${k.id}`).then(() => mutate())}>
+              onClick={() => { setRevErr(""); setRevoking(k); }}>
               Revoke
             </button>
           </div>
@@ -247,6 +301,22 @@ function APIKeysSection() {
           <div className="text-[12px] text-[var(--color-text-faint)]">No keys yet.</div>
         )}
       </div>
+
+      {revoking && (
+        <ConfirmDialog
+          title="Revoke API key"
+          confirmLabel="Revoke key"
+          busy={busy}
+          error={revErr}
+          onClose={() => !busy && setRevoking(null)}
+          onConfirm={confirmRevoke}
+        >
+          Revoke <span className="text-[var(--color-text)]">{revoking.name}</span>{" "}
+          (<span className="mono">{revoking.prefix}…</span>, {revoking.role})?
+          Every client using this key loses access immediately — revoked keys
+          can&apos;t be restored.
+        </ConfirmDialog>
+      )}
     </Section>
   );
 }

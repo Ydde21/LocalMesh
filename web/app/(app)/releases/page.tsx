@@ -323,7 +323,9 @@ function RolloutDrawer({ id }: { id: string }) {
             </div>
             <div className="mono mt-1 text-[11px] text-[var(--color-text-faint)]">{r.id}</div>
           </div>
-          <a href="/releases" className="btn btn-sm"><X size={14} /></a>
+          <Link href="/releases" className="btn btn-sm" aria-label="Close rollout details">
+            <X size={14} />
+          </Link>
         </div>
 
         <div className="space-y-5 px-5 py-5">

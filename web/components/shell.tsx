@@ -57,14 +57,15 @@ export function Shell({ children }: { children: React.ReactNode }) {
   return (
     <Ctx.Provider value={{ events, connected }}>
       <div className="flex h-screen overflow-hidden">
-        {/* Sidebar */}
+        {/* Sidebar — icon-only rail below md so content stays usable on
+            narrow screens; labels and footnote reappear at md+. */}
         <aside
-          className="flex w-[212px] shrink-0 flex-col border-r"
+          className="flex w-[54px] shrink-0 flex-col border-r md:w-[212px]"
           style={{ borderColor: "var(--color-border)", background: "var(--color-panel)" }}
         >
-          <div className="flex items-center gap-2.5 px-4 py-4">
-            <Hexagon size={18} strokeWidth={1.8} className="text-[var(--color-accent)]" />
-            <div>
+          <div className="flex items-center justify-center gap-2.5 px-2 py-4 md:justify-start md:px-4">
+            <Hexagon size={18} strokeWidth={1.8} className="shrink-0 text-[var(--color-accent)]" />
+            <div className="hidden md:block">
               <div className="text-[13px] font-semibold tracking-tight">LocalMesh</div>
               <div className="text-[10px] text-[var(--color-text-faint)]">
                 private AI cluster
@@ -72,7 +73,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             </div>
           </div>
 
-          <nav className="mt-2 flex flex-col gap-0.5 px-2">
+          <nav className="mt-2 flex flex-col gap-0.5 px-1.5 md:px-2">
             {NAV.map((item) => {
               const active =
                 item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
@@ -80,30 +81,35 @@ export function Shell({ children }: { children: React.ReactNode }) {
                 <Link
                   key={item.href}
                   href={item.href}
-                  className={`flex items-center gap-2.5 rounded-md px-2.5 py-[7px] text-[13px] font-medium transition-colors ${
+                  aria-label={item.label}
+                  title={item.label}
+                  className={`flex items-center justify-center gap-2.5 rounded-md px-2.5 py-[7px] text-[13px] font-medium transition-colors md:justify-start ${
                     active
                       ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
                       : "text-[var(--color-text-dim)] hover:bg-white/[0.04] hover:text-[var(--color-text)]"
                   }`}
                 >
-                  <item.icon size={15} strokeWidth={1.8} />
-                  {item.label}
+                  <item.icon size={15} strokeWidth={1.8} className="shrink-0" />
+                  <span className="hidden md:inline">{item.label}</span>
                 </Link>
               );
             })}
           </nav>
 
-          <div className="mt-auto px-4 py-3">
-            <div className="flex items-center gap-2 text-[11px] text-[var(--color-text-faint)]">
+          <div className="mt-auto px-2 py-3 md:px-4">
+            <div className="flex items-center justify-center gap-2 text-[11px] text-[var(--color-text-faint)] md:justify-start">
               <span
-                className={`h-1.5 w-1.5 rounded-full ${
+                className={`h-1.5 w-1.5 shrink-0 rounded-full ${
                   connected ? "bg-[var(--color-online)] pulse" : "bg-[var(--color-text-faint)]"
                 }`}
               />
-              {connected ? "Live" : "Reconnecting…"}
+              <span className="hidden md:inline">
+                {connected ? "Live" : "Reconnecting…"}
+              </span>
               <button
                 title="Sign out"
-                className="ml-auto rounded p-1 text-[var(--color-text-faint)] transition-colors hover:bg-white/[0.06] hover:text-[var(--color-text)]"
+                aria-label="Sign out"
+                className="rounded p-1 text-[var(--color-text-faint)] transition-colors hover:bg-white/[0.06] hover:text-[var(--color-text)] md:ml-auto"
                 onClick={async () => {
                   await fetch("/api/lm-auth/logout", { method: "POST" });
                   router.push("/login");
@@ -114,7 +120,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             </div>
             {ver && (
               <div
-                className="mono mt-1.5 text-[10px] text-[var(--color-text-faint)]"
+                className="mono mt-1.5 hidden text-[10px] text-[var(--color-text-faint)] md:block"
                 title={`server ${ver.server_version} · protocol ${ver.protocol} (agents ≥ ${ver.min_agent_protocol})`}
               >
                 server {fmtVersion(ver.server_version)} · proto {ver.protocol}
@@ -126,7 +132,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
         {/* Main */}
         <div className="flex min-w-0 flex-1 flex-col">
           <main className="min-w-0 flex-1 overflow-y-auto">
-            <OperationalAlerts />
+            <OperationalAlerts connected={connected} />
             {children}
           </main>
         </div>
