@@ -1,0 +1,142 @@
+# LocalMesh HA pair against an EXTERNAL PostgreSQL.
+#
+#   LOCALMESH_DATABASE_URL='postgres://localmesh:***@db.internal:5432/localmesh?sslmode=verify-full' \
+#   LOCALMESH_ADMIN_KEY=... \
+#     docker compose -f deploy/postgres-ha.example.yml up -d
+#
+# Unlike deploy/ha.compose.yml this file ships NO postgres container —
+# it is the reference shape for "the database is someone else's
+# problem": a managed Postgres (RDS/CloudSQL/Azure), a Patroni cluster
+# behind HAProxy/vip, or just a well-run postgres on another host.
+# Semantics and honest limitations: docs/postgres-ha.md.
+#
+# Requirements on the Postgres side — all enforced by the server, not
+# by this file:
+#
+#   * One stable WRITER endpoint in LOCALMESH_DATABASE_URL (VIP, proxy,
+#     or managed endpoint name) — never a specific replica/pod.
+#   * SESSION-mode pooling only. The ownership lease is a session-scoped
+#     pg_advisory_lock; a transaction-mode pooler (e.g. PgBouncer in
+#     transaction mode) moves it between backends and silently breaks
+#     single-owner fencing. Use session mode, or bypass the pooler for
+#     this DSN.
+#   * TLS for anything off localhost: sslmode=verify-full + sslrootcert.
+#   * A failover mechanism that FENCES the old primary (Patroni does;
+#     managed services do). A lingering writable old primary is a
+#     Postgres-layer split-brain LocalMesh cannot detect.
+#
+# Failover-of-Postgres semantics (verified for restart, designed for
+# managed failover — see docs/postgres-ha.md §3): the endpoint moves,
+# every session dies including the advisory-lock session, the active
+# fences itself and exits, and the standby acquires the lock on the new
+# primary and promotes — same as a postgres restart, which the chaos
+# suite exercises end to end.
+#
+# Credentials bootstrap exactly like the base compose file:
+#   docker compose -f deploy/postgres-ha.example.yml logs server | grep "bootstrap admin"
+#   docker compose -f deploy/postgres-ha.example.yml exec web cat /ca/bootstrap-dashboard.password
+
+name: localmesh-ha-external-pg
+
+services:
+  server:
+    build: ..
+    restart: unless-stopped
+    environment:
+      # Point at YOUR stable writer endpoint. Examples:
+      #   postgres://localmesh:PW@db.internal:5432/localmesh?sslmode=verify-full&sslrootcert=/data/db-ca.pem
+      #   postgres://localmesh:PW@pgbouncer:6432/localmesh         # session mode only!
+      LOCALMESH_DATABASE_URL: ${LOCALMESH_DATABASE_URL:?set the external postgres DSN}
+      LOCALMESH_LISTEN: 0.0.0.0:8443
+      LOCALMESH_DATA_DIR: /data
+      LOCALMESH_ADMIN_KEY: ${LOCALMESH_ADMIN_KEY:-}
+      # Must cover every name clients dial THROUGH the router.
+      LOCALMESH_HOSTNAMES: ${LOCALMESH_HOSTNAMES:-server,server-standby,router,localmesh-server,localhost}
+      LOCALMESH_CORS_ORIGINS: ""
+      LOCALMESH_DISCOVERY: ${LOCALMESH_DISCOVERY:-on}
+      LOCALMESH_CLUSTER_NAME: ${LOCALMESH_CLUSTER_NAME:-localmesh}
+    volumes:
+      - localmesh-data:/data
+      # Mount a DB CA here if your DSN uses sslrootcert=/data/db-ca.pem
+      # - /path/to/db-ca.pem:/data/db-ca.pem:ro
+    networks: [localmesh]
+
+  server-standby:
+    build: ..
+    restart: unless-stopped
+    depends_on:
+      # The shared data dir must already hold the CA the primary
+      # generated — a standby never mints one itself. `service_healthy`
+      # comes from the image's /healthz HEALTHCHECK (alive once serving).
+      server:
+        condition: service_healthy
+    environment:
+      LOCALMESH_DATABASE_URL: ${LOCALMESH_DATABASE_URL}
+      LOCALMESH_LISTEN: 0.0.0.0:8443
+      LOCALMESH_DATA_DIR: /data
+      LOCALMESH_STANDBY: "1"
+      LOCALMESH_ADMIN_KEY: ${LOCALMESH_ADMIN_KEY:-}
+      LOCALMESH_HOSTNAMES: ${LOCALMESH_HOSTNAMES:-server,server-standby,router,localmesh-server,localhost}
+      LOCALMESH_CORS_ORIGINS: ""
+      LOCALMESH_DISCOVERY: ${LOCALMESH_DISCOVERY:-on}
+      LOCALMESH_CLUSTER_NAME: ${LOCALMESH_CLUSTER_NAME:-localmesh}
+    volumes:
+      - localmesh-data:/data
+    healthcheck:
+      # The standby mux serves /api/v1/version both before and after
+      # promotion. /readyz is the routability signal (503 until the
+      # standby promotes); this check just proves the process is up.
+      test: ["CMD-SHELL", "wget -q --no-check-certificate -O /dev/null https://127.0.0.1:8443/api/v1/version || exit 1"]
+      interval: 15s
+      timeout: 3s
+      start_period: 10s
+    networks: [localmesh]
+
+  router:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.router
+    restart: unless-stopped
+    depends_on:
+      # ca.pem must exist in the shared volume before the router can
+      # verify backend TLS.
+      server:
+        condition: service_healthy
+    environment:
+      LOCALMESH_ROUTER_LISTEN: 0.0.0.0:8443
+      LOCALMESH_ROUTER_BACKENDS: https://server:8443,https://server-standby:8443
+      LOCALMESH_ROUTER_CA: /data/ca.pem
+      LOCALMESH_ROUTER_INTERVAL: ${LOCALMESH_ROUTER_INTERVAL:-1s}
+      LOCALMESH_ROUTER_STATUS: 0.0.0.0:9443
+    volumes:
+      - localmesh-data:/data:ro
+    ports:
+      - "${LOCALMESH_PORT:-8443}:8443"
+      - "127.0.0.1:${LOCALMESH_ROUTER_STATUS_PORT:-9443}:9443"
+    networks: [localmesh]
+
+  web:
+    build: ../web
+    restart: unless-stopped
+    depends_on:
+      - router
+    environment:
+      LOCALMESH_API_URL: https://router:8443
+      LOCALMESH_API_KEY: ${LOCALMESH_ADMIN_KEY:-}
+      LOCALMESH_API_KEY_FILE: /ca/bootstrap-admin.key
+      LOCALMESH_CA_FILE: /ca/ca.pem
+      LOCALMESH_DASHBOARD_PASSWORD: ${LOCALMESH_DASHBOARD_PASSWORD:-}
+      LOCALMESH_DASHBOARD_PASSWORD_FILE: /ca/bootstrap-dashboard.password
+      LOCALMESH_SESSION_KEY_FILE: /ca/session.key
+    volumes:
+      - localmesh-data:/ca:ro
+    ports:
+      - "${LOCALMESH_WEB_PORT:-3000}:3000"
+    networks: [localmesh]
+
+volumes:
+  localmesh-data:
+
+networks:
+  localmesh:
+    driver: bridge
