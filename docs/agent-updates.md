@@ -1,11 +1,13 @@
 # Upgrading the agent
 
-v0.5 agents upgrade **manually** — there is no self-update mechanism, by
-design (see *Future: signed updates* below). The flow is the same on
-every OS: check the version, fetch the matching release artifact, verify
-its checksum, stop the agent, swap the binary, start it, confirm with
-`doctor`. Keep the previous binary until the new one is proven — rollback
-is a file copy.
+Agents upgrade **deliberately** — there is no automatic or self-triggered
+update path, by design (see *Signed updates* below). The flow is the same
+on every OS: check the version, fetch the matching release artifact,
+verify its signature/checksum, stop the agent, swap the binary, start it,
+confirm with `doctor`. Keep the previous binary until the new one is
+proven — rollback is a file copy. For a verified in-place swap,
+`localmesh-agent update` (v0.6+) automates steps 2–6; the manual runbook
+below documents the same contract step by step.
 
 **Order matters across the fleet:** the server rejects agents that speak
 a *newer* wire protocol than it does, and rejects agents older than its
@@ -28,17 +30,25 @@ dashboard shows it per node.
 
 ## 2. Download the release artifact
 
-Each release ships the `make release` output:
+Each release ships the `scripts/release.sh` output — artifacts are
+versioned, `release-manifest.json` maps platform → file + digest:
 
 ```
-localmesh-agent-darwin-arm64        localmesh-agent-linux-amd64
-localmesh-agent-darwin-amd64        localmesh-agent-linux-arm64
-localmesh-agent-windows-amd64.exe   SHA256SUMS
+localmesh-agent-<ver>-darwin-arm64        localmesh-agent-<ver>-linux-amd64
+localmesh-agent-<ver>-darwin-amd64        localmesh-agent-<ver>-linux-arm64
+localmesh-agent-<ver>-windows-amd64.exe   SHA256SUMS [+.minisig]
+release-manifest.json [+.minisig]
 ```
+
+The installers resolve the manifest for you — `install-agent.sh` /
+`install-agent.ps1` pick the platform artifact and verify its SHA-256
+before anything is installed. Fetching by hand:
 
 ```bash
-TAG=v0.5.1   # the release matching your control plane
-curl -fsSLO "https://github.com/localmesh/localmesh/releases/download/$TAG/localmesh-agent-linux-amd64"
+TAG=v0.6.0   # the release matching your control plane
+curl -fsSLO "https://github.com/localmesh/localmesh/releases/download/$TAG/release-manifest.json"
+FILE=$(python3 -c 'import json;m=json.load(open("release-manifest.json"));print([a["file"] for a in m["artifacts"] if a["os"]=="linux" and a["arch"]=="amd64" and "agent" in a["file"]][0])')
+curl -fsSLO "https://github.com/localmesh/localmesh/releases/download/$TAG/$FILE"
 curl -fsSLO "https://github.com/localmesh/localmesh/releases/download/$TAG/SHA256SUMS"
 ```
 
@@ -46,16 +56,18 @@ Windows (`install-agent.ps1` equivalent — elevated not needed for the
 download itself):
 
 ```powershell
-Invoke-WebRequest "https://github.com/localmesh/localmesh/releases/download/$Tag/localmesh-agent-windows-amd64.exe" -OutFile localmesh-agent.exe
+Invoke-WebRequest "https://github.com/localmesh/localmesh/releases/download/$Tag/release-manifest.json" -OutFile release-manifest.json
+# pick localmesh-agent-<ver>-windows-amd64.exe from the manifest, then:
+Invoke-WebRequest "https://github.com/localmesh/localmesh/releases/download/$Tag/<file>" -OutFile localmesh-agent.exe
 Invoke-WebRequest "https://github.com/localmesh/localmesh/releases/download/$Tag/SHA256SUMS" -OutFile SHA256SUMS
 ```
 
 ## 3. Verify the checksum
 
 ```bash
-grep localmesh-agent-linux-amd64 SHA256SUMS | sha256sum -c -   # Linux
-grep localmesh-agent-darwin-arm64 SHA256SUMS | shasum -a 256 -c -  # macOS
-# → localmesh-agent-linux-amd64: OK
+grep "$FILE" SHA256SUMS | sha256sum -c -   # Linux
+grep "$FILE" SHA256SUMS | shasum -a 256 -c -  # macOS
+# → localmesh-agent-0.6.0-linux-amd64: OK
 ```
 
 ```powershell
@@ -79,7 +91,7 @@ localmesh-agent service stop     # if running as a service
 ```bash
 # wherever the binary lives (/usr/local/bin, ~/.local/bin, %LOCALAPPDATA%\LocalMesh)
 sudo mv /usr/local/bin/localmesh-agent /usr/local/bin/localmesh-agent.previous
-sudo install -m755 localmesh-agent-linux-amd64 /usr/local/bin/localmesh-agent
+sudo install -m755 "$FILE" /usr/local/bin/localmesh-agent
 ```
 
 Keeping `.previous` next to the live binary is the whole rollback plan —

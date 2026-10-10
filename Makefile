@@ -64,9 +64,10 @@ bench:
 	@bash scripts/bench.sh
 
 # Versioned release: all 5 agent targets + server binaries, SHA256SUMS,
-# manifest, and a signature when LOCALMESH_SIGNING_KEY (minisign secret
-# key path) is set — without it the build still runs and warns. See
-# docs/releases.md. VERSION=v1.2.3 or a git tag/describe fallback.
+# manifest, signature. Requires LOCALMESH_SIGNING_KEY (minisign secret
+# key path) — without it the script refuses; dev-only unsigned output
+# needs an explicit `scripts/release.sh --unsigned`. See docs/releases.md.
+# VERSION=v1.2.3 or a git tag/describe fallback.
 release:
 	@bash scripts/release.sh
 

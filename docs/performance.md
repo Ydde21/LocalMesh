@@ -129,8 +129,9 @@ of the fake engine's own latency.
 - Gateway queue semaphore — excess concurrent requests wait on the
   scheduler's `queue_timeout_ms` (default 30s, validated 1–300s) rather
   than piling into unbounded queues.
-- Read limit 1 MiB/frame on node WebSockets; 1 MiB JSON body cap on
-  every POST/PATCH/PUT.
+- Read limit 4 MiB/frame server-side on node WebSockets (capability
+  reports carry large model inventories), 8 MiB agent-side; 1 MiB JSON
+  body cap on every POST/PATCH/PUT.
 - Per-IP rate limits on unauthenticated endpoints (see docs/security.md).
 
 ## Real-inference timing (v0.3 live measurements)

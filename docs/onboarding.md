@@ -43,8 +43,10 @@ curl -X POST https://localhost:8443/api/v1/enrollment-tokens \
 curl -fsSL https://raw.githubusercontent.com/localmesh/localmesh/main/scripts/install-agent.sh | sh
 ```
 
-or build from source (`make build` → `bin/localmesh-agent`), or download
-a release binary (`make release` produces darwin/linux, amd64/arm64).
+The installer resolves the release manifest, picks the artifact for your
+OS/arch, and verifies its SHA-256 against `SHA256SUMS` before anything
+is installed. Or build from source (`make build` → `bin/localmesh-agent`),
+or download a release binary yourself (see `docs/releases.md`).
 
 ### Windows (PowerShell)
 
@@ -52,7 +54,8 @@ a release binary (`make release` produces darwin/linux, amd64/arm64).
 powershell -ExecutionPolicy Bypass -File install-agent.ps1
 ```
 
-Installs to `%LOCALAPPDATA%\LocalMesh` and adds it to your user PATH.
+Same manifest + checksum verification as the shell installer. Installs to
+`%LOCALAPPDATA%\LocalMesh` and adds it to your user PATH.
 
 ## 3. Join the cluster
 
