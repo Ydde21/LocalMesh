@@ -253,9 +253,18 @@ export function clearLoginFailures(ip: string): void {
   attempts.delete(ip);
 }
 
+// X-Forwarded-For is honored only when LOCALMESH_TRUST_PROXY is set —
+// same contract as the Go control plane (config.go TrustProxy). Without
+// it a client can rotate XFF per request and mint a fresh rate-limit
+// bucket each time, defeating the login failure cap.
 export function clientIP(req: Request): string {
-  const fwd = req.headers.get("x-forwarded-for");
-  if (fwd) return fwd.split(",")[0].trim();
+  const trustProxy =
+    process.env.LOCALMESH_TRUST_PROXY === "1" ||
+    process.env.LOCALMESH_TRUST_PROXY === "true";
+  if (trustProxy) {
+    const fwd = req.headers.get("x-forwarded-for");
+    if (fwd) return fwd.split(",")[0].trim();
+  }
   return "local";
 }
 
