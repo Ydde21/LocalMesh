@@ -16,8 +16,10 @@
 #                           (minisign secret key or PEM, per --signer)
 #   LOCALMESH_SIGNING_PASSWORD  optional minisign key passphrase
 #
-# The signer is auto-detected: minisign is preferred, openssl
-# (`openssl dgst -sha256 -sign`) is the fallback. --pubkey derives the
+# The signer is auto-detected from the KEY FILE format: PEM → openssl
+# (`openssl dgst -sha256 -sign`), localmesh .sec → the repo-native
+# `internal/release/cmd/sign` (minisign-compatible "Ed" signatures),
+# real minisign secret → the minisign binary. --pubkey derives the
 # signer key id recorded in release-manifest.json; when omitted the id
 # is derived from the secret where the tool allows it.
 #
@@ -70,24 +72,41 @@ SEMVER="${VERSION#v}"
 log "version: $VERSION (artifacts stamped $SEMVER)"
 
 # --- signer resolution ------------------------------------------------
+# Three signing tools produce the SAME release contract (manifest
+# signer.algorithm is "minisign" or "openssl"; .minisig/.sig files land
+# in dist/):
+#
+#   minisign  real minisign binary — required for real (encrypted)
+#             minisign secret keys
+#   native    internal/release/cmd/sign — repo-local minisign-compatible
+#             tool for localmesh-format .sec keys; always available here
+#             since release.sh already requires go
+#   openssl   openssl dgst -sha256 -sign — requires a PEM secret key
+#
+# auto detection keys off the KEY FILE format, not tool availability.
 ALG=""
+SIGN_TOOL=""
 if [ "$UNSIGNED" -eq 0 ]; then
-	case "$SIGNER" in
-		auto)
-			if command -v minisign >/dev/null 2>&1; then ALG="minisign"
-			elif command -v openssl >/dev/null 2>&1; then ALG="openssl"
-			else fail "neither minisign nor openssl found — install one, or pass --unsigned"
-			fi
-			;;
-		minisign) command -v minisign >/dev/null 2>&1 || fail "--signer minisign but minisign not installed"; ALG="minisign" ;;
-		openssl)  command -v openssl  >/dev/null 2>&1 || fail "--signer openssl but openssl not installed";  ALG="openssl"  ;;
-		*) fail "unknown --signer $SIGNER (minisign|openssl|auto)" ;;
-	esac
 	[ -n "${LOCALMESH_SIGNING_KEY:-}" ] ||
 		fail "LOCALMESH_SIGNING_KEY is not set — refusing to produce an unsigned release without --unsigned"
 	[ -f "$LOCALMESH_SIGNING_KEY" ] ||
 		fail "LOCALMESH_SIGNING_KEY=$LOCALMESH_SIGNING_KEY is not a file"
-	log "signer: $ALG (key: $LOCALMESH_SIGNING_KEY)"
+	if [ "$SIGNER" = "auto" ]; then
+		if grep -q -- "-----BEGIN" "$LOCALMESH_SIGNING_KEY"; then
+			SIGNER="openssl"
+		elif grep -q "localmesh signing secret key" "$LOCALMESH_SIGNING_KEY"; then
+			SIGNER="native"
+		else
+			SIGNER="minisign"  # real minisign-format secret
+		fi
+	fi
+	case "$SIGNER" in
+		minisign) command -v minisign >/dev/null 2>&1 || fail "real minisign key needs the minisign binary — install it, or keygen via: go run ./internal/release/cmd/sign keygen"; ALG="minisign"; SIGN_TOOL="minisign" ;;
+		native)   ALG="minisign"; SIGN_TOOL="native" ;;
+		openssl)  command -v openssl >/dev/null 2>&1 || fail "--signer openssl but openssl not installed"; ALG="openssl"; SIGN_TOOL="openssl" ;;
+		*) fail "unknown --signer $SIGNER (minisign|openssl|native|auto)" ;;
+	esac
+	log "signer: $ALG via $SIGN_TOOL (key: $LOCALMESH_SIGNING_KEY)"
 else
 	log "WARNING: --unsigned — this release will carry NO signature"
 	log "         'localmesh-agent update' and verify-release.sh will reject it"
@@ -127,11 +146,15 @@ log "wrote $DIST/SHA256SUMS"
 KEYID=""
 sign_file() {
 	local f="$1"
-	if [ "$ALG" = "minisign" ]; then
+	if [ "$SIGN_TOOL" = "minisign" ]; then
 		minisign -S -s "$LOCALMESH_SIGNING_KEY" ${LOCALMESH_SIGNING_PASSWORD:+-P "$LOCALMESH_SIGNING_PASSWORD"} -m "$f" \
 			|| fail "minisign signing failed for $f"
 		log "signed $f.minisig"
-	elif [ "$ALG" = "openssl" ]; then
+	elif [ "$SIGN_TOOL" = "native" ]; then
+		go run ./internal/release/cmd/sign -sec "$LOCALMESH_SIGNING_KEY" -m "$f" >/dev/null \
+			|| fail "native signing failed for $f"
+		log "signed $f.minisig"
+	elif [ "$SIGN_TOOL" = "openssl" ]; then
 		openssl dgst -sha256 -sign "$LOCALMESH_SIGNING_KEY" -out "$f.sig" "$f" \
 			|| fail "openssl signing failed for $f"
 		log "signed $f.sig"
