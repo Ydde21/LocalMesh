@@ -95,6 +95,74 @@ func AcquireOwnership(ctx context.Context, dsn string, log *slog.Logger) (*Owner
 		}
 	}
 
+	return claimOwnership(ctx, conn, log)
+}
+
+// WaitForOwnership is the standby-acquire path: instead of refusing on
+// contention it waits indefinitely (ctx-cancellable) for the advisory
+// lock, then claims the next epoch exactly like AcquireOwnership. A
+// dead probe connection is re-dialed — a standby must survive the same
+// DB restarts that kill the incumbent.
+func WaitForOwnership(ctx context.Context, dsn string, log *slog.Logger) (*Ownership, error) {
+	if log == nil {
+		log = slog.Default()
+	}
+	var lastLogged time.Time
+	for {
+		conn, err := pgx.Connect(ctx, dsn)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			log.Warn("standby: database unreachable, retrying", "err", err)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(2 * time.Second):
+			}
+			continue
+		}
+		var held bool
+		err = conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", ownershipLockKey).Scan(&held)
+		if err != nil {
+			conn.Close(ctx)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			log.Warn("standby: ownership probe failed, re-dialing", "err", err)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Second):
+			}
+			continue
+		}
+		if held {
+			return claimOwnership(ctx, conn, log)
+		}
+		if time.Since(lastLogged) > 30*time.Second || lastLogged.IsZero() {
+			if info := readOwnerInfo(ctx, conn); info != nil {
+				log.Info("standby: waiting for ownership",
+					"owner", info.OwnerID, "epoch", info.Epoch,
+					"heartbeat_age", time.Since(info.HeartbeatAt).Round(time.Second))
+			} else {
+				log.Info("standby: waiting for ownership")
+			}
+			lastLogged = time.Now()
+		}
+		select {
+		case <-ctx.Done():
+			conn.Close(ctx)
+			return nil, ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// claimOwnership finishes an acquisition: the caller already holds the
+// advisory lock on conn — bump the epoch (fencing token), stamp the
+// owner row, and start the loss watchdog.
+func claimOwnership(ctx context.Context, conn *pgx.Conn, log *slog.Logger) (*Ownership, error) {
 	instanceID := uuid.New()
 	var pid uint32
 	if err := conn.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&pid); err != nil {
@@ -102,7 +170,7 @@ func AcquireOwnership(ctx context.Context, dsn string, log *slog.Logger) (*Owner
 		return nil, fmt.Errorf("ownership backend pid: %w", err)
 	}
 	var epoch int64
-	err = conn.QueryRow(ctx,
+	err := conn.QueryRow(ctx,
 		`INSERT INTO control_plane_lock (id, owner_id, epoch)
 		 VALUES (1, $1, 1)
 		 ON CONFLICT (id) DO UPDATE
@@ -130,6 +198,10 @@ func AcquireOwnership(ctx context.Context, dsn string, log *slog.Logger) (*Owner
 	log.Info("control-plane ownership acquired", "instance", instanceID, "epoch", epoch)
 	return o, nil
 }
+
+// InstanceID identifies this owner in control_plane_lock and the
+// ownership_events history.
+func (o *Ownership) InstanceID() uuid.UUID { return o.instanceID }
 
 // Epoch is the fencing token authoritative writes must carry.
 func (o *Ownership) Epoch() int64 { return o.epoch }

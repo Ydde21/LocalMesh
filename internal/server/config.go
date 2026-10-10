@@ -30,6 +30,11 @@ type Config struct {
 	// unwanted or unavailable.
 	Discovery   bool
 	ClusterName string // advertised instance name (default "localmesh")
+	// Standby makes this instance an active-standby replica: it serves a
+	// minimal status surface and waits on the advisory lock instead of
+	// refusing startup when another control plane owns the cluster. On
+	// takeover it promotes to full active duty in-process.
+	Standby bool
 }
 
 func ConfigFromEnv() Config {
@@ -62,6 +67,12 @@ func ConfigFromEnv() Config {
 		c.Discovery = false
 	}
 	c.ClusterName = envStr("LOCALMESH_CLUSTER_NAME", "localmesh")
+	if v := os.Getenv("LOCALMESH_ROLE"); v == "standby" || v == "STANDBY" {
+		c.Standby = true
+	}
+	if v := os.Getenv("LOCALMESH_STANDBY"); v == "1" || v == "true" {
+		c.Standby = true
+	}
 	if c.DevInsecureHTTP && len(c.CORSOrigins) == 0 {
 		c.CORSOrigins = []string{"http://localhost:3000", "http://127.0.0.1:3000"}
 	}

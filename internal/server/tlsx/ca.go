@@ -60,6 +60,18 @@ func hexEncode(b []byte) string {
 // LoadOrCreate opens (or initializes) a CA in dir and issues/loads a
 // server certificate covering the given DNS names and IPs.
 func LoadOrCreate(dir string, dnsNames []string, ips []net.IP) (*CA, error) {
+	return load(dir, dnsNames, ips, true)
+}
+
+// LoadExisting opens the provisioned CA + server cert in dir but never
+// generates one — the standby control plane requires the SAME CA as the
+// primary (agents pin it), so an empty data dir is a provisioning
+// failure, not a reason to mint a competing root.
+func LoadExisting(dir string, dnsNames []string, ips []net.IP) (*CA, error) {
+	return load(dir, dnsNames, ips, false)
+}
+
+func load(dir string, dnsNames []string, ips []net.IP, create bool) (*CA, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -71,10 +83,12 @@ func LoadOrCreate(dir string, dnsNames []string, ips []net.IP) (*CA, error) {
 		if err := ca.loadCA(); err != nil {
 			return nil, err
 		}
-	} else {
+	} else if create {
 		if err := ca.generateCA(); err != nil {
 			return nil, err
 		}
+	} else {
+		return nil, fmt.Errorf("no CA in %s — provision ca.pem/ca-key.pem/server.pem/server-key.pem from the primary (a standby must serve the same CA, never mint its own)", dir)
 	}
 	if fileExists(filepath.Join(dir, srvCert)) && fileExists(filepath.Join(dir, srvKey)) {
 		cert, err := tls.LoadX509KeyPair(filepath.Join(dir, srvCert), filepath.Join(dir, srvKey))

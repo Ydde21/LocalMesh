@@ -12,9 +12,28 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
+// migrationLockKey serializes concurrent migrators. An active and a
+// standby control plane booting together (or two standbys racing after
+// the same failover) must not run overlapping DDL — without the lock a
+// loser collides on the schema_migrations PK and fails startup.
+const migrationLockKey int64 = 0x4c4d4d47 // "LMMG"
+
 // Migrate applies pending SQL migrations in filename order.
 func Migrate(ctx context.Context, db *DB) error {
-	if _, err := db.Pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+	// Hold a session-level advisory lock for the whole run. The loser
+	// waits, then sees MAX(version) already applied and no-ops.
+	conn, err := db.Pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("migration lock conn: %w", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationLockKey); err != nil {
+		return fmt.Errorf("migration lock: %w", err)
+	}
+	defer conn.Exec(context.Background(),
+		`SELECT pg_advisory_unlock($1)`, migrationLockKey)
+
+	if _, err := conn.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
@@ -32,7 +51,7 @@ func Migrate(ctx context.Context, db *DB) error {
 	sort.Strings(names)
 
 	var applied int
-	if err := db.Pool.QueryRow(ctx,
+	if err := conn.QueryRow(ctx,
 		`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&applied); err != nil {
 		return fmt.Errorf("read schema_migrations: %w", err)
 	}
@@ -49,7 +68,7 @@ func Migrate(ctx context.Context, db *DB) error {
 		if err != nil {
 			return err
 		}
-		tx, err := db.Pool.Begin(ctx)
+		tx, err := conn.Begin(ctx)
 		if err != nil {
 			return err
 		}

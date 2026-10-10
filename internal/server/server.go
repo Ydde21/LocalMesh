@@ -50,6 +50,50 @@ type Server struct {
 	modelOps  *modelops.Queue
 	owner     *Ownership
 	startedAt time.Time
+	// promoted is true when this instance began as standby and claimed
+	// ownership via WaitForOwnership — diagnostics distinguish it.
+	promoted bool
+}
+
+// setupTLS loads (or, when allowCreate, initializes) the cluster CA and
+// server leaf. Standby passes false: a standby must serve the SAME CA
+// as the primary — an empty data dir is a provisioning error, never a
+// reason to mint a second root agents would not trust.
+func (s *Server) setupTLS(allowCreate bool) (*tls.Config, []byte, error) {
+	if s.cfg.DevInsecureHTTP {
+		return nil, nil, nil
+	}
+	hostnames := s.cfg.Hostnames
+	if s.cfg.Discovery {
+		// Agents joining via mDNS dial the advertised hostname —
+		// make sure the leaf covers <hostname>.local.
+		if h, herr := os.Hostname(); herr == nil {
+			for _, cand := range []string{h + ".local", h} {
+				found := false
+				for _, e := range hostnames {
+					if e == cand {
+						found = true
+					}
+				}
+				if !found {
+					hostnames = append(hostnames, cand)
+				}
+			}
+		}
+	}
+	var ca *tlsx.CA
+	var err error
+	if allowCreate {
+		ca, err = tlsx.LoadOrCreate(s.cfg.DataDir, hostnames, nil)
+	} else {
+		ca, err = tlsx.LoadExisting(s.cfg.DataDir, hostnames, nil)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	s.ca = ca
+	s.log.Info("control-plane CA ready", "fingerprint", ca.Fingerprint())
+	return ca.ServerTLSConfig(), ca.PEMBytes, nil
 }
 
 func New(cfg Config, log *slog.Logger) *Server {
@@ -66,20 +110,84 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("database: %w", err)
 	}
 	s.st = st
+	// Migrations run before the role split: serialized by a migration
+	// advisory lock, and the standby NEEDS them early — its claim writes
+	// control_plane_lock, which the schema must already contain. Schema
+	// setup is not an authoritative action (no workload state touched).
 	if err := store.Migrate(ctx, st); err != nil {
 		return fmt.Errorf("migrations: %w", err)
 	}
 	s.log.Info("database ready")
 
-	// Single-active ownership: one advisory-lock session + a fencing
-	// epoch. A second control plane fails startup loudly instead of
-	// co-owning the cluster and double-dispatching model ops.
-	own, err := AcquireOwnership(ctx, s.cfg.DatabaseURL, s.log)
-	if err != nil {
-		st.Close()
-		return err
+	var (
+		own    *Ownership
+		role   *roleMux
+		errCh  chan error
+		tlsCfg *tls.Config
+		caPEM  []byte
+	)
+
+	if s.cfg.Standby {
+		// Active-standby: serve a minimal status surface on the real
+		// listen address while waiting on the ownership lock. No
+		// migrations, no scheduling, no dispatch — nothing authoritative
+		// happens before promotion. TLS is strict-load: a standby never
+		// mints a competing CA (agents pin the primary's root).
+		var err error
+		tlsCfg, caPEM, err = s.setupTLS(false)
+		if err != nil {
+			st.Close()
+			return fmt.Errorf("tls: %w", err)
+		}
+		role = &roleMux{}
+		role.swap(standbyHandler(st, time.Now()))
+		s.httpSrv = &http.Server{
+			Addr:              s.cfg.Listen,
+			Handler:           cors(s.cfg.CORSOrigins, rateLimit(s.cfg.TrustProxy, logRequests(s.log, role))),
+			TLSConfig:         tlsCfg,
+			ReadHeaderTimeout: 15 * time.Second,
+		}
+		ln, lerr := net.Listen("tcp", s.cfg.Listen)
+		if lerr != nil {
+			st.Close()
+			return lerr
+		}
+		errCh = make(chan error, 1)
+		go func() {
+			if tlsCfg != nil {
+				errCh <- s.httpSrv.ServeTLS(ln, "", "")
+			} else {
+				errCh <- s.httpSrv.Serve(ln)
+			}
+		}()
+		s.log.Info("standby control plane listening — waiting for ownership",
+			"addr", ln.Addr().String())
+		own, err = WaitForOwnership(ctx, s.cfg.DatabaseURL, s.log)
+		if err != nil {
+			shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			s.httpSrv.Shutdown(shCtx)
+			cancel()
+			st.Close()
+			return err
+		}
+		s.owner = own
+		s.promoted = true
+		s.log.Info("standby promoted to active control plane", "epoch", own.Epoch())
+		st.AddOwnershipEvent(context.Background(), own.InstanceID().String(),
+			own.Epoch(), "promoted", "standby takeover")
+	} else {
+		// Single-active ownership: one advisory-lock session + a fencing
+		// epoch. A second control plane fails startup loudly instead of
+		// co-owning the cluster and double-dispatching model ops.
+		own, err = AcquireOwnership(ctx, s.cfg.DatabaseURL, s.log)
+		if err != nil {
+			st.Close()
+			return err
+		}
+		s.owner = own
+		st.AddOwnershipEvent(context.Background(), own.InstanceID().String(),
+			own.Epoch(), "acquired", "")
 	}
-	s.owner = own
 	defer own.Release(context.Background())
 
 	s.ev = events.NewBroker()
@@ -98,41 +206,19 @@ func (s *Server) Start(ctx context.Context) error {
 	defer qcancel()
 	go s.modelOps.Run(qctx)
 
-	var tlsCfg *tls.Config
-	var caPEM []byte
-	if !s.cfg.DevInsecureHTTP {
-		hostnames := s.cfg.Hostnames
-		if s.cfg.Discovery {
-			// Agents joining via mDNS dial the advertised hostname —
-			// make sure the leaf covers <hostname>.local.
-			if h, herr := os.Hostname(); herr == nil {
-				for _, cand := range []string{h + ".local", h} {
-					found := false
-					for _, e := range hostnames {
-						if e == cand {
-							found = true
-						}
-					}
-					if !found {
-						hostnames = append(hostnames, cand)
-					}
-				}
-			}
-		}
-		ca, err := tlsx.LoadOrCreate(s.cfg.DataDir, hostnames, nil)
+	if !s.cfg.Standby {
+		var err error
+		tlsCfg, caPEM, err = s.setupTLS(true)
 		if err != nil {
 			return fmt.Errorf("tls: %w", err)
 		}
-		s.ca = ca
-		caPEM = ca.PEMBytes
-		tlsCfg = ca.ServerTLSConfig()
-		s.log.Info("control-plane CA ready", "fingerprint", ca.Fingerprint())
 	}
 
 	s.admin = adminapi.New(st, s.hub, s.sched, s.ev, caPEM, s.log)
 	s.admin.SetModelOps(s.modelOps, s.ReloadModelOpsConfig)
 	s.admin.SetDiscoveryStatus(s.DiscoveryStatus)
 	s.admin.SetDiagnostics(s.buildDiagnostics)
+	s.admin.SetControlPlaneStatus(s.controlPlaneStatus)
 	s.startedAt = time.Now()
 
 	// A restart abandons all in-flight work: connections, capacity
@@ -201,34 +287,42 @@ func (s *Server) Start(ctx context.Context) error {
 	})
 
 	handler := cors(s.cfg.CORSOrigins, rateLimit(s.cfg.TrustProxy, logRequests(s.log, mux)))
-	s.httpSrv = &http.Server{
-		Addr:              s.cfg.Listen,
-		Handler:           handler,
-		TLSConfig:         tlsCfg,
-		ReadHeaderTimeout: 15 * time.Second,
-		// No WriteTimeout: streaming inference can be long-lived.
-	}
-
-	ln, err := net.Listen("tcp", s.cfg.Listen)
-	if err != nil {
-		return err
-	}
-
-	scheme := "https"
-	if s.cfg.DevInsecureHTTP {
-		scheme = "http"
-	}
-	s.log.Info("localmesh control plane listening",
-		"addr", ln.Addr().String(), "scheme", scheme)
-
-	errCh := make(chan error, 1)
-	go func() {
-		if tlsCfg != nil {
-			errCh <- s.httpSrv.ServeTLS(ln, "", "")
-		} else {
-			errCh <- s.httpSrv.Serve(ln)
+	if s.cfg.Standby {
+		// The listener is already up serving standby responses — swap
+		// the real mux in atomically. From here on this instance is
+		// indistinguishable from one that started active.
+		role.swap(handler)
+		s.log.Info("promotion complete — serving full control plane", "epoch", own.Epoch())
+	} else {
+		s.httpSrv = &http.Server{
+			Addr:              s.cfg.Listen,
+			Handler:           handler,
+			TLSConfig:         tlsCfg,
+			ReadHeaderTimeout: 15 * time.Second,
+			// No WriteTimeout: streaming inference can be long-lived.
 		}
-	}()
+
+		ln, err := net.Listen("tcp", s.cfg.Listen)
+		if err != nil {
+			return err
+		}
+
+		scheme := "https"
+		if s.cfg.DevInsecureHTTP {
+			scheme = "http"
+		}
+		s.log.Info("localmesh control plane listening",
+			"addr", ln.Addr().String(), "scheme", scheme)
+
+		errCh = make(chan error, 1)
+		go func() {
+			if tlsCfg != nil {
+				errCh <- s.httpSrv.ServeTLS(ln, "", "")
+			} else {
+				errCh <- s.httpSrv.Serve(ln)
+			}
+		}()
+	}
 
 	select {
 	case <-ctx.Done():
@@ -243,6 +337,8 @@ func (s *Server) Start(ctx context.Context) error {
 		// Fail anything still in-flight so rows don't linger 'running'.
 		// Fresh context: shCtx may be spent waiting on handlers.
 		s.st.FailOrphanedWorkloads(context.Background(), "control-plane shutting down")
+		st.AddOwnershipEvent(context.Background(), own.InstanceID().String(),
+			own.Epoch(), "released", "clean shutdown")
 		st.Close()
 		return nil
 	case <-own.Lost():
@@ -257,6 +353,8 @@ func (s *Server) Start(ctx context.Context) error {
 		defer cancel()
 		s.httpSrv.Shutdown(shCtx)
 		s.st.FailOrphanedWorkloads(context.Background(), "control-plane ownership lost")
+		st.AddOwnershipEvent(context.Background(), own.InstanceID().String(),
+			own.Epoch(), "lost", "advisory-lock session failed")
 		st.Close()
 		return fmt.Errorf("control-plane ownership lost")
 	case err := <-errCh:
@@ -681,6 +779,35 @@ func (s *Server) buildDiagnostics(ctx context.Context) (map[string]any, error) {
 		bundle["recent_audit"] = audit
 	}
 	return bundle, nil
+}
+
+// controlPlaneStatus backs GET /api/v1/control-plane: this instance's
+// role (a promoted standby reports "active" — the role it holds NOW,
+// with promoted_from_standby recording how it got there), the live
+// owner row, and recent ownership transitions.
+func (s *Server) controlPlaneStatus(ctx context.Context) (map[string]any, error) {
+	out := map[string]any{
+		"role":                  "active",
+		"standby_capable":       true,
+		"promoted_from_standby": s.promoted,
+		"uptime_seconds":        int(time.Since(s.startedAt).Seconds()),
+	}
+	if s.owner != nil {
+		out["instance_id"] = s.owner.InstanceID().String()
+		out["epoch"] = s.owner.Epoch()
+	}
+	if owner, err := s.st.ReadControlPlane(ctx); err == nil && owner != nil {
+		out["owner"] = map[string]any{
+			"instance_id":           owner.OwnerID,
+			"epoch":                 owner.Epoch,
+			"started_at":            owner.StartedAt,
+			"heartbeat_age_seconds": int64(time.Since(owner.HeartbeatAt).Seconds()),
+		}
+	}
+	if ev, err := s.st.ListOwnershipEvents(ctx, 50); err == nil {
+		out["events"] = ev
+	}
+	return out, nil
 }
 
 func (s *Server) Hub() *nodehub.Hub               { return s.hub }

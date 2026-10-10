@@ -47,6 +47,8 @@ type API struct {
 	modelOpsReload func(ctx context.Context)
 	// diag builds the redacted diagnostics bundle; nil → endpoint 404s.
 	diag func(ctx context.Context) (map[string]any, error)
+	// controlPlane builds the ownership/role status payload; nil → 404.
+	controlPlane func(ctx context.Context) (map[string]any, error)
 }
 
 // SetDiscoveryStatus wires the server's announce-state provider.
@@ -57,6 +59,12 @@ func (a *API) SetDiscoveryStatus(fn func() map[string]any) { a.discoveryStatus =
 func (a *API) SetModelOps(q *modelops.Queue, reload func(ctx context.Context)) {
 	a.modelOps = q
 	a.modelOpsReload = reload
+}
+
+// SetControlPlaneStatus wires the server's ownership/role provider for
+// GET /api/v1/control-plane.
+func (a *API) SetControlPlaneStatus(fn func(ctx context.Context) (map[string]any, error)) {
+	a.controlPlane = fn
 }
 
 func New(st *store.DB, hub *nodehub.Hub, sched *scheduler.Scheduler, ev *events.Broker, caPEM []byte, log *slog.Logger) *API {
@@ -84,6 +92,7 @@ func (a *API) Register(mux *http.ServeMux, mwAdmin, mwRead func(http.Handler) ht
 	mux.Handle("GET /api/v1/nodes/{id}", mwRead(http.HandlerFunc(a.handleNode)))
 	mux.Handle("GET /api/v1/nodes/{id}/events", mwRead(http.HandlerFunc(a.handleNodeEvents)))
 	mux.Handle("GET /api/v1/diagnostics", mwRead(http.HandlerFunc(a.handleDiagnostics)))
+	mux.Handle("GET /api/v1/control-plane", mwRead(http.HandlerFunc(a.handleControlPlane)))
 	mux.Handle("PATCH /api/v1/nodes/{id}", mwAdmin(http.HandlerFunc(a.handleNodePatch)))
 	mux.Handle("DELETE /api/v1/nodes/{id}", mwAdmin(http.HandlerFunc(a.handleNodeDelete)))
 	mux.Handle("POST /api/v1/nodes/{id}/revoke", mwAdmin(http.HandlerFunc(a.handleNodeRevoke)))
@@ -435,6 +444,23 @@ func (a *API) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, bundle)
+}
+
+// handleControlPlane reports ownership state: this instance's role, the
+// live owner row (instance id, fencing epoch, heartbeat freshness), and
+// recent ownership transitions — the operational answer to "who is
+// authoritative and how did we get here".
+func (a *API) handleControlPlane(w http.ResponseWriter, r *http.Request) {
+	if a.controlPlane == nil {
+		writeErr(w, http.StatusNotFound, "control-plane status unavailable")
+		return
+	}
+	out, err := a.controlPlane(r.Context())
+	if err != nil {
+		a.internalErr(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // SetDiagnostics installs the provider that assembles the bundle — kept
