@@ -56,6 +56,8 @@ func (a *API) registerReleases(mux *http.ServeMux, mwAdmin, mwRead func(http.Han
 	mux.Handle("POST /api/v1/rollouts", mwAdmin(http.HandlerFunc(a.handleCreateRollout)))
 	mux.Handle("POST /api/v1/rollouts/{id}/approve", mwAdmin(http.HandlerFunc(a.handleApproveRollout)))
 	mux.Handle("POST /api/v1/rollouts/{id}/cancel", mwAdmin(http.HandlerFunc(a.handleCancelRollout)))
+	mux.Handle("POST /api/v1/rollouts/{id}/pause", mwAdmin(http.HandlerFunc(a.handlePauseRollout)))
+	mux.Handle("POST /api/v1/rollouts/{id}/resume", mwAdmin(http.HandlerFunc(a.handleResumeRollout)))
 
 	mux.Handle("GET /api/v1/agent-updates", mwRead(http.HandlerFunc(a.handleListAgentUpdates)))
 	mux.Handle("GET /api/v1/agent-updates/{id}", mwRead(http.HandlerFunc(a.handleGetAgentUpdate)))
@@ -323,7 +325,8 @@ func (a *API) handleCreateRollout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleApproveRollout(w http.ResponseWriter, r *http.Request) {
-	ro, err := a.updates.ApproveNextBatch(r.Context(), r.PathValue("id"))
+	principal, _ := auth.PrincipalFrom(r.Context())
+	ro, err := a.updates.ApproveNextBatch(r.Context(), r.PathValue("id"), principal.Name)
 	if err != nil {
 		if errors.Is(err, updateplane.ErrNotAwaitingApproval) {
 			writeErr(w, http.StatusConflict, err.Error())
@@ -336,8 +339,43 @@ func (a *API) handleApproveRollout(w http.ResponseWriter, r *http.Request) {
 		a.internalErr(w, r, err)
 		return
 	}
-	principal, _ := auth.PrincipalFrom(r.Context())
 	a.st.Audit(r.Context(), principal.Name, "rollout.approve", ro.ID, nil)
+	writeJSON(w, http.StatusOK, ro)
+}
+
+func (a *API) handlePauseRollout(w http.ResponseWriter, r *http.Request) {
+	ro, err := a.updates.PauseRollout(r.Context(), r.PathValue("id"))
+	if err != nil {
+		switch {
+		case errors.Is(err, updateplane.ErrNotPausable):
+			writeErr(w, http.StatusConflict, err.Error())
+		case errors.Is(err, store.ErrNotFound):
+			writeErr(w, http.StatusNotFound, "rollout not found")
+		default:
+			a.internalErr(w, r, err)
+		}
+		return
+	}
+	principal, _ := auth.PrincipalFrom(r.Context())
+	a.st.Audit(r.Context(), principal.Name, "rollout.pause", ro.ID, nil)
+	writeJSON(w, http.StatusOK, ro)
+}
+
+func (a *API) handleResumeRollout(w http.ResponseWriter, r *http.Request) {
+	ro, err := a.updates.ResumeRollout(r.Context(), r.PathValue("id"))
+	if err != nil {
+		switch {
+		case errors.Is(err, updateplane.ErrNotPaused):
+			writeErr(w, http.StatusConflict, err.Error())
+		case errors.Is(err, store.ErrNotFound):
+			writeErr(w, http.StatusNotFound, "rollout not found")
+		default:
+			a.internalErr(w, r, err)
+		}
+		return
+	}
+	principal, _ := auth.PrincipalFrom(r.Context())
+	a.st.Audit(r.Context(), principal.Name, "rollout.resume", ro.ID, nil)
 	writeJSON(w, http.StatusOK, ro)
 }
 
