@@ -45,6 +45,7 @@ type Server struct {
 	httpSrv   *http.Server
 	announcer *discovery.Announcer
 	modelOps  *modelops.Queue
+	owner     *Ownership
 }
 
 func New(cfg Config, log *slog.Logger) *Server {
@@ -66,6 +67,17 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	s.log.Info("database ready")
 
+	// Single-active ownership: one advisory-lock session + a fencing
+	// epoch. A second control plane fails startup loudly instead of
+	// co-owning the cluster and double-dispatching model ops.
+	own, err := AcquireOwnership(ctx, s.cfg.DatabaseURL, s.log)
+	if err != nil {
+		st.Close()
+		return err
+	}
+	s.owner = own
+	defer own.Release(context.Background())
+
 	s.ev = events.NewBroker()
 	s.hub = nodehub.New(st, s.ev, nodehub.DefaultConfig(), s.log)
 	s.sched = scheduler.New(s.hub, scheduler.DefaultConfig())
@@ -74,8 +86,13 @@ func (s *Server) Start(ctx context.Context) error {
 	// wire frames second. Owns dispatch, retry, interruption, progress.
 	s.modelOps = modelops.New(st, nodehub.NewOpDispatcher(s.hub), s.modelOpsConfig(context.Background()), s.log)
 	s.modelOps.SetNotifier(s.ev.Publish)
+	s.modelOps.SetEpoch(own.Epoch())
 	s.hub.SetModelOpsQueue(s.modelOps)
-	go s.modelOps.Run(ctx)
+	// Queue gets its own cancel: on ownership loss we stop dispatch
+	// immediately rather than riding the caller's ctx.
+	qctx, qcancel := context.WithCancel(ctx)
+	defer qcancel()
+	go s.modelOps.Run(qctx)
 
 	var tlsCfg *tls.Config
 	var caPEM []byte
@@ -221,6 +238,20 @@ func (s *Server) Start(ctx context.Context) error {
 		s.st.FailOrphanedWorkloads(context.Background(), "control-plane shutting down")
 		st.Close()
 		return nil
+	case <-own.Lost():
+		// Advisory-lock session died or the row was taken: another
+		// control plane may already be authoritative. Fence ourselves —
+		// kill the queue and every node conn — then exit so a
+		// supervisor can restart us into a fresh, lock-acquiring state.
+		s.log.Error("control-plane ownership lost — fencing writes and shutting down")
+		qcancel()
+		s.hub.CloseAll("control-plane ownership lost")
+		shCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		s.httpSrv.Shutdown(shCtx)
+		s.st.FailOrphanedWorkloads(context.Background(), "control-plane ownership lost")
+		st.Close()
+		return fmt.Errorf("control-plane ownership lost")
 	case err := <-errCh:
 		st.Close()
 		if errors.Is(err, http.ErrServerClosed) {

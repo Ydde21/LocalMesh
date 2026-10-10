@@ -6,7 +6,7 @@ BIN           := bin
 VERSION       ?= dev
 LDFLAGS       := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build test vet tidy clean release dashboard dev-up dev-down verify verify-fast
+.PHONY: all build test vet tidy clean clean-test-resources release dashboard dev-up dev-down verify verify-fast
 
 all: build
 
@@ -50,6 +50,12 @@ tidy:
 
 clean:
 	rm -rf $(BIN) dist
+
+# Sweep ONLY test-owned Docker resources (label localmesh.test=1) —
+# containers are tmpfs-backed so no anonymous volumes are created.
+# Reports dangling leftovers for manual review; never blanket-prunes.
+clean-test-resources:
+	@bash scripts/clean-test-resources.sh
 
 # Cross-compile node agents for the supported platforms.
 release:

@@ -159,7 +159,12 @@ func (d *DB) ModelOpWorkNodes(ctx context.Context) ([]string, error) {
 // claims at most perNode of its node's queue. FOR UPDATE SKIP LOCKED makes
 // the claim safe under concurrent pollers: a second claimant skips locked
 // rows instead of double-dispatching.
-func (d *DB) ClaimDueModelOps(ctx context.Context, nodeIDs []string, perNode, limit int) ([]*OpState, error) {
+//
+// epoch >= 0 adds a fencing check: the claim matches zero rows unless
+// control_plane_lock.epoch equals it — a process that lost ownership
+// cannot claim work even before it notices. epoch < 0 disables the
+// check (standalone/test use with no ownership session).
+func (d *DB) ClaimDueModelOps(ctx context.Context, epoch int64, nodeIDs []string, perNode, limit int) ([]*OpState, error) {
 	if len(nodeIDs) == 0 || limit <= 0 || perNode <= 0 {
 		return nil, nil
 	}
@@ -171,6 +176,8 @@ func (d *DB) ClaimDueModelOps(ctx context.Context, nodeIDs []string, perNode, li
 			WHERE status='queued'
 			  AND (next_attempt_at IS NULL OR next_attempt_at <= now())
 			  AND node_id = ANY($1::uuid[])
+			  AND ($4::bigint < 0 OR
+			       (SELECT epoch FROM control_plane_lock WHERE id = 1) = $4)
 		),
 		locked AS (
 			SELECT o.id FROM model_operations o JOIN due ON due.id = o.id
@@ -186,7 +193,7 @@ func (d *DB) ClaimDueModelOps(ctx context.Context, nodeIDs []string, perNode, li
 			o.completed,o.total,o.error,o.created_at,o.updated_at,
 			o.attempt,o.max_attempts,o.next_attempt_at,COALESCE(o.last_error,''),o.phase,
 			o.rate_bps,o.indeterminate,o.priority,o.finished_at`,
-		nodeIDs, limit, perNode)
+		nodeIDs, limit, perNode, epoch)
 	if err != nil {
 		return nil, err
 	}

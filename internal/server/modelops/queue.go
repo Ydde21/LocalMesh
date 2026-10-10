@@ -151,8 +151,19 @@ type Queue struct {
 	mu     sync.Mutex
 	cfg    Config
 	online map[string]bool // last observed connectivity per node with work
+	epoch  int64           // control-plane fencing token; -1 = unfenced
 
 	wake chan struct{} // event-driven dispatch nudge (capacity 1)
+}
+
+// SetEpoch installs the control-plane ownership fencing token. Claims
+// pass it to the store, which matches zero rows once a successor
+// bumps the epoch — stale processes cannot dispatch work. -1 disables
+// fencing (standalone/tests).
+func (q *Queue) SetEpoch(epoch int64) {
+	q.mu.Lock()
+	q.epoch = epoch
+	q.mu.Unlock()
 }
 
 // New builds a queue. Run drives it; Reconcile is invoked at Run start.
@@ -166,6 +177,7 @@ func New(st *store.DB, disp Dispatcher, cfg Config, log *slog.Logger) *Queue {
 		cfg:    cfg.withDefaults(),
 		log:    log.With("component", "modelops"),
 		online: map[string]bool{},
+		epoch:  -1, // unfenced until SetEpoch (production always sets it)
 		wake:   make(chan struct{}, 1),
 	}
 }
@@ -412,6 +424,14 @@ func (q *Queue) Cancel(ctx context.Context, opID string) error {
 		}
 		if err := q.st.FinishModelOperationStatus(ctx, opID, "cancelled", "cancelled by administrator"); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
+				// Our abort raced the agent's own completion frame — the
+				// op may already sit in a terminal state. That's the
+				// outcome the caller wanted, not an error.
+				if cur, rerr := q.st.GetModelOpState(ctx, opID); rerr == nil &&
+					opTerminal(cur.Status) {
+					q.kick()
+					return nil
+				}
 				return ErrNotActive
 			}
 			return err
@@ -454,11 +474,12 @@ func (q *Queue) dispatchOnce(ctx context.Context) {
 			eligible = append(eligible, id)
 		}
 	}
+	epoch := q.epoch
 	q.mu.Unlock()
 	if len(eligible) == 0 {
 		return
 	}
-	claimed, err := q.st.ClaimDueModelOps(ctx, eligible, cfg.PerNodeConcurrent, free)
+	claimed, err := q.st.ClaimDueModelOps(ctx, epoch, eligible, cfg.PerNodeConcurrent, free)
 	if err != nil {
 		q.log.Debug("claim due ops", "err", err)
 		return
@@ -604,6 +625,15 @@ func (q *Queue) backoff(attempt int) time.Duration {
 // the only states where progress/done/fail frames are meaningful.
 func opInFlight(status string) bool {
 	return status == "dispatched" || status == "running"
+}
+
+// opTerminal is the no-transitions-left set.
+func opTerminal(status string) bool {
+	switch status {
+	case "succeeded", "failed", "cancelled":
+		return true
+	}
+	return false
 }
 
 // opActive also counts 'queued' — statuses eligible for fail/exhaustion
