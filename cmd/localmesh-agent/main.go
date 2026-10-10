@@ -51,7 +51,7 @@ func main() {
 	case "status":
 		cmdStatus()
 	case "version":
-		fmt.Println("localmesh-agent", version)
+		fmt.Println(agent.Current())
 	default:
 		usage()
 		os.Exit(2)
