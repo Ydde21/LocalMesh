@@ -53,6 +53,20 @@ type Server struct {
 	// prove the control plane never oversubscribes a node.
 	CurChat atomic.Int64
 	MaxChat atomic.Int64
+
+	// PullCalls counts received /api/pull requests.
+	PullCalls atomic.Int64
+	// PullFailures fails the next N pull requests using PullFailMode:
+	// "500" → HTTP 500 before streaming (transient), "notfound" → 404
+	// model-not-found (permanent), "drop" → connection closed mid-stream
+	// (transient).
+	PullFailures atomic.Int64
+	PullFailMode atomic.Value // string; default "500"
+	// PullNoTotal emits download progress with total=0 — exercises the
+	// indeterminate-progress path.
+	PullNoTotal atomic.Bool
+	// PullSize is the reported download total (default 400 MiB).
+	PullSize uint64
 }
 
 // New starts a fake Ollama on an ephemeral loopback port. models seeds
@@ -85,6 +99,7 @@ func newServer(models []Model) *Server {
 		s.models[m.Name] = &mm
 	}
 	s.ChatErr.Store("")
+	s.PullFailMode.Store("500")
 	return s
 }
 
@@ -267,27 +282,71 @@ func (s *Server) pull(w http.ResponseWriter, r *http.Request) {
 		Stream bool   `json:"stream"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
+	s.PullCalls.Add(1)
+
+	if s.PullFailures.Load() > 0 {
+		s.PullFailures.Add(-1)
+		mode, _ := s.PullFailMode.Load().(string)
+		switch mode {
+		case "notfound":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "model not found"})
+		case "drop":
+			// Stream one chunk then kill the connection — a mid-pull
+			// transport failure, like an engine restart.
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.WriteHeader(http.StatusOK)
+			b, _ := json.Marshal(map[string]any{"status": "downloading", "completed": 1, "total": 100})
+			w.Write(b)
+			w.Write([]byte("\n"))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, _ := hj.Hijack()
+				conn.Close()
+			}
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "simulated engine failure"})
+		}
+		return
+	}
+
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
-	steps := []struct {
-		status string
-		done   uint64
-		total  uint64
-	}{
-		{"pulling manifest", 0, 0},
-		{"downloading", 50, 100},
-		{"downloading", 100, 100},
-		{"success", 100, 100},
+
+	total := s.PullSize
+	if total == 0 {
+		total = 400 << 20
+	}
+	reported := total
+	if s.PullNoTotal.Load() {
+		reported = 0
+	}
+	// Realistic Ollama pull sequence: multi-chunk download with byte
+	// counters, status-only phases without counters (indeterminate),
+	// and a final "success" carrying the full totals.
+	steps := []map[string]any{
+		{"status": "pulling manifest"},
+		{"status": "downloading", "completed": reported / 4, "total": reported},
+		{"status": "downloading", "completed": reported / 2, "total": reported},
+		{"status": "downloading", "completed": reported * 3 / 4, "total": reported},
+		{"status": "downloading", "completed": reported, "total": reported},
+		{"status": "verifying sha256 digest"},
+		{"status": "writing manifest"},
+		{"status": "removing any unused layers"},
+		{"status": "success", "completed": reported, "total": reported},
 	}
 	delay := s.PullStepDelay
 	if delay <= 0 {
 		delay = 5 * time.Millisecond
 	}
 	for _, st := range steps {
-		b, _ := json.Marshal(map[string]any{
-			"status": st.status, "completed": st.done, "total": st.total,
-		})
+		b, _ := json.Marshal(st)
 		w.Write(b)
 		w.Write([]byte("\n"))
 		if flusher != nil {
@@ -302,7 +361,7 @@ func (s *Server) pull(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.Lock()
-	s.models[req.Model] = &Model{Name: req.Model, Family: "pulled", Size: 100 << 20}
+	s.models[req.Model] = &Model{Name: req.Model, Family: "pulled", Size: total}
 	s.mu.Unlock()
 }
 

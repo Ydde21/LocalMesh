@@ -30,6 +30,29 @@ var (
 	ErrEngineDown    = errors.New("engine unreachable")
 )
 
+// HTTPError is a non-2xx engine API response that isn't model-not-found.
+// Code drives Retryable classification (5xx → transient, other 4xx →
+// permanent).
+type HTTPError struct {
+	Code    int
+	Status  string
+	Message string
+}
+
+func (e *HTTPError) Error() string {
+	if e.Message == "" {
+		return "ollama: " + e.Status
+	}
+	return fmt.Sprintf("ollama: %s: %s", e.Status, e.Message)
+}
+
+// PermanentError is an engine failure retrying cannot fix — invalid
+// model references, auth failures, exhausted disk, unrecognized stream
+// errors. Pulls hitting this fail terminally instead of looping.
+type PermanentError struct{ Message string }
+
+func (e *PermanentError) Error() string { return e.Message }
+
 func NewOllama(base string) *Ollama {
 	if base == "" {
 		base = "http://127.0.0.1:11434"
@@ -42,7 +65,7 @@ func NewOllama(base string) *Ollama {
 }
 
 // classify turns an Ollama error body into a typed error when possible.
-func classify(status string, body string) error {
+func classify(code int, status, body string) error {
 	msg := strings.TrimSpace(body)
 	var e struct {
 		Error string `json:"error"`
@@ -53,7 +76,24 @@ func classify(status string, body string) error {
 	if strings.Contains(strings.ToLower(msg), "not found") {
 		return fmt.Errorf("%w: %s", ErrModelNotFound, msg)
 	}
-	return fmt.Errorf("ollama: %s: %s", status, msg)
+	return &HTTPError{Code: code, Status: status, Message: msg}
+}
+
+// pullStreamErr classifies an `error` field from Ollama's NDJSON pull
+// stream. Transient-sounding messages wrap ErrEngineDown; everything
+// else is PermanentError — an unrecognized pull failure must not loop
+// forever on retries.
+func pullStreamErr(msg string) error {
+	m := strings.ToLower(msg)
+	switch {
+	case strings.Contains(m, "timeout"), strings.Contains(m, "timed out"),
+		strings.Contains(m, "connection"), strings.Contains(m, "eof"),
+		strings.Contains(m, "temporarily"), strings.Contains(m, "unavailable"),
+		strings.Contains(m, "reset"):
+		return fmt.Errorf("%w: %s", ErrEngineDown, msg)
+	default:
+		return &PermanentError{Message: "ollama pull: " + msg}
+	}
 }
 
 // netErr wraps transport failures so callers can detect engine-down.
@@ -232,7 +272,7 @@ func (o *Ollama) Chat(ctx context.Context, req contracts.InferenceRequest, emit 
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return classify(resp.Status, string(b))
+		return classify(resp.StatusCode, resp.Status, string(b))
 	}
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
@@ -291,9 +331,10 @@ func (o *Ollama) Pull(ctx context.Context, model string, prog func(status string
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return classify(resp.Status, string(b))
+		return classify(resp.StatusCode, resp.Status, string(b))
 	}
 	var lastErr string
+	done := false
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for sc.Scan() {
@@ -304,14 +345,26 @@ func (o *Ollama) Pull(ctx context.Context, model string, prog func(status string
 		if p.Error != "" {
 			lastErr = p.Error
 		}
+		if p.Status == "success" {
+			done = true
+		}
 		if prog != nil {
 			prog(p.Status, p.Completed, p.Total)
 		}
 	}
 	if lastErr != "" {
-		return errors.New(lastErr)
+		return pullStreamErr(lastErr)
 	}
-	return sc.Err()
+	if err := sc.Err(); err != nil {
+		// Mid-stream transport failure — classify like a dial error.
+		return netErr(err)
+	}
+	if !done {
+		// Clean EOF before the engine's terminal frame: the pull never
+		// finished, so reporting success would be a lie.
+		return fmt.Errorf("%w: pull stream ended without a success frame", io.ErrUnexpectedEOF)
+	}
+	return nil
 }
 
 func (o *Ollama) Delete(ctx context.Context, model string) error {
@@ -325,7 +378,7 @@ func (o *Ollama) Delete(ctx context.Context, model string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return classify(resp.Status, string(b))
+		return classify(resp.StatusCode, resp.Status, string(b))
 	}
 	return nil
 }
