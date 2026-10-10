@@ -113,35 +113,37 @@ reconnect. Nothing else to restore.
 
 ---
 
-## Future: signed updates — DESIGN ONLY
+## Signed updates — IMPLEMENTED (opt-in, v0.6)
 
-**Not implemented.** This is the agreed shape for a later milestone;
-today's contract is the manual runbook above.
+The signed-release foundation and the safe manual update path are real
+(`scripts/release.sh`, `scripts/verify-release.sh`,
+`internal/release`, `internal/agent/update`,
+`localmesh-agent update`, `docs/releases.md`):
 
-Problems with letting an agent update itself: the binary holds the
-`lmn_` node credential and typically runs as a boot service — a
-compromised release channel pushing code to every node at once is
-remote-code-execution across the fleet. The design mitigates that at
-three layers:
+- **Signed release artifacts.** `SHA256SUMS` and `release-manifest.json`
+  are signed — minisign (`Ed`) when the maintainer key is present, or
+  `openssl dgst -sha256 -sign` as the fallback. A checksum proves
+  integrity; a signature proves *provenance*. `release.sh` refuses to
+  sign without `LOCALMESH_SIGNING_KEY`; `--unsigned` is an explicit
+  opt-out for dev builds only.
+- **Agent-side verification before any swap.** `localmesh-agent update
+  -release <dir|URL> -pubkey <path>` verifies the signature against a
+  pubkey the operator supplies out-of-band (never shipped inside the
+  release), then the artifact checksum, then platform + protocol
+  compatibility. Default is a dry-run; `--apply` stages, re-verifies,
+  and atomically renames the verified binary over the live path keeping
+  a `.bak` for rollback. It never executes the downloaded artifact.
+- **Explicit, never self-triggered.** There is no polling and no
+  automatic update path — an operator runs `update` deliberately, per
+  machine. A compromised release channel alone cannot push code.
 
-- **Signed release artifacts.** Each release binary is signed —
-  sigstore/cosign keyless signing, or minisign with a published release
-  public key — and signatures ship alongside `SHA256SUMS`. A checksum
-  proves integrity of a download; a signature proves *provenance*.
-- **Agent-side verification before any swap.** The agent carries a
-  fingerprint-pinned release verification key (pinned at join or in the
-  enrolled config — *not* fetched from the same channel as the binary).
-  An update is applied only if the signature verifies against that key.
-  Swap is atomic: download to a temp file on the same filesystem,
-  verify, `rename()` over the live path, and keep the previous binary
-  so a failed post-start health check can roll back automatically.
-- **Admin approval, never self-triggered.** Upgrades are dispatched as
-  a future `agent.upgrade` wire op initiated from the dashboard/API —
-  an explicit admin action per node or per cohort, like enrollment
-  approval. The agent never polls for or applies an update on its own,
-  so a stolen release key alone can't push code without an admin
-  signing off inside the cluster's own trust boundary.
+### Still design-only
 
-Open questions for that milestone: key rotation story for the release
-key, staged-rollout semantics in the scheduler, and whether
-`agent.upgrade` carries a per-target nonce to prevent replayed ops.
+- **Admin-dispatched `agent.upgrade` wire op** — fleet-wide coordinated
+  rollout from the dashboard (per-node or per-cohort approval inside
+  the cluster's trust boundary) is NOT implemented. The manual
+  `localmesh-agent update` runbook above is the current contract.
+- **Pinned release key in enrolled config** — today the pubkey travels
+  with the operator (`-pubkey` flag), not in `agent.json`.
+- Open questions: release-key rotation, staged-rollout semantics, and
+  whether `agent.upgrade` should carry a per-target nonce.

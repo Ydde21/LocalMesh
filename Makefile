@@ -63,15 +63,12 @@ clean-test-resources:
 bench:
 	@bash scripts/bench.sh
 
-# Cross-compile node agents for the supported platforms.
+# Versioned release: all 5 agent targets + server binaries, SHA256SUMS,
+# manifest, and a signature when LOCALMESH_SIGNING_KEY (minisign secret
+# key path) is set — without it the build still runs and warns. See
+# docs/releases.md. VERSION=v1.2.3 or a git tag/describe fallback.
 release:
-	@mkdir -p dist
-	GOOS=darwin  GOARCH=arm64  go build -ldflags '$(LDFLAGS)' -o dist/$(BINARY_AGENT)-darwin-arm64  ./cmd/localmesh-agent
-	GOOS=darwin  GOARCH=amd64  go build -ldflags '$(LDFLAGS)' -o dist/$(BINARY_AGENT)-darwin-amd64  ./cmd/localmesh-agent
-	GOOS=linux   GOARCH=amd64  go build -ldflags '$(LDFLAGS)' -o dist/$(BINARY_AGENT)-linux-amd64   ./cmd/localmesh-agent
-	GOOS=linux   GOARCH=arm64  go build -ldflags '$(LDFLAGS)' -o dist/$(BINARY_AGENT)-linux-arm64   ./cmd/localmesh-agent
-	GOOS=windows GOARCH=amd64  go build -ldflags '$(LDFLAGS)' -o dist/$(BINARY_AGENT)-windows-amd64.exe ./cmd/localmesh-agent
-	cd dist && shasum -a 256 * > SHA256SUMS
+	@bash scripts/release.sh
 
 dashboard:
 	cd web && npm install && npm run build

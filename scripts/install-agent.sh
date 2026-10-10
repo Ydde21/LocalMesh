@@ -55,7 +55,6 @@ case "$arch" in
   arm64|aarch64) arch="arm64" ;;
   *)             fail "unsupported architecture: $arch" ;;
 esac
-artifact="localmesh-agent-${os}-${arch}"
 log "platform: ${os}/${arch}"
 
 # --- locate a binary -------------------------------------------------------
@@ -66,17 +65,59 @@ elif [ -x "./bin/localmesh-agent" ]; then
   log "using repo build: ./bin/localmesh-agent"
   src="./bin/localmesh-agent"
 else
+  # Release artifacts are named localmesh-agent-<ver>-<os>-<arch>. The
+  # release manifest resolves the "latest" name indirection AND is the
+  # published inventory of what was actually released.
   if [ "$VERSION" = "latest" ]; then
-    url="https://github.com/${REPO}/releases/latest/download/${artifact}"
+    base="https://github.com/${REPO}/releases/latest/download"
+    mf="$(mktemp)"
+    curl -fsSL "$base/release-manifest.json" -o "$mf" \
+      || fail "no release manifest at $base — is the release published?"
+    # Flatten whitespace so pretty-printed JSON greps like one line.
+    artifact="$(tr -d '\n\t ' < "$mf" | grep -o "\"localmesh-agent-[0-9A-Za-z._-]*-${os}-${arch}\"" \
+      | head -1 | tr -d '"')"
+    [ -n "$artifact" ] || fail "no ${os}/${arch} artifact in the latest release manifest"
   else
-    url="https://github.com/${REPO}/releases/download/${VERSION}/${artifact}"
+    base="https://github.com/${REPO}/releases/download/${VERSION}"
+    artifact="localmesh-agent-${VERSION}-${os}-${arch}"
+    mf="$(mktemp)"
+    curl -fsSL "$base/release-manifest.json" -o "$mf" 2>/dev/null || mf=""
   fi
-  log "downloading $url"
+
+  log "downloading $base/$artifact"
   src="$(mktemp)"
-  if ! curl -fsSL "$url" -o "$src"; then
-    fail "download failed — check that release ${VERSION} exists for ${os}/${arch}"
+  if ! curl -fsSL "$base/$artifact" -o "$src"; then
+    fail "download failed — check that ${artifact} exists in release ${VERSION}"
   fi
   chmod +x "$src"
+
+  # Checksum verification (always). Signature verification when a
+  # pubkey + minisign are available — the artifact must never be
+  # trusted on transport alone (docs/releases.md).
+  if [ -n "$mf" ] && [ -s "$mf" ]; then
+    want="$(tr -d '\n\t ' < "$mf" | grep -o "\"${artifact}\"[^}]*" | grep -o '"sha256":"[a-f0-9]*"' | grep -o '[a-f0-9]\{64\}')"
+    if [ -n "$want" ]; then
+      got="$(shasum -a 256 "$src" | awk '{print $1}')"
+      [ "$got" = "$want" ] || fail "checksum mismatch for $artifact ($got != $want) — aborting"
+      log "checksum verified against release manifest"
+    fi
+  fi
+  if [ -n "${LOCALMESH_RELEASE_PUBKEY:-}" ] && command -v minisign >/dev/null 2>&1; then
+    sig="$(mktemp).minisig"
+    curl -fsSL "$base/SHA256SUMS.minisig" -o "$sig" 2>/dev/null || sig=""
+    sums="$(mktemp)"
+    curl -fsSL "$base/SHA256SUMS" -o "$sums" || fail "SHA256SUMS unavailable — cannot verify signature"
+    if [ -n "$sig" ]; then
+      minisign -Vm "$sums" -P "$(cat "$LOCALMESH_RELEASE_PUBKEY")" >/dev/null 2>&1 \
+        || minisign -V -x "$sig" -m "$sums" -P "$(cat "$LOCALMESH_RELEASE_PUBKEY")" \
+        || fail "signature verification failed — refusing to install"
+      grep -q "$(shasum -a 256 "$src" | awk '{print $1}')  \*\?$artifact" "$sums" \
+        || log "note: artifact not in signed SHA256SUMS (manifest checksum already verified)"
+      log "release signature verified"
+    fi
+  else
+    log "note: LOCALMESH_RELEASE_PUBKEY unset or minisign missing — checksum verified only"
+  fi
 fi
 
 # --- install ---------------------------------------------------------------

@@ -29,13 +29,28 @@ if ($env:LOCALMESH_AGENT_BIN -and (Test-Path $env:LOCALMESH_AGENT_BIN)) {
   Write-Host "  using local binary: $env:LOCALMESH_AGENT_BIN"
   Copy-Item $env:LOCALMESH_AGENT_BIN $bin -Force
 } else {
+  # Artifacts are named localmesh-agent-<ver>-windows-amd64.exe; the
+  # manifest resolves "latest" and provides the published checksum.
   if ($Version -eq "latest") {
-    $url = "https://github.com/$Repo/releases/latest/download/localmesh-agent-windows-amd64.exe"
+    $base = "https://github.com/$Repo/releases/latest/download"
   } else {
-    $url = "https://github.com/$Repo/releases/download/$Version/localmesh-agent-windows-amd64.exe"
+    $base = "https://github.com/$Repo/releases/download/$Version"
   }
-  Write-Host "  downloading $url"
-  Invoke-WebRequest -Uri $url -OutFile $bin -UseBasicParsing
+  $mfPath = Join-Path $env:TEMP "lm-manifest.json"
+  Invoke-WebRequest -Uri "$base/release-manifest.json" -OutFile $mfPath -UseBasicParsing
+  $mf = Get-Content $mfPath -Raw | ConvertFrom-Json
+  $artifact = ($mf.artifacts | Where-Object { $_.os -eq "windows" -and $_.arch -eq "amd64" } | Select-Object -First 1).file
+  if (-not $artifact) { throw "no windows/amd64 artifact in the release manifest" }
+  Write-Host "  downloading $base/$artifact"
+  Invoke-WebRequest -Uri "$base/$artifact" -OutFile $bin -UseBasicParsing
+
+  # Verify checksum against the release manifest (never trust transport alone).
+  $want = ($mf.artifacts | Where-Object { $_.file -eq $artifact }).sha256
+  if ($want) {
+    $got = (Get-FileHash $bin -Algorithm SHA256).Hash.ToLower()
+    if ($got -ne $want) { throw "checksum mismatch for $artifact ($got != $want) — aborting" }
+    Write-Host "  checksum verified against release manifest"
+  }
 }
 
 # Add to user PATH if missing
