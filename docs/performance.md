@@ -1,18 +1,87 @@
 # Performance & concurrency benchmarks
 
 Methodology and recorded results for LocalMesh's hot paths. Numbers are
-from an Apple M2, Go 1.27, `go test -bench` — they are indicative of
-relative cost, not SLAs. Reproduce with:
+indicative of relative cost, not SLAs. Reproduce the benchmark suite
+with:
 
 ```bash
-go test ./internal/server/scheduler -bench=. -benchtime=200x
+bash scripts/bench.sh            # or `make bench` once wired
 ```
+
+Environment overrides: `BENCHTIME` (default `1s`), `COUNT` (default
+`1`), `BENCHMEM` (default `1` → `-benchmem`), `BENCH` (benchmark regex),
+`LOCALMESH_TEST_DSN` (reuse an existing Postgres instead of docker).
+Compare runs on the same machine — e.g. `COUNT=5 bash scripts/bench.sh`
+or `benchstat old.txt new.txt`.
+
+## Control-plane overhead benchmarks (v0.6)
+
+`bench.sh` measures LocalMesh's **own infrastructure overhead** — the
+cost the control plane adds on top of an engine call — not model
+quality:
+
+| Benchmark | What it measures |
+|---|---|
+| `BenchmarkSchedulerSelect` | One scheduling pass (filter + score + rank) over synthetic hub views at 1/10/100/500 nodes, mixed model availability |
+| `BenchmarkClaimDueModelOps` | Real-Postgres queue ops: `claim_release_cycle` (claim+release, 1-deep queue), `backlog_1000` (single claim pass over 1000 queued ops on 10 nodes), `enqueue` (op INSERT) |
+| `BenchmarkNodeWSConnect` | Full agent connection lifecycle: TCP+WS upgrade, node-credential auth, hello/hello_ack, hub register (DB insert + SSE publish), close + unregister |
+| `BenchmarkGatewayDispatch` | `POST /v1/chat/completions` end-to-end through server + in-process agent + fakeollama, vs a direct call to the same fakeollama |
+| `BenchmarkBrokerPublish` / `BenchmarkBrokerSubscribe` | SSE broker publish fanout at 0–200 subscribers; subscribe+unsubscribe churn |
+
+**Methodology / caveats.** All in-process on loopback: fakeollama
+(`ChatDelay=0`) removes real engine/network/model variance, so results
+bound control-plane overhead rather than predict production latency.
+Postgres runs in a throwaway `postgres:16-alpine` container — pgx
+round-trips over loopback TCP are real, but co-located (no LAN/WAN
+distance). The dev server runs plain HTTP (no TLS). HTTP keep-alive is
+reused, so numbers are steady-state, not connection-setup cost (except
+`BenchmarkNodeWSConnect`, which deliberately measures setup+teardown —
+its dials carry rotating `X-Forwarded-For` under `TrustProxy` to
+simulate distinct LAN clients under the 30-conn/min/IP limiter; the
+limiter still executes each dial). Benchmark functions re-invoke during
+calibration, so seeds live in parent scope and loops restore state.
+
+**Current measurements** — Apple M2 (arm64), macOS Darwin 27.0.0,
+`go1.27.1`, docker 29.8.0 / postgres:16-alpine, `-benchtime=1s
+-count=1`, recorded 2026-10-10:
+
+| Benchmark | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| `SchedulerSelect/nodes=1` | 795 | 880 | 18 |
+| `SchedulerSelect/nodes=10` | 2 474 | 3 089 | 46 |
+| `SchedulerSelect/nodes=100` | 22 572 | 24 954 | 350 |
+| `SchedulerSelect/nodes=500` | 107 194 | 124 026 | 1 740 |
+| `ClaimDueModelOps/claim_release_cycle` | 739 467 | 3 801 | 55 |
+| `ClaimDueModelOps/backlog_1000` | 755 340 | 6 912 | 97 |
+| `ClaimDueModelOps/enqueue` | 310 646 | 1 435 | 22 |
+| `NodeWSConnect/establish_teardown` | 1 318 584 | 58 357 | 563 |
+| `GatewayDispatch/direct_engine` | 56 076 | 12 896 | 181 |
+| `GatewayDispatch/control_plane_buffered` | 1 641 905 | 157 737 | 925 |
+| `GatewayDispatch/control_plane_stream` | 1 992 521 | 162 872 | 1 019 |
+| `BrokerPublish/subscribers=0` | 13.9 | 0 | 0 |
+| `BrokerPublish/subscribers=1` | 148 | 0 | 0 |
+| `BrokerPublish/subscribers=8` | 341 | 0 | 0 |
+| `BrokerPublish/subscribers=64` | 1 412 | 0 | 0 |
+| `BrokerPublish/subscribers=200` | 3 936 | 0 | 0 |
+| `BrokerSubscribe` | 336 | 2 512 | 5 |
+
+Reading it: the control plane adds **~1.6 ms** to a non-streaming chat
+request on this machine (1.64 ms full-path vs 56 µs direct) — that is
+API-key auth + workload INSERT + scheduling pass + `ListNodes` snapshot
++ WS dispatch + agent↔engine hop + workload finalize, against a
+zero-delay engine. The claim pass barely grows at 1000 queued ops
+(739 µs → 755 µs): SKIP-LOCKED claim cost is dominated by round-trip
+and plan overhead, not backlog depth. Scheduling at 500 nodes stays
+~107 µs — well below inference latency at any realistic fleet size.
 
 ## Scheduler pick latency
 
 `BenchmarkPick` measures one full scheduling decision — candidate
 filtering, resource checks, scoring, ranking — against N simulated
-online nodes.
+online nodes, all eligible. (Table recorded earlier in development on
+the same machine; rerun `bash scripts/bench.sh` for current numbers —
+v0.6 `BenchmarkSchedulerSelect` adds the mixed-availability filter
+path.)
 
 | Nodes | Time/pick | Allocs/pick |
 |-------|-----------|-------------|
