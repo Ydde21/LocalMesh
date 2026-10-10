@@ -9,6 +9,7 @@
 //	localmesh-agent doctor [--config path] [--ca-file ca.pem]
 //	localmesh-agent service install|uninstall|start|stop|status [--config path]
 //	localmesh-agent status
+//	localmesh-agent update -release <dir-or-url> -pubkey <keyfile> [--apply]
 package main
 
 import (
@@ -50,6 +51,8 @@ func main() {
 		cmdService()
 	case "status":
 		cmdStatus()
+	case "update":
+		cmdUpdate()
 	case "version":
 		fmt.Println(agent.Current())
 	default:
@@ -68,6 +71,7 @@ Commands:
   doctor    check connectivity, credentials, engine, and telemetry
   service   install|uninstall|start|stop|status the OS service
   status    show local agent configuration
+  update    verify and install a signed agent release (opt-in, dry-run default)
 
 Run "localmesh-agent join -h" or "localmesh-agent discover -h" for options.
 `)
