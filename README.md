@@ -98,6 +98,9 @@ make build && ./bin/localmesh-agent join \
 Create an enrollment token in the dashboard (**Settings → Device
 enrollment**) or via the API. New devices land in **pending** until you
 approve them — then they connect, report hardware, and start serving.
+On the same LAN the agent can also find the cluster itself:
+`localmesh-agent join -discover` browses mDNS advertisements and pins
+the cluster CA fingerprint you confirm.
 
 Pre-flight checks and fleet rollout:
 
@@ -194,8 +197,13 @@ make release                      # cross-compile agents → dist/
 - [docs/api.md](docs/api.md) — gateway + admin API reference
 - [docs/onboarding.md](docs/onboarding.md) — installing agents, enrollment, approvals
 - [docs/security.md](docs/security.md) — trust model, credentials, privacy
-- [docs/reliability.md](docs/reliability.md) — failure semantics: restarts, crashes, blips
+- [docs/reliability.md](docs/reliability.md) — failure semantics + single-active ownership
 - [docs/backup-recovery.md](docs/backup-recovery.md) — backup/restore runbook
+- [docs/networking.md](docs/networking.md) — LAN discovery, TLS endpoints, remote joins
+- [docs/performance.md](docs/performance.md) — benchmark methodology + results
+- [docs/testing.md](docs/testing.md) — test infrastructure and cleanup contract
+- [docs/ci.md](docs/ci.md) — CI matrix: what each job proves
+- [docs/agent-updates.md](docs/agent-updates.md) — release + update security model
 - [docs/ha-design.md](docs/ha-design.md) — active-standby design (future, not built)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 
