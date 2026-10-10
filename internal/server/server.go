@@ -199,11 +199,17 @@ func (s *Server) Start(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
+		// Drop agent conns FIRST so WS handlers (and pending dispatches)
+		// unwind instead of eating the whole shutdown window — long SSE
+		// streams otherwise block Shutdown for the full timeout, and the
+		// orphan sweep below would run on an expired context.
+		s.hub.CloseAll("control plane shutting down")
 		shCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		s.httpSrv.Shutdown(shCtx)
 		// Fail anything still in-flight so rows don't linger 'running'.
-		s.st.FailOrphanedWorkloads(shCtx, "control-plane shutting down")
+		// Fresh context: shCtx may be spent waiting on handlers.
+		s.st.FailOrphanedWorkloads(context.Background(), "control-plane shutting down")
 		st.Close()
 		return nil
 	case err := <-errCh:

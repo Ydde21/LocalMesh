@@ -138,18 +138,13 @@ func TestWorkloadOrphanedByRestart(t *testing.T) {
 	}
 }
 
-// A graceful restart with a stream in flight cannot finalize the row
-// itself: httpSrv.Shutdown blocks out the full 10s shutdown context on
-// the live SSE connection (agent sockets are hijacked and server.go
-// never calls hub.CloseAll, so the dispatch keeps running), and the
-// shutdown-path FailOrphanedWorkloads then executes with an already-
-// expired context — a silent no-op. Finalization deterministically
-// falls to the next boot's sweep. Asserted: client outage stays bounded
-// and the row lands 'failed' via the boot sweep. (Moving hub.CloseAll
-// ahead of Shutdown in server.go would change the expected error to
-// 'control-plane shutting down' and shorten the outage — see the
-// ha-design/reliability notes.)
-func TestGracefulRestartDefersInFlightWork(t *testing.T) {
+// Graceful shutdown drops agent conns BEFORE httpSrv.Shutdown, so
+// in-flight workloads finalize synchronously: conn close → unregister →
+// failAllPending("node disconnected") → row 'failed'. The boot sweep is
+// only the crash backstop; a clean stop must not defer work rows to it.
+// (Before the CloseAll ordering, the SSE stream ate the 10s drain and the
+// sweep ran on an expired ctx — a silent no-op.)
+func TestGracefulRestartFinalizesInFlightWork(t *testing.T) {
 	ol := fakeollama.New(fakeollama.Model{Name: "gs:1", Family: "f", Size: 1 << 30})
 	defer ol.Close()
 	ol.ChatDelay = 300 * time.Millisecond
@@ -177,17 +172,19 @@ func TestGracefulRestartDefersInFlightWork(t *testing.T) {
 		t.Fatal("client stream hung on graceful shutdown")
 	}
 
-	// A's own sweep could not write — B's boot sweep finalized the row.
+	// Shutdown finalized the row synchronously via conn drop —
+	// 'node disconnected', not the boot sweep's message. Read it back
+	// through B (same DB): the error string proves who finalized it.
 	b := startServerOn(t, dsn, dataDir, addr, ol)
 	code, wl, _ := b.env().adminReq(t, "GET", "/api/v1/workloads/"+wlID, nil)
 	if code != 200 {
 		t.Fatalf("get workload: %d", code)
 	}
 	if wl["status"] != "failed" {
-		t.Fatalf("in-flight workload status=%v after graceful restart, want failed", wl["status"])
+		t.Fatalf("in-flight workload status=%v after graceful stop, want failed", wl["status"])
 	}
-	if !strings.Contains(wl["error"].(string), "interrupted by control-plane restart") {
-		t.Fatalf("finalizer was %q, want next-boot sweep (shutdown ctx expires during the 10s drain)", wl["error"])
+	if !strings.Contains(wl["error"].(string), "node disconnected") {
+		t.Fatalf("finalizer was %q, want synchronous conn-drop finalization", wl["error"])
 	}
 }
 
