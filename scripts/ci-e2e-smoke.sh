@@ -329,5 +329,50 @@ code="$(curl -s -o "$tmp/cp.json" -w '%{http_code}' -H "Authorization: Bearer $A
   || bad "promoted_from_standby unset: $(cat "$tmp/cp.json")"
 pass "standby promoted on primary crash — epoch 2, full API serving"
 
+# --- post-failover inference --------------------------------------------------
+# The agent still points at the dead primary — repointing it at the
+# promoted standby is exactly what a load balancer / stable DNS name
+# does for a real failover. Then: reconnect + inference through the
+# promoted instance.
+step "post-failover inference"
+kill "$agent_pid" >/dev/null 2>&1 || true
+agent_pid=""
+py - "$CFG" "$SBASE" <<'EOF'
+import json,sys
+cfg=json.load(open(sys.argv[1]))
+cfg["server_url"]=sys.argv[2]
+json.dump(cfg,open(sys.argv[1],"w"),indent=2)
+EOF
+pass "agent repointed at promoted standby (LB cutover simulation)"
+
+"$tmp/localmesh-agent" run >>"$tmp/agent.log" 2>&1 &
+agent_pid=$!
+online=0
+for _ in $(seq 60); do
+  wait_pid_or_bad "$agent_pid" "agent run (post-failover)"
+  code="$(curl -s -o "$tmp/nodes.json" -w '%{http_code}' \
+    -H "Authorization: Bearer $ADMIN" "$SBASE/api/v1/nodes")"
+  if [ "$code" = "200" ]; then
+    got="$(py - "$tmp/nodes.json" "$NODE_ID" <<'EOF' 2>/dev/null || true
+import json,sys
+for n in json.load(open(sys.argv[1])):
+    if n.get("id")==sys.argv[2] and n.get("online"): print("1")
+EOF
+)"
+    [ "$got" = "1" ] && { online=1; break; }
+  fi
+  sleep 1
+done
+[ "$online" -eq 1 ] || bad "node never reconnected to the promoted standby"
+pass "node reconnected to promoted standby (same CA, same cluster identity)"
+
+code="$(curl -s -o "$tmp/resp.json" -w '%{http_code}' -X POST "$SBASE/v1/chat/completions" \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+  -d '{"model":"llama3.1:8b","messages":[{"role":"user","content":"post-failover"}],"stream":false}')"
+[ "$code" = "200" ] || bad "post-failover chat → $code: $(cat "$tmp/resp.json")"
+grep -q 'localmesh-echo' "$tmp/resp.json" \
+  || bad "post-failover chat content: $(cat "$tmp/resp.json")"
+pass "inference works through the promoted standby — full control-plane continuity"
+
 step "ci-e2e-smoke: PASS"
-echo "enroll → approve → connect → capability → infer all verified on real binaries"
+echo "enroll → approve → connect → capability → infer → standby promotion → post-failover infer all verified on real binaries"
