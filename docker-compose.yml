@@ -48,6 +48,13 @@ services:
       LOCALMESH_ADMIN_KEY: ${LOCALMESH_ADMIN_KEY:-}
       LOCALMESH_HOSTNAMES: server,localmesh-server,localhost
       LOCALMESH_CORS_ORIGINS: ""
+      # mDNS LAN advertisement (_localmesh._tcp). Default on. NOTE: in
+      # Docker's NAT'd networking this only advertises inside the
+      # container network — real LAN discovery needs a Linux host with
+      # `network_mode: host` on the server service, or a bare-metal
+      # server install. Set LOCALMESH_DISCOVERY=off to disable.
+      LOCALMESH_DISCOVERY: ${LOCALMESH_DISCOVERY:-on}
+      LOCALMESH_CLUSTER_NAME: ${LOCALMESH_CLUSTER_NAME:-localmesh}
     volumes:
       - localmesh-data:/data
     ports:
