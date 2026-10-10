@@ -23,6 +23,13 @@ type Config struct {
 	Hostnames   []string // extra SANs for the server cert
 	CORSOrigins []string // allowed dashboard origins
 	LogLevel    string
+	// Discovery controls mDNS (_localmesh._tcp) advertisement on the
+	// LAN. Default on — it announces only the service port, cluster
+	// name, and CA fingerprint (all public info) and never authorizes
+	// anything by itself. Disable on networks where multicast is
+	// unwanted or unavailable.
+	Discovery   bool
+	ClusterName string // advertised instance name (default "localmesh")
 }
 
 func ConfigFromEnv() Config {
@@ -50,6 +57,11 @@ func ConfigFromEnv() Config {
 	if os.Getenv("LOCALMESH_TRUST_PROXY") == "1" || os.Getenv("LOCALMESH_TRUST_PROXY") == "true" {
 		c.TrustProxy = true
 	}
+	c.Discovery = true
+	if v := os.Getenv("LOCALMESH_DISCOVERY"); v == "0" || v == "false" || v == "off" {
+		c.Discovery = false
+	}
+	c.ClusterName = envStr("LOCALMESH_CLUSTER_NAME", "localmesh")
 	if c.DevInsecureHTTP && len(c.CORSOrigins) == 0 {
 		c.CORSOrigins = []string{"http://localhost:3000", "http://127.0.0.1:3000"}
 	}
