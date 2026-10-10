@@ -16,9 +16,16 @@ export default function OverviewPage() {
   const { data: ops } = useModelOps();
 
   const memPct = ov && ov.memory_bytes > 0 ? (ov.memory_used / ov.memory_bytes) * 100 : 0;
-  const activeOps = (ops ?? []).filter(
-    (o) => o.status === "dispatched" || o.status === "running" || o.status === "pending"
-  ).length;
+  // Prefer server-computed counts when the overview emits them; otherwise
+  // reuse the shared ops cache — queued (waiting/backoff) vs in-flight.
+  const allOps = ops ?? [];
+  const activeOps =
+    ov?.model_ops_active ??
+    allOps.filter((o) => o.status === "dispatched" || o.status === "running").length;
+  const queuedOps =
+    ov?.model_ops_queued ??
+    allOps.filter((o) => o.status === "queued" || o.status === "pending").length;
+  const opsTotal = activeOps + queuedOps;
 
   return (
     <div className="mx-auto max-w-[1200px] px-6 py-6">
@@ -32,7 +39,7 @@ export default function OverviewPage() {
       </header>
 
       {/* Top stats */}
-      <div className={`grid grid-cols-2 gap-3 ${activeOps > 0 ? "md:grid-cols-5" : "md:grid-cols-4"}`}>
+      <div className={`grid grid-cols-2 gap-3 ${opsTotal > 0 ? "md:grid-cols-5" : "md:grid-cols-4"}`}>
         <Panel className="fade-up px-4 py-4">
           <Stat
             label="Devices online"
@@ -61,12 +68,12 @@ export default function OverviewPage() {
           />
           <Meter className="mt-2" value={memPct} />
         </Panel>
-        {activeOps > 0 && (
+        {opsTotal > 0 && (
           <Panel className="fade-up px-4 py-4">
             <Stat
               label="Model ops"
-              value={activeOps}
-              sub="pulls/deletes in progress"
+              value={opsTotal}
+              sub={`${activeOps} in flight · ${queuedOps} queued`}
               accent="var(--color-idle)"
             />
           </Panel>

@@ -1,13 +1,17 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { useNodes, useNode, api } from "@/lib/api";
-import { fmtBytes, fmtAgo, fmtMs, fmtUptime, osLabel } from "@/lib/format";
+import {
+  useNodes, useNode, useEnrollments, useDiscoveryStatus, useOverview, api,
+} from "@/lib/api";
+import { fmtBytes, fmtAgo, fmtMs, fmtUptime, fmtVersion, agentVersion, osLabel } from "@/lib/format";
 import { Panel, Meter, Empty } from "@/components/ui";
 import { NodeBadge } from "@/components/status";
 import type { Node } from "@/lib/types";
-import { X, Cpu, HardDrive, Zap, RefreshCw } from "lucide-react";
+import {
+  X, Cpu, HardDrive, Zap, RefreshCw, Plus, Copy, Check, Wifi, Package,
+} from "lucide-react";
 import { useSWRConfig } from "swr";
 
 export default function DevicesPage() {
@@ -22,22 +26,32 @@ function DevicesInner() {
   const params = useSearchParams();
   const selectedId = params.get("id");
   const { data: nodes } = useNodes();
+  const [addOpen, setAddOpen] = useState(false);
 
   return (
     <div className="mx-auto max-w-[1200px] px-6 py-6">
-      <header className="mb-6">
-        <h1 className="text-[19px] font-semibold tracking-tight">Devices</h1>
-        <p className="mt-0.5 text-[12.5px] text-[var(--color-text-dim)]">
-          Machines connected to your cluster
-        </p>
+      <header className="mb-6 flex items-end justify-between">
+        <div>
+          <h1 className="text-[19px] font-semibold tracking-tight">Devices</h1>
+          <p className="mt-0.5 text-[12.5px] text-[var(--color-text-dim)]">
+            Machines connected to your cluster
+          </p>
+        </div>
+        <button className="btn btn-primary btn-sm" onClick={() => setAddOpen(true)}>
+          <Plus size={13} /> Add device
+        </button>
       </header>
 
       {(!nodes || nodes.length === 0) ? (
         <Panel>
           <Empty
             title="No devices connected"
-            hint="Enroll machines from Settings → Enrollment tokens, then run localmesh-agent join on each device."
-          />
+            hint="Generate an enrollment token, then run localmesh-agent join on the machine — it appears here after you approve it."
+          >
+            <button className="btn btn-primary btn-sm" onClick={() => setAddOpen(true)}>
+              <Plus size={13} /> Add device
+            </button>
+          </Empty>
         </Panel>
       ) : (
         <div className="grid gap-3">
@@ -47,6 +61,7 @@ function DevicesInner() {
         </div>
       )}
 
+      {addOpen && <AddDeviceDialog onClose={() => setAddOpen(false)} />}
       {selectedId && <DeviceDrawer id={selectedId} />}
     </div>
   );
@@ -72,6 +87,21 @@ function NodeRow({ node, selected }: { node: Node; selected: boolean }) {
         <div className="flex items-center gap-2.5">
           <div className="text-[14px] font-medium">{node.name}</div>
           <NodeBadge node={node} />
+          {agentVersion(node) ? (
+            <span
+              className="mono text-[11px] text-[var(--color-text-faint)]"
+              title={`agent ${agentVersion(node)}`}
+            >
+              {fmtVersion(agentVersion(node))}
+            </span>
+          ) : (
+            <span
+              className="badge badge-neutral !px-1.5 !py-0"
+              title="agent predates version reporting (pre-v0.5) — still compatible"
+            >
+              legacy
+            </span>
+          )}
         </div>
         <div className="mt-0.5 text-[11.5px] text-[var(--color-text-faint)]">
           {osLabel(node.hardware.os)} {node.hardware.arch} · {node.hardware.hostname}
@@ -228,6 +258,15 @@ function DeviceDrawer({ id }: { id: string }) {
             <div className="space-y-2">
               <KV icon={Cpu} label="CPU" value={`${node.hardware.cpu_model} (${node.hardware.cpu_cores} cores)`} />
               <KV icon={HardDrive} label="Memory" value={fmtBytes(node.hardware.memory_bytes)} />
+              <KV
+                icon={Package}
+                label="Agent"
+                value={
+                  agentVersion(node)
+                    ? fmtVersion(agentVersion(node))
+                    : "legacy — pre-v0.5 (no version report)"
+                }
+              />
               {(node.hardware.gpus ?? []).map((g, i) => (
                 <KV key={i} icon={Zap} label={g.vendor || "GPU"}
                   value={`${g.name}${g.shared_vram ? " (unified memory)" : g.vram_bytes ? ` · ${fmtBytes(g.vram_bytes)}` : ""}`} />
@@ -436,6 +475,257 @@ function KV2({ label, value }: { label: string; value: string }) {
     <div>
       <div className="text-[10.5px] text-[var(--color-text-faint)]">{label}</div>
       <div className="mono text-[12px]">{value}</div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Add-device onboarding: mint a one-time token → run `localmesh-agent join`
+// → approve the pending request. LAN discovery (when the server advertises
+// it) offers the shorter `join --discover` path.
+
+function StepHead({ n, title, sub }: { n: number; title: string; sub?: string }) {
+  return (
+    <div>
+      <div className="flex items-center gap-2">
+        <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full bg-[var(--color-accent-soft)] text-[10.5px] font-semibold text-[var(--color-accent)]">
+          {n}
+        </span>
+        <span className="text-[12.5px] font-medium">{title}</span>
+      </div>
+      {sub && (
+        <div className="mt-0.5 pl-[26px] text-[11px] text-[var(--color-text-faint)]">{sub}</div>
+      )}
+    </div>
+  );
+}
+
+function AddDeviceDialog({ onClose }: { onClose: () => void }) {
+  const [token, setToken] = useState("");
+  const [genErr, setGenErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [actErr, setActErr] = useState("");
+  const [copied, setCopied] = useState("");
+  const { data: disco } = useDiscoveryStatus();
+  const { data: ov } = useOverview();
+  const { data: pending, mutate: mutPending } = useEnrollments("pending");
+  const { mutate } = useSWRConfig();
+  const didInit = useRef(false);
+
+  const genToken = async () => {
+    setBusy(true);
+    setGenErr("");
+    try {
+      // `label` is the field the server reads today; `name` is the alias in
+      // the v0.5 contract — send both so either spelling works.
+      const res = await api<{ token: string }>("POST", "/enrollment-tokens", {
+        label: "",
+        name: "",
+        max_uses: 1,
+      });
+      setToken(res.token);
+      mutate("/enrollment-tokens");
+    } catch (e) {
+      setGenErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    // The ref also stops StrictMode's double-effect in dev from minting two
+    // tokens per dialog open.
+    if (didInit.current) return;
+    didInit.current = true;
+    void genToken();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const serverUrl = ov?.server_url || "https://<control-plane>:<port>";
+  const joinCmd = token
+    ? `localmesh-agent join --server ${serverUrl} --token ${token}` +
+      (disco?.ca_fingerprint ? ` --ca-fingerprint ${disco.ca_fingerprint}` : "")
+    : "";
+
+  const copy = (key: string, text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopied(key);
+    setTimeout(() => setCopied((c) => (c === key ? "" : c)), 1500);
+  };
+
+  const act = async (path: string) => {
+    setActErr("");
+    try {
+      await api("POST", path);
+      mutPending();
+      mutate("/nodes");
+    } catch (e) {
+      setActErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 backdrop-blur-[2px]"
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Add device"
+        className="panel fade-up max-h-[92vh] w-full max-w-[560px] overflow-y-auto px-5 py-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="text-[15px] font-semibold">Add device</h2>
+            <p className="mt-0.5 text-[12px] text-[var(--color-text-dim)]">
+              Enroll a machine — it joins the cluster after your approval.
+            </p>
+          </div>
+          <button className="btn btn-sm -mr-1 -mt-1" onClick={onClose} aria-label="Close dialog">
+            <X size={14} />
+          </button>
+        </div>
+
+        <div className="mt-5 space-y-5">
+          {/* Step 1 — one-time enrollment token */}
+          <section>
+            <StepHead
+              n={1}
+              title="Enrollment token"
+              sub="Single use, expires in 24h, shown only once."
+            />
+            <div className="mt-2 pl-[26px]">
+              {busy && !token && (
+                <div className="text-[12px] text-[var(--color-text-faint)]">Generating…</div>
+              )}
+              {token && (
+                <div className="codeblock flex items-center justify-between">
+                  <span>{token}</span>
+                  <button className="btn btn-sm ml-3" onClick={() => copy("token", token)}>
+                    {copied === "token" ? <Check size={12} /> : <Copy size={12} />} Copy
+                  </button>
+                </div>
+              )}
+              {genErr && (
+                <div className="flex items-center gap-3">
+                  <span className="text-[12px] text-[var(--color-danger)]">{genErr}</span>
+                  <button className="btn btn-sm" onClick={genToken} disabled={busy}>
+                    <RefreshCw size={11} /> Try again
+                  </button>
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* Step 2 — join command */}
+          <section>
+            <StepHead
+              n={2}
+              title="Run this on the device"
+              sub="Replace <control-plane>:<port> with this server's reachable address (e.g. https://192.168.1.10:8443)."
+            />
+            <div className="mt-2 pl-[26px]">
+              {joinCmd ? (
+                <div className="codeblock flex items-center justify-between">
+                  <span>{joinCmd}</span>
+                  <button className="btn btn-sm ml-3" onClick={() => copy("cmd", joinCmd)}>
+                    {copied === "cmd" ? <Check size={12} /> : <Copy size={12} />} Copy
+                  </button>
+                </div>
+              ) : (
+                <div className="text-[12px] text-[var(--color-text-faint)]">
+                  The command appears once the token is generated.
+                </div>
+              )}
+              <p className="mt-2 text-[11px] leading-relaxed text-[var(--color-text-faint)]">
+                <code className="mono">--ca-fingerprint sha256:…</code> pins the cluster CA —
+                recommended so the agent verifies it is talking to your server.
+              </p>
+              {disco?.advertising && (
+                <div className="mt-2.5 flex items-start gap-2.5 rounded-md border border-[var(--color-accent)]/25 bg-[var(--color-accent-soft)] px-3 py-2.5">
+                  <Wifi size={13} className="mt-0.5 shrink-0 text-[var(--color-accent)]" />
+                  <div className="text-[11.5px] leading-relaxed text-[var(--color-text-dim)]">
+                    LAN discovery is on{disco.cluster_name ? ` (“${disco.cluster_name}”)` : ""} —
+                    devices on this network can instead run{" "}
+                    <code className="mono text-[var(--color-text)]">localmesh-agent join --discover</code>
+                    {disco.ca_fingerprint && (
+                      <>
+                        {" "}and verify CA fingerprint{" "}
+                        <code
+                          className="mono text-[var(--color-text)]"
+                          title={disco.ca_fingerprint}
+                        >
+                          {disco.ca_fingerprint.length > 24
+                            ? `${disco.ca_fingerprint.slice(0, 24)}…`
+                            : disco.ca_fingerprint}
+                        </code>
+                      </>
+                    )}
+                    .
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* Step 3 — approve the pending request */}
+          <section>
+            <StepHead
+              n={3}
+              title="Approve the device"
+              sub="Enrollment requests land here — nothing joins without approval."
+            />
+            <div className="mt-2 space-y-2 pl-[26px]">
+              {(pending ?? []).length === 0 ? (
+                <div className="text-[12px] text-[var(--color-text-faint)]">
+                  No pending requests — the device appears here after it contacts the control plane.
+                </div>
+              ) : (
+                (pending ?? []).map((r) => (
+                  <div
+                    key={r.id}
+                    className="flex items-center gap-3 rounded-md border border-[var(--color-warn)]/25 bg-[var(--color-warn-soft)] px-3.5 py-2.5"
+                  >
+                    <div>
+                      <div className="text-[13px] font-medium">{r.name}</div>
+                      <div className="text-[11px] text-[var(--color-text-dim)]">
+                        {r.hardware.cpu_model} · {r.hardware.cpu_cores} cores · {r.hardware.os}/{r.hardware.arch} · {fmtAgo(r.created_at)}
+                      </div>
+                    </div>
+                    <div className="ml-auto flex gap-2">
+                      <button
+                        className="btn btn-sm btn-primary"
+                        onClick={() => act(`/enrollments/${r.id}/approve`)}
+                      >
+                        <Check size={12} /> Approve
+                      </button>
+                      <button
+                        className="btn btn-sm btn-danger"
+                        onClick={() => act(`/enrollments/${r.id}/deny`)}
+                      >
+                        <X size={12} /> Deny
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+              {actErr && (
+                <div className="text-[12px] text-[var(--color-danger)]">{actErr}</div>
+              )}
+            </div>
+          </section>
+        </div>
+      </div>
     </div>
   );
 }

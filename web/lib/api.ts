@@ -91,9 +91,32 @@ export function usePlacement() {
   });
 }
 
+// Shared SWR key for the ops list — large enough to cover queued + active
+// ops plus ~20 finished rows for the history section. Import this for
+// mutate() calls so the key never drifts.
+export const MODEL_OPS_KEY = "/model-operations?limit=60";
+
 export function useModelOps() {
-  return useSWR<T.ModelOperation[]>("/model-operations?limit=30", fetcher, {
+  return useSWR<T.ModelOperation[]>(MODEL_OPS_KEY, fetcher, {
     refreshInterval: 3000,
+  });
+}
+
+// Control-plane version. Unauthenticated upstream, absent on pre-v0.5
+// servers — no retry so a 404 doesn't loop.
+export function useVersion() {
+  return useSWR<T.VersionInfo>("/version", fetcher, {
+    shouldRetryOnError: false,
+    errorRetryCount: 0,
+  });
+}
+
+// LAN discovery status (mDNS advertising). 404 = server built without the
+// feature — consumers should hide the UI, so disable retries.
+export function useDiscoveryStatus() {
+  return useSWR<T.DiscoveryStatus>("/discovery/status", fetcher, {
+    shouldRetryOnError: false,
+    errorRetryCount: 0,
   });
 }
 

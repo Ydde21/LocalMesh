@@ -1,23 +1,33 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import { useModels, useModelOps, useNodes, usePlacement, api } from "@/lib/api";
-import { fmtBytes, fmtAgo } from "@/lib/format";
+import {
+  useModels, useModelOps, useNodes, usePlacement, api, MODEL_OPS_KEY,
+} from "@/lib/api";
+import { fmtBytes, fmtAgo, fmtDur, fmtIn } from "@/lib/format";
 import { Panel, Empty, Meter } from "@/components/ui";
 import { StatusBadge } from "@/components/status";
 import { ConfirmDialog } from "@/components/confirm";
 import { useSWRConfig } from "swr";
-import { ChevronDown, ChevronRight, Download, Trash2, X } from "lucide-react";
+import {
+  ChevronDown, ChevronRight, Download, RotateCw, Trash2, X,
+} from "lucide-react";
 import type { ModelOperation, Node, PlacementEntry } from "@/lib/types";
 
-// Ops still in flight on a node. "pending" is included defensively — the
-// control plane currently emits dispatched/running.
-const ACTIVE_STATUSES = new Set<ModelOperation["status"]>([
-  "dispatched",
-  "pending",
-  "running",
-]);
+// Queue taxonomy:
+//   queued   — waiting for a concurrency slot, or retry backoff when
+//              next_attempt_at is set ("pending" is the legacy spelling)
+//   active   — dispatched to the agent or running on it
+//   history  — terminal: succeeded/completed/failed/cancelled/interrupted
+const QUEUED_STATUSES = new Set<ModelOperation["status"]>(["queued", "pending"]);
+const ACTIVE_STATUSES = new Set<ModelOperation["status"]>(["dispatched", "running"]);
+const isQueued = (o: ModelOperation) => QUEUED_STATUSES.has(o.status);
 const isActive = (o: ModelOperation) => ACTIVE_STATUSES.has(o.status);
+const byCreatedAsc = (a: ModelOperation, b: ModelOperation) =>
+  a.created_at.localeCompare(b.created_at);
+
+// History shows only the most recent finished ops.
+const HISTORY_LIMIT = 20;
 
 interface RemoveTarget {
   model: string;
@@ -41,11 +51,12 @@ export default function ModelsPage() {
   const [removeErr, setRemoveErr] = useState("");
   const [opErr, setOpErr] = useState("");
   const [cancelling, setCancelling] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState<string | null>(null);
 
   const refresh = () => {
     mutate("/models");
     mutate("/models/placement");
-    mutate("/model-operations?limit=30");
+    mutate(MODEL_OPS_KEY);
     mutate("/nodes");
   };
 
@@ -78,8 +89,11 @@ export default function ModelsPage() {
   }, [nodes]);
 
   const allOps = ops ?? [];
-  const activeOps = allOps.filter(isActive);
-  const pastOps = allOps.filter((o) => !isActive(o));
+  const queuedOps = allOps.filter(isQueued).sort(byCreatedAsc);
+  const activeOps = allOps.filter(isActive).sort(byCreatedAsc);
+  const pastOps = allOps
+    .filter((o) => !isQueued(o) && !isActive(o))
+    .slice(0, HISTORY_LIMIT);
 
   const confirmRemove = async () => {
     if (!removing) return;
@@ -112,11 +126,29 @@ export default function ModelsPage() {
     setOpErr("");
     try {
       await api("POST", `/model-operations/${id}/cancel`);
-      mutate("/model-operations?limit=30");
+      mutate(MODEL_OPS_KEY);
     } catch (e) {
       setOpErr(e instanceof Error ? e.message : String(e));
     } finally {
       setCancelling(null);
+    }
+  };
+
+  // Re-dispatch a failed pull to the same node — the backend creates a
+  // fresh op row rather than resurrecting the dead one.
+  const retryOp = async (o: ModelOperation) => {
+    setRetrying(o.id);
+    setOpErr("");
+    try {
+      await api("POST", "/models/pull", {
+        model: o.model,
+        node_ids: [o.node_id],
+      });
+      refresh();
+    } catch (e) {
+      setOpErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRetrying(null);
     }
   };
 
@@ -137,51 +169,41 @@ export default function ModelsPage() {
         </button>
       </header>
 
-      {/* Operations in progress */}
-      {activeOps.length > 0 && (
+      {/* Operations: queued → active */}
+      {(queuedOps.length > 0 || activeOps.length > 0) && (
         <Panel className="fade-up mb-3">
           <div className="border-b px-4 py-3" style={{ borderColor: "var(--color-border)" }}>
-            <div className="label">Operations in progress ({activeOps.length})</div>
+            <div className="label">
+              Model operations ({queuedOps.length + activeOps.length})
+            </div>
           </div>
-          {activeOps.map((o) => {
-            const pct = o.total > 0 ? Math.min(100, (o.completed / o.total) * 100) : 0;
-            return (
-              <div key={o.id} className="row-line px-4 py-3" style={{ borderColor: "var(--color-border)" }}>
-                <div className="flex flex-wrap items-center gap-3">
-                  <span className="mono text-[12px] font-medium">{o.model}</span>
-                  <span className="text-[11px] text-[var(--color-text-faint)]">
-                    {o.op} → {o.node_name || "node"}
-                  </span>
-                  <StatusBadge status={o.status} />
-                  <span className="mono ml-auto text-[11px] text-[var(--color-text-dim)]">
-                    {o.total > 0
-                      ? `${fmtBytes(o.completed)} / ${fmtBytes(o.total)}`
-                      : o.detail || "starting"}
-                  </span>
-                  <button
-                    className="btn btn-sm"
-                    onClick={() => cancelOp(o.id)}
-                    disabled={cancelling === o.id}
-                    aria-label={`Cancel ${o.op} of ${o.model}`}
-                    title="Cancel operation"
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
-                {o.total > 0 && (
-                  <div className="mt-2 flex items-center gap-3">
-                    <Meter value={pct} className="flex-1" color="var(--color-accent)" />
-                    <span className="mono w-[34px] text-right text-[10.5px] text-[var(--color-text-dim)]">
-                      {Math.round(pct)}%
-                    </span>
-                  </div>
-                )}
-                {o.total > 0 && o.detail && (
-                  <div className="mt-1 text-[10.5px] text-[var(--color-text-faint)]">{o.detail}</div>
-                )}
-              </div>
-            );
-          })}
+          {queuedOps.length > 0 && (
+            <>
+              <div className="label px-4 pb-0.5 pt-3">Queued ({queuedOps.length})</div>
+              {queuedOps.map((o, i) => (
+                <QueuedOpRow
+                  key={o.id}
+                  o={o}
+                  pos={i + 1}
+                  busy={cancelling === o.id}
+                  onCancel={cancelOp}
+                />
+              ))}
+            </>
+          )}
+          {activeOps.length > 0 && (
+            <>
+              <div className="label px-4 pb-0.5 pt-3">Active ({activeOps.length})</div>
+              {activeOps.map((o) => (
+                <ActiveOpRow
+                  key={o.id}
+                  o={o}
+                  busy={cancelling === o.id}
+                  onCancel={cancelOp}
+                />
+              ))}
+            </>
+          )}
           {opErr && (
             <div className="px-4 py-2.5 text-[11.5px] text-[var(--color-danger)]">{opErr}</div>
           )}
@@ -246,6 +268,18 @@ export default function ModelsPage() {
                             .filter(Boolean)
                             .join(" · ")}
                         </div>
+                        {/* In-flight ops on this model ("pull:running" →
+                            "pull running") surfaced from placement. */}
+                        {(pl?.active_ops?.length ?? 0) > 0 && (
+                          <div className="mt-1 flex flex-wrap gap-1 pl-4">
+                            {(pl?.active_ops ?? []).map((s) => (
+                              <span key={s} className="badge badge-idle !px-1.5 !py-0">
+                                <span className="dot pulse" />
+                                {s.replace(":", " ")}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </Td>
                       <Td><span className="badge badge-neutral">{m.engine}</span></Td>
                       <Td><span className="mono text-[12px]">{fmtBytes(m.size_bytes)}</span></Td>
@@ -360,31 +394,23 @@ export default function ModelsPage() {
         )}
       </Panel>
 
-      {/* Operation history */}
+      {/* Operation history (most recent finished ops) */}
       {pastOps.length > 0 && (
         <Panel className="fade-up mt-3">
           <div className="border-b px-4 py-3" style={{ borderColor: "var(--color-border)" }}>
             <div className="label">Operation history</div>
           </div>
           {pastOps.map((o) => (
-            <div
+            <HistoryOpRow
               key={o.id}
-              className="row-line flex flex-wrap items-center gap-3 px-4 py-2"
-              style={{ borderColor: "var(--color-border)" }}
-            >
-              <span className="mono text-[12px]">{o.model}</span>
-              <span className="text-[11px] text-[var(--color-text-faint)]">
-                {o.op} → {o.node_name || "—"}
-              </span>
-              <StatusBadge status={o.status} />
-              {o.error && (
-                <span className="text-[11px] text-[var(--color-danger)]">{o.error}</span>
-              )}
-              <span className="ml-auto text-[10.5px] text-[var(--color-text-faint)]">
-                {fmtAgo(o.updated_at || o.created_at)}
-              </span>
-            </div>
+              o={o}
+              retrying={retrying === o.id}
+              onRetry={retryOp}
+            />
           ))}
+          {opErr && activeOps.length === 0 && queuedOps.length === 0 && (
+            <div className="px-4 py-2.5 text-[11.5px] text-[var(--color-danger)]">{opErr}</div>
+          )}
         </Panel>
       )}
 
@@ -640,6 +666,210 @@ function PlacementDetail({ pl }: { pl?: PlacementEntry }) {
           {" · "}{pl.loaded_on} loaded replica{pl.loaded_on === 1 ? "" : "s"}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Operation rows
+
+// Attempt badge: shown once an op has burned at least one attempt
+// ("retry 1/3" — max_attempts may be absent on older servers).
+function AttemptBadge({ o }: { o: ModelOperation }) {
+  if (!o.attempt || o.attempt <= 0) return null;
+  return (
+    <span className="badge badge-warn !px-1.5 !py-0" title="retry attempts used">
+      retry {o.attempt}
+      {o.max_attempts ? `/${o.max_attempts}` : ""}
+    </span>
+  );
+}
+
+function CancelButton({
+  o,
+  busy,
+  onCancel,
+}: {
+  o: ModelOperation;
+  busy: boolean;
+  onCancel: (id: string) => void;
+}) {
+  return (
+    <button
+      className="btn btn-sm"
+      onClick={() => onCancel(o.id)}
+      disabled={busy}
+      aria-label={`Cancel ${o.op} of ${o.model}`}
+      title="Cancel operation"
+    >
+      <X size={12} />
+    </button>
+  );
+}
+
+// Queued = waiting for a dispatch slot, or parked in retry backoff when
+// next_attempt_at is in the future.
+function QueuedOpRow({
+  o,
+  pos,
+  busy,
+  onCancel,
+}: {
+  o: ModelOperation;
+  pos: number;
+  busy: boolean;
+  onCancel: (id: string) => void;
+}) {
+  const wait = o.next_attempt_at ? fmtIn(o.next_attempt_at) : "";
+  return (
+    <div
+      className="row-line px-4 py-3"
+      style={{ borderColor: "var(--color-border)" }}
+    >
+      <div className="flex flex-wrap items-center gap-3">
+        <span
+          className="mono w-[26px] text-[11px] text-[var(--color-text-faint)]"
+          title="position in dispatch order"
+        >
+          #{pos}
+        </span>
+        <span className="mono text-[12px] font-medium">{o.model}</span>
+        <span className="text-[11px] text-[var(--color-text-faint)]">
+          {o.op} → {o.node_name || "node"}
+        </span>
+        <StatusBadge status={o.status} />
+        <AttemptBadge o={o} />
+        <span className="mono ml-auto text-[11px] text-[var(--color-text-dim)]">
+          {o.next_attempt_at
+            ? wait === "now"
+              ? "retry imminent"
+              : `retry in ${wait}`
+            : "waiting for slot"}
+        </span>
+        <CancelButton o={o} busy={busy} onCancel={onCancel} />
+      </div>
+    </div>
+  );
+}
+
+// Active = dispatched or running. Determinate byte progress when total is
+// known; a sliding indeterminate bar plus the engine phase line otherwise —
+// never a fabricated "0/0".
+function ActiveOpRow({
+  o,
+  busy,
+  onCancel,
+}: {
+  o: ModelOperation;
+  busy: boolean;
+  onCancel: (id: string) => void;
+}) {
+  const phase = o.phase || o.detail;
+  const determinate = !o.indeterminate && o.total > 0;
+  const pct = determinate ? Math.min(100, (o.completed / o.total) * 100) : 0;
+  const rate = o.rate_bps && o.rate_bps > 0 ? `${fmtBytes(o.rate_bps)}/s` : "";
+  return (
+    <div
+      className="row-line px-4 py-3"
+      style={{ borderColor: "var(--color-border)" }}
+    >
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="mono text-[12px] font-medium">{o.model}</span>
+        <span className="text-[11px] text-[var(--color-text-faint)]">
+          {o.op} → {o.node_name || "node"}
+        </span>
+        <StatusBadge status={o.status} />
+        <AttemptBadge o={o} />
+        <span className="mono ml-auto text-[11px] text-[var(--color-text-dim)]">
+          {[
+            determinate ? `${fmtBytes(o.completed)} / ${fmtBytes(o.total)}` : "",
+            rate,
+          ]
+            .filter(Boolean)
+            .join(" · ") || (phase || "starting")}
+        </span>
+        <CancelButton o={o} busy={busy} onCancel={onCancel} />
+      </div>
+      {determinate ? (
+        <div className="mt-2 flex items-center gap-3">
+          <Meter value={pct} className="flex-1" color="var(--color-accent)" />
+          <span className="mono w-[34px] text-right text-[10.5px] text-[var(--color-text-dim)]">
+            {Math.round(pct)}%
+          </span>
+        </div>
+      ) : (
+        <div className="mt-2 flex items-center gap-3">
+          <div className="meter flex-1">
+            <div className="indet" style={{ background: "var(--color-accent)" }} />
+          </div>
+          <span className="text-[10.5px] text-[var(--color-text-faint)]">
+            {phase || "—"}
+          </span>
+        </div>
+      )}
+      {determinate && phase && (
+        <div className="mt-1 text-[10.5px] text-[var(--color-text-faint)]">{phase}</div>
+      )}
+    </div>
+  );
+}
+
+// Finished ops: succeeded shows ✓ + real duration; failed/interrupted show
+// the error line (hover for the full text); failed pulls can be retried.
+function HistoryOpRow({
+  o,
+  retrying,
+  onRetry,
+}: {
+  o: ModelOperation;
+  retrying: boolean;
+  onRetry: (o: ModelOperation) => void;
+}) {
+  const ok = o.status === "succeeded" || o.status === "completed";
+  const errText = o.last_error || o.error || "";
+  const errColor =
+    o.status === "failed"
+      ? "var(--color-danger)"
+      : o.status === "interrupted"
+        ? "var(--color-warn)"
+        : "var(--color-text-faint)";
+  return (
+    <div
+      className="row-line flex flex-wrap items-center gap-3 px-4 py-2"
+      style={{ borderColor: "var(--color-border)" }}
+    >
+      <span className="mono text-[12px]">{o.model}</span>
+      <span className="text-[11px] text-[var(--color-text-faint)]">
+        {o.op} → {o.node_name || "—"}
+      </span>
+      <StatusBadge status={o.status} />
+      {ok && (
+        <span className="mono text-[10.5px] text-[var(--color-online)]">
+          ✓ {fmtDur(o.created_at, o.finished_at || o.updated_at)}
+        </span>
+      )}
+      {errText && (
+        <span
+          className="max-w-[340px] truncate text-[11px]"
+          style={{ color: errColor }}
+          title={errText}
+        >
+          {errText}
+        </span>
+      )}
+      {o.status === "failed" && o.op === "pull" && (
+        <button
+          className="btn btn-sm"
+          onClick={() => onRetry(o)}
+          disabled={retrying}
+          title={`Re-dispatch pull of ${o.model} to ${o.node_name || "the node"}`}
+        >
+          <RotateCw size={11} /> {retrying ? "Retrying…" : "Retry"}
+        </button>
+      )}
+      <span className="ml-auto text-[10.5px] text-[var(--color-text-faint)]">
+        {fmtAgo(o.finished_at || o.updated_at || o.created_at)}
+      </span>
     </div>
   );
 }

@@ -22,6 +22,7 @@ export default function SettingsPage() {
         <EnrollmentSection />
         <APIKeysSection />
         <SchedulingSection />
+        <ModelOpsSection />
         <AuditSection />
       </div>
     </div>
@@ -324,6 +325,92 @@ function SchedulingSection() {
         Allow scheduling to nodes reachable over remote networks (Tailscale/Headscale).
         When off, only nodes labeled <code className="mono">localmesh.net=lan</code> are eligible.
       </label>
+
+      <div className="mt-4 flex items-center gap-3">
+        <button className="btn btn-primary btn-sm" disabled={busy} onClick={save}>
+          {saved ? "Saved" : "Save changes"}
+        </button>
+      </div>
+    </Section>
+  );
+}
+
+// ---- Model operations -----------------------------------------------------
+//
+// settings["modelops"] tunes the pull/delete queue. Rendered only when the
+// server exposes the key — older servers don't have the queue at all.
+
+function ModelOpsSection() {
+  const { data: settings, mutate } = useSettings();
+  const { mutate: gm } = useSWRConfig();
+  const modelops = (settings?.modelops ?? null) as Record<string, number> | null;
+
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState("");
+
+  const [globalConc, setGlobalConc] = useState<number | null>(null);
+  const [perNodeConc, setPerNodeConc] = useState<number | null>(null);
+  const [queueMax, setQueueMax] = useState<number | null>(null);
+  const [maxAttempts, setMaxAttempts] = useState<number | null>(null);
+
+  if (!modelops) return null; // also covers settings still loading
+
+  const curGlobal = globalConc ?? modelops.global_concurrent ?? 2;
+  const curPerNode = perNodeConc ?? modelops.per_node_concurrent ?? 1;
+  const curQueueMax = queueMax ?? modelops.queue_max ?? 32;
+  const curAttempts = maxAttempts ?? modelops.max_attempts ?? 3;
+
+  const save = async () => {
+    setBusy(true);
+    setErr("");
+    setSaved(false);
+    try {
+      await api("PUT", "/settings/modelops", {
+        ...modelops,
+        global_concurrent: curGlobal,
+        per_node_concurrent: curPerNode,
+        queue_max: curQueueMax,
+        max_attempts: curAttempts,
+      });
+      mutate();
+      gm("/settings");
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Section icon={Ticket} title="Model operations"
+      desc="Pull/delete jobs run through a server-side queue — these bound how many run at once, per node and cluster-wide, and how failures retry.">
+      <div className="grid max-w-[560px] grid-cols-2 gap-x-6 gap-y-4">
+        <Field label="Global concurrency" hint="model ops in flight across the whole cluster (1-16)">
+          <input className="input mono" type="number" min={1} max={16} step={1}
+            value={curGlobal} onChange={(e) => setGlobalConc(Number(e.target.value))} />
+        </Field>
+        <Field label="Per-node concurrency" hint="model ops a single node runs at once (1-4)">
+          <input className="input mono" type="number" min={1} max={4} step={1}
+            value={curPerNode} onChange={(e) => setPerNodeConc(Number(e.target.value))} />
+        </Field>
+        <Field label="Queue depth" hint="queued ops accepted before new requests are rejected (8-256)">
+          <input className="input mono" type="number" min={8} max={256} step={1}
+            value={curQueueMax} onChange={(e) => setQueueMax(Number(e.target.value))} />
+        </Field>
+        <Field label="Max attempts" hint="retry attempts per op before it fails permanently (0-8)">
+          <input className="input mono" type="number" min={0} max={8} step={1}
+            value={curAttempts} onChange={(e) => setMaxAttempts(Number(e.target.value))} />
+        </Field>
+      </div>
+
+      {err && (
+        <div className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
+          {err}
+        </div>
+      )}
 
       <div className="mt-4 flex items-center gap-3">
         <button className="btn btn-primary btn-sm" disabled={busy} onClick={save}>
