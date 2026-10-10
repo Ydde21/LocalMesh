@@ -303,6 +303,9 @@ func cmdStatus() {
 	if s := agent.PendingUpdateSummary(path); s != "" {
 		fmt.Printf("update:  %s\n", s)
 	}
+	if s := agent.UpdateHistorySummary(path); s != "" {
+		fmt.Printf("update:  %s\n", s)
+	}
 }
 
 func fatal(err error) {

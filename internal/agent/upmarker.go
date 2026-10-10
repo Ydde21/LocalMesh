@@ -8,7 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/localmesh/localmesh/internal/agent/update"
 )
 
 // pendingUpdate is the durable record of an in-flight self-update,
@@ -18,14 +21,17 @@ import (
 // needs resolution, not silent success.
 type pendingUpdate struct {
 	OperationID string    `json:"operation_id"`
+	ReleaseID   string    `json:"release_id,omitempty"`
+	KeyID       string    `json:"key_id,omitempty"`
 	FromVersion string    `json:"from_version"`
 	ToVersion   string    `json:"to_version"`
 	BakPath     string    `json:"bak_path"` // update.BackupPath(target) — also yields target by trimming .bak
 	StagedAt    time.Time `json:"staged_at"`
-	// Attempts counts boots that have evaluated this marker. Capped at
-	// maxUpdateAttempts: a marker still present after that many cycles
-	// is a failed update, cleared and reported rather than retried
-	// forever.
+	// Attempts counts cycles that failed to prove this update healthy:
+	// boots that evaluated the marker AND sessions that died inside the
+	// post-restart settle window. Capped at maxUpdateAttempts — a marker
+	// still present after that many cycles is a failed update, rolled
+	// back when a .bak exists and reported rather than retried forever.
 	Attempts int `json:"attempts"`
 	// RolledBack is stamped when the .bak was restored — the restored
 	// binary's first healthy session owes the server the rolled_back
@@ -41,21 +47,39 @@ const pendingUpdateFile = "update-pending.json"
 // — the loop guard for pathological rollback↔reject ping-pong.
 const maxUpdateAttempts = 3
 
-// pendingMarkerPath returns the marker path beside the agent config.
-// SetConfigPath points it at a custom -config location; otherwise it
-// follows DefaultDir (LOCALMESH_AGENT_DIR or ~/.localmesh).
-func (a *Agent) pendingMarkerPath() (string, error) {
-	dir := ""
+// updateStateMu serializes read-modify-write access to the update
+// state files (update-pending.json, update-history.json): the attempt
+// bump in the boot check and the settle-window failure counter both
+// run off the session goroutine and could otherwise lose updates.
+var updateStateMu sync.Mutex
+
+// updateStateDir returns the directory holding the agent's update
+// state files (update-pending.json, update-history.json). SetConfigPath
+// points it at a custom -config location; otherwise it follows
+// DefaultDir (LOCALMESH_AGENT_DIR or ~/.localmesh).
+func (a *Agent) updateStateDir() (string, error) {
 	if a.cfgPath != "" {
-		dir = filepath.Dir(a.cfgPath)
-	} else {
-		d, err := DefaultDir()
-		if err != nil {
-			return "", err
-		}
-		dir = d
+		return filepath.Dir(a.cfgPath), nil
+	}
+	return DefaultDir()
+}
+
+// pendingMarkerPath returns the marker path beside the agent config.
+func (a *Agent) pendingMarkerPath() (string, error) {
+	dir, err := a.updateStateDir()
+	if err != nil {
+		return "", err
 	}
 	return filepath.Join(dir, pendingUpdateFile), nil
+}
+
+// updateHistoryPath returns the update-history path beside the config.
+func (a *Agent) updateHistoryPath() (string, error) {
+	dir, err := a.updateStateDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, updateHistoryFile), nil
 }
 
 // SetConfigPath records where agent.json lives so update state files
@@ -91,7 +115,13 @@ func readPendingMarker(path string) (pendingUpdate, bool, error) {
 	return m, true, nil
 }
 
+// clearPendingMarker removes the marker under updateStateMu so a
+// clear can never interleave inside another goroutine's
+// read-modify-write section (which would resurrect a resolved marker).
+// Callers must not hold the mutex.
 func clearPendingMarker(path string) error {
+	updateStateMu.Lock()
+	defer updateStateMu.Unlock()
 	err := os.Remove(path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
@@ -126,4 +156,88 @@ func versionsEqual(a, b string) bool {
 	na := strings.TrimPrefix(strings.TrimSpace(a), "v")
 	nb := strings.TrimPrefix(strings.TrimSpace(b), "v")
 	return na != "" && na == nb
+}
+
+// staleUpdateFileGrace bounds how young a staging leftover must be to
+// survive the boot sweep. An update-apply helper a just-exited parent
+// spawned works inside a bounded window and may still legitimately
+// need <target>.new, so only files older than this are reclaimed.
+var staleUpdateFileGrace = 10 * time.Minute
+
+// sweepStaleUpdateFiles reclaims leftover staging/temp files a crashed
+// or abandoned update could leave behind: the staged <target>.new
+// beside the binary, and *.new/*.staged/*.tmp/*.bak files in the agent
+// state dir. The live rollback copy and any .bak a pending marker
+// still references are always kept; files younger than
+// staleUpdateFileGrace are left alone. Runs once at boot — the update
+// exit paths already remove their own artifacts, so anything stale
+// enough to sweep is crash debris by definition.
+func (a *Agent) sweepStaleUpdateFiles() {
+	dir, err := a.updateStateDir()
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-staleUpdateFileGrace)
+
+	// Paths that must survive regardless of age: the live target's
+	// rollback copy and the .bak a pending marker still needs.
+	keep := map[string]bool{}
+	target := a.updTarget
+	if target == "" {
+		if t, err := update.DefaultTarget(); err == nil {
+			target = t
+		}
+	}
+	if target != "" {
+		if abs, err := filepath.Abs(update.BackupPath(target)); err == nil {
+			keep[abs] = true
+		}
+	}
+	if mkPath, err := a.pendingMarkerPath(); err == nil {
+		if m, ok, err := readPendingMarker(mkPath); err == nil && ok && m.BakPath != "" {
+			if abs, err := filepath.Abs(m.BakPath); err == nil {
+				keep[abs] = true
+			}
+		}
+	}
+
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			switch {
+			case strings.HasSuffix(name, ".new"),
+				strings.HasSuffix(name, ".staged"),
+				strings.HasSuffix(name, ".tmp"):
+				// update-owned staging/temp leftovers
+			case strings.HasSuffix(name, ".bak") &&
+				!strings.Contains(strings.TrimSuffix(name, ".bak"), "."):
+				// binary-style backups only — a dotted stem means an
+				// operator backup like agent.json.bak, not update debris
+			default:
+				continue
+			}
+			a.removeIfStale(filepath.Join(dir, name), keep, cutoff)
+		}
+	}
+	if target != "" {
+		a.removeIfStale(update.StagedPath(target), keep, cutoff)
+	}
+}
+
+func (a *Agent) removeIfStale(path string, keep map[string]bool, cutoff time.Time) {
+	if abs, err := filepath.Abs(path); err == nil && keep[abs] {
+		return
+	}
+	st, err := os.Stat(path)
+	if err != nil || st.IsDir() || st.ModTime().After(cutoff) {
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		a.log.Warn("cannot remove stale update file", "path", path, "err", err)
+		return
+	}
+	a.log.Info("removed stale update file", "path", path)
 }

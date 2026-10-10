@@ -91,6 +91,7 @@ func Doctor(ctx context.Context, cfgPath, caFile string, out io.Writer) int {
 	doctorEngine(ctx, cfg.OllamaURL, emit)
 	doctorDisk(cfgPath, emit)
 	doctorPendingUpdate(cfgPath, emit)
+	doctorUpdateHistory(cfgPath, emit)
 	doctorHardware(ctx, emit)
 
 	if fails > 0 {
@@ -418,6 +419,22 @@ func doctorPendingUpdate(cfgPath string, emit func(string, string, string, ...an
 	if s := PendingUpdateSummary(cfgPath); s != "" {
 		emit("WARN", "update", "%s", s)
 	}
+}
+
+// doctorUpdateHistory surfaces the last recorded update outcome: a
+// failed or rolled-back install warns (it also arms the redispatch
+// tripwire, so the operator should know), a confirmed one is a PASS
+// note. Nothing is emitted when no update has ever run.
+func doctorUpdateHistory(cfgPath string, emit func(string, string, string, ...any)) {
+	e, ok := latestUpdateEntry(cfgPath)
+	if !ok {
+		return
+	}
+	if e.Outcome == upOutcomeSucceeded {
+		emit("PASS", "update-history", "%s", updateHistoryLine(e))
+		return
+	}
+	emit("WARN", "update-history", "%s", updateHistoryLine(e))
 }
 
 // doctorHardware reports the static snapshot plus which live metrics
