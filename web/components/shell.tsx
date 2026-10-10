@@ -17,6 +17,7 @@ import {
 import { useClusterEvents, type ClusterEvent } from "@/lib/events";
 import { UNAUTHORIZED_EVENT, useVersion } from "@/lib/api";
 import { fmtVersion } from "@/lib/format";
+import { OperationalAlerts } from "@/components/alerts";
 
 const NAV = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
@@ -124,7 +125,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
         {/* Main */}
         <div className="flex min-w-0 flex-1 flex-col">
-          <main className="min-w-0 flex-1 overflow-y-auto">{children}</main>
+          <main className="min-w-0 flex-1 overflow-y-auto">
+            <OperationalAlerts />
+            {children}
+          </main>
         </div>
       </div>
     </Ctx.Provider>

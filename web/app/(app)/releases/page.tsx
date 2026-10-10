@@ -97,12 +97,46 @@ function RolloutsPanel({
   rollouts?: Rollout[];
   selectedId: string | null;
 }) {
+  const { mutate: gm } = useSWRConfig();
+  const [busyId, setBusyId] = useState("");
+  const [err, setErr] = useState("");
+  const [cancelling, setCancelling] = useState<Rollout | null>(null);
+
   if (!rollouts) return null;
+
+  // Row-level actions mirror the drawer's: approve is a safe advance,
+  // cancel is destructive and gets a confirm. Buttons live inside the
+  // row's <a> so they must swallow the click before it navigates.
+  const act = async (r: Rollout, fn: () => Promise<unknown>) => {
+    setBusyId(r.id);
+    setErr("");
+    try {
+      await fn();
+      gm(
+        (key) =>
+          typeof key === "string" &&
+          (key.startsWith("/rollouts") || key.startsWith("/agent-updates"))
+      );
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyId("");
+    }
+  };
+
+  const cancellable = (r: Rollout) =>
+    r.state === "pending" || r.state === "running" || r.state === "awaiting_approval";
+
   return (
     <Panel className="fade-up">
       <div className="border-b px-4 py-3" style={{ borderColor: "var(--color-border)" }}>
         <div className="label">Rollouts ({rollouts.length})</div>
       </div>
+      {err && (
+        <div className="border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-[12px] text-red-400">
+          {err}
+        </div>
+      )}
       {rollouts.length === 0 ? (
         <div className="px-4 py-8 text-center text-[12px] text-[var(--color-text-faint)]">
           No rollouts yet — pick a release and start one.
@@ -127,6 +161,14 @@ function RolloutsPanel({
                 </span>
                 <span className="badge badge-neutral">{r.strategy}</span>
                 <StatusBadge status={r.state} />
+                {r.approved_by && (
+                  <span
+                    className="badge badge-neutral !px-1.5 !py-0"
+                    title={`approved by ${r.approved_by}${r.approved_at ? ` · ${fmtAgo(r.approved_at)}` : ""}`}
+                  >
+                    approved
+                  </span>
+                )}
                 {r.error && (
                   <span
                     className="max-w-[260px] truncate text-[11px] text-[var(--color-danger)]"
@@ -136,6 +178,35 @@ function RolloutsPanel({
                   </span>
                 )}
                 <span className="ml-auto flex items-center gap-3">
+                  {r.state === "awaiting_approval" && (
+                    <button
+                      className="btn btn-primary btn-sm"
+                      disabled={busyId === r.id}
+                      aria-label={`Approve rollout ${r.release_version || r.id}`}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        act(r, () => api("POST", `/rollouts/${r.id}/approve`));
+                      }}
+                    >
+                      <Check size={12} /> Approve
+                    </button>
+                  )}
+                  {cancellable(r) && (
+                    <button
+                      className="btn btn-danger btn-sm"
+                      disabled={busyId === r.id}
+                      aria-label={`Cancel rollout ${r.release_version || r.id}`}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setErr("");
+                        setCancelling(r);
+                      }}
+                    >
+                      <Ban size={12} /> Cancel
+                    </button>
+                  )}
                   <span className="mono text-[11px] text-[var(--color-text-dim)]">
                     {r.succeeded}/{r.total} nodes
                     {r.failed > 0 && (
@@ -162,6 +233,34 @@ function RolloutsPanel({
             );
           })}
         </div>
+      )}
+
+      {cancelling && (
+        <ConfirmDialog
+          title="Cancel rollout"
+          confirmLabel="Cancel rollout"
+          busy={busyId === cancelling.id}
+          error={err}
+          onClose={() => {
+            if (!busyId) {
+              setCancelling(null);
+              setErr("");
+            }
+          }}
+          onConfirm={() =>
+            act(cancelling, async () => {
+              await api("POST", `/rollouts/${cancelling.id}/cancel`);
+              setCancelling(null);
+            })
+          }
+        >
+          Stop rollout to{" "}
+          <span className="mono text-[var(--color-text)]">
+            {fmtVersion(cancelling.release_version || "")}
+          </span>
+          ? Nodes mid-update finish their current phase; queued nodes are never
+          dispatched.
+        </ConfirmDialog>
       )}
     </Panel>
   );
@@ -253,6 +352,12 @@ function RolloutDrawer({ id }: { id: string }) {
             <div className="mt-2 grid grid-cols-2 gap-2 text-[11.5px]">
               <KV2 label="Created" value={fmtAgo(r.created_at)} />
               <KV2 label="By" value={r.created_by || "—"} />
+              {r.approved_by && (
+                <KV2
+                  label="Approved"
+                  value={`${r.approved_by}${r.approved_at ? ` · ${fmtAgo(r.approved_at)}` : ""}`}
+                />
+              )}
               {r.strategy === "canary" && (
                 <>
                   <KV2 label="Canary" value={String(r.canary_count)} />
