@@ -240,10 +240,12 @@ Releases a `canary` rollout parked in `awaiting_approval` → `running`;
 remaining nodes proceed `batch_size` at a time. Any other state →
 `409 ErrNotAwaitingApproval`. `404` unknown id.
 
-Note: the approval is held in memory — a control-plane restart between
-approval and the next batch claiming re-parks the rollout at
-`awaiting_approval` (conservative: nothing unapproved dispatches); the
-operator approves again.
+Note (v0.8): the approval is **durable** — `approved_by`/`approved_at`
+are stamped in the same `UPDATE` that flips the rollout back to
+`running` (migration `0013`), so a control-plane restart or standby
+promotion can never observe approved-but-parked or park an approved
+rollout a second time. Approving a rollout not in `awaiting_approval`
+is a clean `409`, not a double-release.
 
 ### `POST /api/v1/rollouts/{id}/cancel` → `204`
 

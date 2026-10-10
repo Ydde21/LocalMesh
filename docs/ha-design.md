@@ -14,9 +14,14 @@ self-fencing — see `docs/reliability.md` § control-plane ownership and
 - **Health-checked auto-rejoin of a demoted instance** — today a fenced
   primary exits and a supervisor (or you) restarts it back into standby;
   in-process demotion→standby transition is not built.
-- **LB/VIP failover automation** — shifting the stable frontend address
-  is the operator's reverse proxy / DNS / VIP; there is no built-in
-  health-checked traffic mover and no documented reference config yet.
+
+(v0.8 closed the second gap: **stable-endpoint failover** now ships as
+`localmesh-router`, a tiny TCP-level active-standby router that
+health-checks each backend's `/readyz` and splices connections to the
+live leader — TLS passes through end-to-end so agents keep pinned-CA
+verification. The full recipe is [docs/ha-deployment.md](ha-deployment.md);
+any L4 health-checking LB — HAProxy, Caddy, a cloud NLB — achieves the
+same.)
 
 The control plane stays deliberately single-writer. There is no
 consensus protocol, no etcd, no Raft — PostgreSQL is already the only
@@ -113,9 +118,12 @@ stable address:
 3. **Run both.** Primary starts normally; standby with
    `LOCALMESH_STANDBY=1`. Give the standby its own host (or at least its
    own port/pid); it answers 503s until promoted.
-4. **One stable frontend address.** Agents, dashboard, and clients
-   point at a single DNS name or reverse proxy that fronts *both*
-   instances — or accept that agents retry whichever they reach; the
+4. **One stable frontend address.** `localmesh-router` (v0.8) fronts
+   *both* instances and splices TCP to whichever answers `/readyz` 200 —
+   agents, dashboard, and clients are configured once and never change
+   on failover; see [docs/ha-deployment.md](ha-deployment.md) and
+   `deploy/ha.compose.yml`. Any L4 health-checking LB works too — or
+   accept that agents retry whichever instance they reach; the
    standby's 503 is harmless and the next retry lands wherever is
    leader. `GET /api/v1/control-plane` reports `role`, `epoch`, and
    promotion history if you want to check which instance won.
@@ -207,7 +215,7 @@ instances need *the same* CA or failover breaks every pinned agent:
 | `/readyz` DB-liveness check | shipped (v0.6); reports `role":"standby"` while unpromoted (v0.7) |
 | CA + secrets in Postgres | designed, not built |
 | Auto-rejoin of a demoted instance back into standby | designed, not built — supervisor restart is the path |
-| LB/VIP failover automation docs | designed, not built |
+| Stable-endpoint failover (`localmesh-router` + deployment recipe) | shipped (v0.8) — `docs/ha-deployment.md` |
 | `hub.CloseAll` in the graceful shutdown path | gap found by tests — proposed diff below |
 | Consensus, multi-writer, conn migration | **non-goal** |
 

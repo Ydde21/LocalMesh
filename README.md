@@ -53,7 +53,8 @@ hardware.
   sequential, parallel) with per-node progress and automatic `.bak`
   rollback; agents verify signatures against operator-pinned keys, never
   server-sent ones. An optional `LOCALMESH_STANDBY=1` second instance
-  waits on the Postgres advisory lock and promotes on primary loss.
+  waits on the Postgres advisory lock and promotes on primary loss —
+  `localmesh-router` fronts the pair with one stable endpoint.
 - **Verified against real Ollama** — the gateway, streaming, cancellation,
   model ops, and engine-failure recovery are exercised against an actual
   Ollama runtime, not just test doubles.
@@ -105,8 +106,9 @@ Create an enrollment token in the dashboard (**Settings → Device
 enrollment**) or via the API. New devices land in **pending** until you
 approve them — then they connect, report hardware, and start serving.
 On the same LAN the agent can also find the cluster itself:
-`localmesh-agent join -discover` browses mDNS advertisements and pins
-the cluster CA fingerprint you confirm.
+`localmesh-agent join -discover` browses mDNS advertisements and verifies
+the advertised cluster CA fingerprint against the CA the server actually
+presents (pin out-of-band instead with `-ca-fingerprint`).
 
 Pre-flight checks and fleet rollout:
 
@@ -163,12 +165,32 @@ Every request goes through the same deterministic pipeline:
 
 Tune the weights and queue behavior under **Settings → Scheduling**.
 
+## High availability
+
+Run two control-plane instances on one database — a primary and a
+`LOCALMESH_STANDBY=1` standby that promotes itself when the primary's
+Postgres advisory lock dies — and put `localmesh-router` in front. The
+router health-checks each backend's `/readyz` and splices raw TCP to the
+live leader, so agents, OpenAI clients, and the dashboard are configured
+once against the stable endpoint and failover needs no changes. TLS
+passes through end-to-end (agents keep pinned-CA verification); in-flight
+streams die with the primary and clients retry — seconds, not minutes.
+
+```bash
+docker compose -f deploy/ha.compose.yml up -d
+```
+
+See [docs/ha-deployment.md](docs/ha-deployment.md) for the full recipe
+and [docs/ha-design.md](docs/ha-design.md) for the design (Postgres is
+the arbiter and remains a single point of failure).
+
 ## Repository layout
 
 ```
 cmd/
   localmesh-server/     control plane entrypoint
   localmesh-agent/      node agent CLI (join/run/status)
+  localmesh-router/     TCP active-standby router for the HA pair
   fakeollama/           test double for Ollama (dev + e2e)
 internal/
   contracts/            wire types shared by server & agent
@@ -179,8 +201,8 @@ internal/
 web/                    Next.js dashboard (App Router, Tailwind,
                         React Flow, Recharts; BFF proxy keeps the
                         admin key server-side)
-deploy/                 dev compose
-scripts/                install-agent.sh / .ps1
+deploy/                 dev compose, HA compose + router image
+scripts/                install-agent.sh / .ps1, release + smoke tests
 docs/                   architecture, API, onboarding, security
 ```
 
@@ -211,9 +233,12 @@ make release                      # cross-compile agents → dist/
 - [docs/ci.md](docs/ci.md) — CI matrix: what each job proves
 - [docs/agent-updates.md](docs/agent-updates.md) — release + update security model
 - [docs/updates-orchestration.md](docs/updates-orchestration.md) — managed-upgrade runbook (release keys, rollouts, canaries, air-gap proxy)
-- [docs/ha-design.md](docs/ha-design.md) — active-standby design + deployment recipe
+- [docs/ha-deployment.md](docs/ha-deployment.md) — HA deployment: standby pair + localmesh-router stable endpoint
+- [docs/ha-design.md](docs/ha-design.md) — active-standby design + failover semantics
 - [docs/compatibility.md](docs/compatibility.md) — version/platform/Postgres floors
+- [docs/beta-checklist.md](docs/beta-checklist.md) — public-beta readiness audit
 - [docs/troubleshooting.md](docs/troubleshooting.md) — symptom → cause → fix
+- [CHANGELOG.md](CHANGELOG.md) — release history
 - [SECURITY.md](SECURITY.md) — vulnerability reporting + scope
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 

@@ -94,9 +94,9 @@ Linger keeps a `systemd --user` instance (and your agent) running for your
 account from boot until disabled. It is the standard mechanism for
 user-owned daemons — no conversion to a system unit needed.
 
-If you'd rather run under a dedicated system account with a system unit,
-the hand-written example in `docs/onboarding.md` still works — the
-`service` subcommand just automates the common case.
+If you'd rather run under a dedicated system account with a system-wide
+unit (`/etc/systemd/system/`), write one by hand — the `service`
+subcommand deliberately covers only the common user-unit case.
 
 ## Windows — Windows Service
 

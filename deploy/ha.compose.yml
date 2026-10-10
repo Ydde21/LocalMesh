@@ -1,0 +1,152 @@
+# LocalMesh HA control plane: postgres + active server + standby
+# server + localmesh-router, behind one stable endpoint.
+#
+#   docker compose -f deploy/ha.compose.yml up -d
+#
+# Agents, OpenAI clients, and the dashboard all point at the ROUTER —
+# it splices raw TCP to whichever backend answers /readyz 200, so
+# failover needs zero config changes anywhere. Full guide:
+# docs/ha-deployment.md. Design: docs/ha-design.md.
+#
+# Both servers share ONE data volume — the standby strict-loads the
+# same cluster CA/cert material and refuses to boot into a fresh one.
+# The router mounts it read-only for the CA it verifies backends with.
+#
+# IMPORTANT — the stable endpoint's name must be in the server cert:
+# the router never terminates TLS, so clients verify the BACKEND's
+# certificate against the name they dialed. Add your public name
+# (mesh.local, mesh.example.com, a LAN IP) to LOCALMESH_HOSTNAMES below;
+# the servers reissue the leaf on restart when SANs are missing.
+#
+# Credentials bootstrap exactly like the base compose file:
+#   docker compose logs server | grep "bootstrap admin"
+#   docker compose exec web cat /ca/bootstrap-dashboard.password
+
+name: localmesh-ha
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: localmesh
+      POSTGRES_USER: localmesh
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - localmesh-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U localmesh -d localmesh"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [localmesh]
+
+  server:
+    build: ..
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      LOCALMESH_DATABASE_URL: postgres://localmesh:${POSTGRES_PASSWORD}@postgres:5432/localmesh?sslmode=disable
+      LOCALMESH_LISTEN: 0.0.0.0:8443
+      LOCALMESH_DATA_DIR: /data
+      LOCALMESH_ADMIN_KEY: ${LOCALMESH_ADMIN_KEY:-}
+      # Must cover every name clients dial THROUGH the router: the
+      # docker alias `router` (dashboard), plus your stable public name.
+      LOCALMESH_HOSTNAMES: ${LOCALMESH_HOSTNAMES:-server,server-standby,router,localmesh-server,localhost}
+      LOCALMESH_CORS_ORIGINS: ""
+      # mDNS inside Docker's NAT advertises only inside this network —
+      # see the base compose file's note; discovery is a LAN feature.
+      LOCALMESH_DISCOVERY: ${LOCALMESH_DISCOVERY:-on}
+      LOCALMESH_CLUSTER_NAME: ${LOCALMESH_CLUSTER_NAME:-localmesh}
+    volumes:
+      - localmesh-data:/data
+    networks: [localmesh]
+
+  server-standby:
+    build: ..
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # The shared data dir must already hold the CA the primary
+      # generated — a standby never mints one itself.
+      server:
+        condition: service_healthy
+    environment:
+      LOCALMESH_DATABASE_URL: postgres://localmesh:${POSTGRES_PASSWORD}@postgres:5432/localmesh?sslmode=disable
+      LOCALMESH_LISTEN: 0.0.0.0:8443
+      LOCALMESH_DATA_DIR: /data
+      LOCALMESH_STANDBY: "1"
+      LOCALMESH_ADMIN_KEY: ${LOCALMESH_ADMIN_KEY:-}
+      LOCALMESH_HOSTNAMES: ${LOCALMESH_HOSTNAMES:-server,server-standby,router,localmesh-server,localhost}
+      LOCALMESH_CORS_ORIGINS: ""
+      LOCALMESH_DISCOVERY: ${LOCALMESH_DISCOVERY:-on}
+      LOCALMESH_CLUSTER_NAME: ${LOCALMESH_CLUSTER_NAME:-localmesh}
+    volumes:
+      - localmesh-data:/data
+    healthcheck:
+      # The standby mux serves /api/v1/version both before and after
+      # promotion — /healthz and /readyz deliberately answer 503 while
+      # unpromoted, so the image's default /healthz check never passes.
+      test: ["CMD-SHELL", "wget -q --no-check-certificate -O /dev/null https://127.0.0.1:8443/api/v1/version || exit 1"]
+      interval: 15s
+      timeout: 3s
+      start_period: 10s
+    networks: [localmesh]
+
+  router:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.router
+    restart: unless-stopped
+    depends_on:
+      # ca.pem must exist in the shared volume before the router can
+      # verify backend TLS.
+      server:
+        condition: service_healthy
+    environment:
+      LOCALMESH_ROUTER_LISTEN: 0.0.0.0:8443
+      LOCALMESH_ROUTER_BACKENDS: https://server:8443,https://server-standby:8443
+      LOCALMESH_ROUTER_CA: /data/ca.pem
+      LOCALMESH_ROUTER_INTERVAL: ${LOCALMESH_ROUTER_INTERVAL:-1s}
+      # Operator/automation status JSON {active, backends[]} — published
+      # on loopback below, not to the LAN.
+      LOCALMESH_ROUTER_STATUS: 0.0.0.0:9443
+    volumes:
+      - localmesh-data:/data:ro
+    ports:
+      # THE stable endpoint — everything points here.
+      - "${LOCALMESH_PORT:-8443}:8443"
+      - "127.0.0.1:${LOCALMESH_ROUTER_STATUS_PORT:-9443}:9443"
+    networks: [localmesh]
+
+  web:
+    build: ../web
+    restart: unless-stopped
+    depends_on:
+      - router
+    environment:
+      # The dashboard proxies to the stable endpoint; TLS is verified
+      # against the shared cluster CA and the `router` SAN above.
+      LOCALMESH_API_URL: https://router:8443
+      LOCALMESH_API_KEY: ${LOCALMESH_ADMIN_KEY:-}
+      LOCALMESH_API_KEY_FILE: /ca/bootstrap-admin.key
+      LOCALMESH_CA_FILE: /ca/ca.pem
+      LOCALMESH_DASHBOARD_PASSWORD: ${LOCALMESH_DASHBOARD_PASSWORD:-}
+      LOCALMESH_DASHBOARD_PASSWORD_FILE: /ca/bootstrap-dashboard.password
+      LOCALMESH_SESSION_KEY_FILE: /ca/session.key
+    volumes:
+      - localmesh-data:/ca:ro
+    ports:
+      - "${LOCALMESH_WEB_PORT:-3000}:3000"
+    networks: [localmesh]
+
+volumes:
+  localmesh-pg:
+  localmesh-data:
+
+networks:
+  localmesh:
+    driver: bridge
