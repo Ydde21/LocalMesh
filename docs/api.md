@@ -93,9 +93,9 @@ returns `{status, node_id, ca_pem}`; `denied` returns the reason.
 
 ### Rate limits
 
-Per source IP: `POST /enroll` 30/min · `GET /enroll/{id}` 600/min ·
-`GET /nodes/connect` 30/min. Sustained failed bearer auth (>20 401s/min)
-yields `429` on authenticated routes.
+Per source IP: `POST /api/v1/enroll` 30/min · `GET /api/v1/enroll/{id}`
+600/min · `GET /api/v1/agent/connect` 30/min. Sustained failed bearer
+auth (>20 401s/min) yields `429` on authenticated routes.
 
 ---
 
@@ -282,6 +282,7 @@ All writes are `admin`-only; GETs are `readonly`.
 | GET    | `/releases`                  | list registered releases (`version`, `channel`, `platforms`, `status`) |
 | POST   | `/releases`                  | register `{base_url, channel?, manifest, sums, signatures, notes?}` — signatures are verified against a registered key **at admission**; unsigned releases are rejected outright. `base_url` must be `https` (loopback http exempt for mirrors). `(version, channel)` unique → `409` |
 | GET    | `/releases/{id}`             | release detail incl. manifest, protocol window, signer `key_id` |
+| PUT    | `/releases/{id}/artifacts/{name}` | upload one artifact's bytes server-side (body ≤ 5 GiB, `admin` only) — `name` must be one the manifest/sums actually name; `201` returns `{file, sha256, size_bytes}`. Server-hosted artifacts are what `localmesh://releases/<id>` dispatch sources proxy to air-gapped agents |
 | POST   | `/releases/{id}/revoke`      | pull a release — no new rollouts against it |
 | GET    | `/rollouts`                  | list rollout campaigns (`strategy`, `state`, per-state node counts) |
 | POST   | `/rollouts`                  | create `{release_id, strategy, node_ids?, canary_count?, batch_size?}` — strategies `single`\|`selected`\|`sequential`\|`canary`\|`parallel` |
@@ -321,6 +322,12 @@ moves bytes, not trust.
 ### Health
 
 `GET /healthz` — liveness probe, no auth.
+
+`GET /readyz` — readiness, no auth: `200` only while the server's real
+dependencies answer (Postgres pool ping). This is the load-balancer
+signal — a `LOCALMESH_STANDBY=1` instance answers `503` here until
+promoted, so health-checking routers (incl. `localmesh-router`) send
+traffic only to the active leader. See `docs/ha-deployment.md`.
 
 ---
 
