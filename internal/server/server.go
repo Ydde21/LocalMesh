@@ -25,6 +25,7 @@ import (
 	"github.com/localmesh/localmesh/internal/server/auth"
 	"github.com/localmesh/localmesh/internal/server/events"
 	"github.com/localmesh/localmesh/internal/server/gateway"
+	"github.com/localmesh/localmesh/internal/server/metrics"
 	"github.com/localmesh/localmesh/internal/server/modelops"
 	"github.com/localmesh/localmesh/internal/server/nodehub"
 	"github.com/localmesh/localmesh/internal/server/scheduler"
@@ -44,6 +45,7 @@ type Server struct {
 	gw    *gateway.Gateway
 	admin *adminapi.API
 	ev    *events.Broker
+	mc    *metrics.Collector
 	ca    *tlsx.CA
 
 	httpSrv   *http.Server
@@ -129,6 +131,13 @@ func (s *Server) Start(ctx context.Context) error {
 		caPEM  []byte
 	)
 
+	// The events broker and metrics collector exist before the role
+	// split so ownership transitions (acquire/promote/release/lost) are
+	// observable events, not just log lines.
+	s.ev = events.NewBroker()
+	s.mc = metrics.New(s.log)
+	s.mc.Subscribe(s.ev)
+
 	if s.cfg.Standby {
 		// Active-standby: serve a minimal status surface on the real
 		// listen address while waiting on the ownership lock. No
@@ -177,6 +186,8 @@ func (s *Server) Start(ctx context.Context) error {
 		s.log.Info("standby promoted to active control plane", "epoch", own.Epoch())
 		st.AddOwnershipEvent(context.Background(), own.InstanceID().String(),
 			own.Epoch(), "promoted", "standby takeover")
+		s.ev.Publish("control-plane", map[string]any{
+			"event": "promoted", "epoch": own.Epoch(), "instance": own.InstanceID().String()})
 	} else {
 		// Single-active ownership: one advisory-lock session + a fencing
 		// epoch. A second control plane fails startup loudly instead of
@@ -189,10 +200,11 @@ func (s *Server) Start(ctx context.Context) error {
 		s.owner = own
 		st.AddOwnershipEvent(context.Background(), own.InstanceID().String(),
 			own.Epoch(), "acquired", "")
+		s.ev.Publish("control-plane", map[string]any{
+			"event": "acquired", "epoch": own.Epoch(), "instance": own.InstanceID().String()})
 	}
 	defer own.Release(context.Background())
 
-	s.ev = events.NewBroker()
 	s.hub = nodehub.New(st, s.ev, nodehub.DefaultConfig(), s.log)
 	s.sched = scheduler.New(s.hub, scheduler.DefaultConfig())
 	s.gw = gateway.New(st, s.hub, s.sched, s.ev, s.log)
@@ -231,6 +243,37 @@ func (s *Server) Start(ctx context.Context) error {
 	s.admin.SetControlPlaneStatus(s.controlPlaneStatus)
 	s.admin.SetUpdatePlane(s.updateMgr, NewArtifactStore(s.cfg.DataDir))
 	s.startedAt = time.Now()
+
+	// Live gauges scraped by /api/v1/metrics: role/epoch, fleet size,
+	// in-flight update phases. Ownership info is read live so a stale
+	// collector can't misreport after promotion.
+	s.mc.SetGauges(func() []metrics.Gauge {
+		snap, _ := s.hub.Snapshot(context.Background())
+		online := 0
+		for _, n := range snap {
+			if n.Online {
+				online++
+			}
+		}
+		epoch := int64(-1)
+		if s.owner != nil {
+			epoch = s.owner.Epoch()
+		}
+		g := []metrics.Gauge{
+			{Name: "control_plane_active", Help: "1 while this instance holds cluster ownership.", Value: 1},
+			{Name: "control_plane_epoch", Help: "Ownership fencing epoch.", Value: float64(epoch)},
+			{Name: "nodes_online", Help: "Agents currently connected.", Value: float64(online)},
+			{Name: "nodes_total", Help: "Agents known to the cluster.", Value: float64(len(snap))},
+		}
+		if phases, err := s.st.AgentUpdatePhaseCounts(context.Background()); err == nil {
+			for phase, n := range phases {
+				g = append(g, metrics.Gauge{
+					Name: "agent_updates_live", Help: "Agent updates in flight, by phase.",
+					Value: float64(n), Labels: map[string]string{"phase": phase}})
+			}
+		}
+		return g
+	})
 
 	// A restart abandons all in-flight work: connections, capacity
 	// reservations and streaming goroutines are gone. Fail those rows so
@@ -271,6 +314,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.admin.Register(mux, mwAdmin, mwRead)
 	s.gw.RegisterRoutes(mux, mwInfer)
+	// Prometheus text exposition — read-auth (an API key can scrape;
+	// metrics carry no secrets but do reveal operational detail).
+	mux.Handle("GET /api/v1/metrics", mwRead(s.mc.Handler()))
 	mux.HandleFunc("GET /api/v1/agent/connect", s.handleNodeConnect)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -350,6 +396,8 @@ func (s *Server) Start(ctx context.Context) error {
 		s.st.FailOrphanedWorkloads(context.Background(), "control-plane shutting down")
 		st.AddOwnershipEvent(context.Background(), own.InstanceID().String(),
 			own.Epoch(), "released", "clean shutdown")
+		s.ev.Publish("control-plane", map[string]any{
+			"event": "released", "epoch": own.Epoch(), "instance": own.InstanceID().String()})
 		st.Close()
 		return nil
 	case <-own.Lost():
@@ -366,6 +414,8 @@ func (s *Server) Start(ctx context.Context) error {
 		s.st.FailOrphanedWorkloads(context.Background(), "control-plane ownership lost")
 		st.AddOwnershipEvent(context.Background(), own.InstanceID().String(),
 			own.Epoch(), "lost", "advisory-lock session failed")
+		s.ev.Publish("control-plane", map[string]any{
+			"event": "lost", "epoch": own.Epoch(), "instance": own.InstanceID().String()})
 		st.Close()
 		return fmt.Errorf("control-plane ownership lost")
 	case err := <-errCh:

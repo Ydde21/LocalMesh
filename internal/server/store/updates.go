@@ -373,6 +373,28 @@ func (d *DB) ListRollouts(ctx context.Context, limit int) ([]*Rollout, error) {
 	return out, rows.Err()
 }
 
+// AgentUpdatePhaseCounts reports live (unfinished) updates per phase —
+// the metrics exporter's gauge source for in-flight rollout depth.
+func (d *DB) AgentUpdatePhaseCounts(ctx context.Context) (map[string]int, error) {
+	rows, err := d.Pool.Query(ctx,
+		`SELECT phase, count(*) FROM agent_updates
+		 WHERE finished_at IS NULL GROUP BY phase`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var phase string
+		var n int
+		if err := rows.Scan(&phase, &n); err != nil {
+			return nil, err
+		}
+		out[phase] = n
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) loadRolloutCounts(ctx context.Context, r *Rollout) error {
 	return d.Pool.QueryRow(ctx,
 		`SELECT count(*),
