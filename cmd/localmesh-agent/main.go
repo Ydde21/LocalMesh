@@ -48,6 +48,8 @@ func main() {
 		cmdRun(log)
 	case "doctor":
 		os.Exit(cmdDoctor())
+	case "report":
+		os.Exit(cmdReport())
 	case "service":
 		cmdService()
 	case "status":
@@ -76,6 +78,7 @@ Commands:
   discover  find LocalMesh clusters on this network (mDNS)
   run       connect and serve workloads (default when configured)
   doctor    check connectivity, credentials, engine, and telemetry
+  report    redacted machine-shareable diagnostic bundle (-json, -self-test)
   service   install|uninstall|start|stop|status the OS service
   status    show local agent configuration
   update    verify and install a signed agent release (opt-in, dry-run default)
@@ -268,6 +271,35 @@ func cmdDoctor() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return agent.Doctor(ctx, path, *caFile, os.Stdout)
+}
+
+// cmdReport emits the redacted fleet-validation diagnostic bundle —
+// safe to paste into a bug report or validation runbook. It never
+// prints credentials, tokens, prompts, or completions.
+func cmdReport() int {
+	fs := flag.NewFlagSet("report", flag.ExitOnError)
+	cfgPath := fs.String("config", "", "config file path (default ~/.localmesh/agent.json)")
+	caFile := fs.String("ca-file", "", "pinned CA PEM file (overrides the config's embedded CA)")
+	asJSON := fs.Bool("json", false, "emit machine-readable JSON")
+	selfTest := fs.Bool("self-test", false, "run one bounded inference through the local engine")
+	fs.Parse(os.Args[2:])
+
+	path := *cfgPath
+	if path == "" {
+		var err error
+		if path, err = agent.DefaultPath(); err != nil {
+			fatal(err)
+		}
+	}
+	cfg, _ := agent.LoadConfig(path) // nil is fine — the report records "not enrolled"
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := agent.WriteFleetReport(ctx, os.Stdout, cfg, agent.FleetReportOpts{
+		ConfigPath: path, CAFile: *caFile, JSON: *asJSON, SelfTest: *selfTest,
+	}); err != nil {
+		fatal(err)
+	}
+	return 0 // findings are not exit codes
 }
 
 func cmdService() {
