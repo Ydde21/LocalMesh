@@ -24,6 +24,14 @@ func Service(action, cfgPath string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Installing before enrollment registers a unit whose `run` exits
+	// immediately — on every platform that is a restart loop. Require a
+	// loadable config up front so the failure message is actionable.
+	if action == "install" {
+		if _, err := LoadConfig(abs); err != nil {
+			return fmt.Errorf("cannot install service: %v — run 'localmesh-agent join' first", err)
+		}
+	}
 	return serviceAction(action, abs, out)
 }
 

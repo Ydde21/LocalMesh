@@ -50,7 +50,7 @@ while [ $# -gt 0 ]; do
     --no-join) NO_JOIN=1; shift ;;
     --service) SERVICE=1; shift ;;
     -h|--help)
-      sed -n '2,13p' "$0"; exit 0 ;;
+      sed -n '2,14p' "$0"; exit 0 ;;
     *) fail "unknown flag: $1" ;;
   esac
 done
@@ -162,8 +162,11 @@ if [ "$NO_JOIN" -eq 0 ] && [ -n "$SERVER" ] && [ -n "$TOKEN" ]; then
   [ -n "$NAME" ] && set -- "$@" -name "$NAME"
   if [ "$SERVICE" -eq 1 ]; then
     # Enroll only (no foreground run), then hand lifecycle to the OS.
-    "${dest}/localmesh-agent" "$@" -run=false
-    "${dest}/localmesh-agent" service install
+    # join blocks until an admin approves the request — it prints where.
+    "${dest}/localmesh-agent" "$@" -run=false \
+      || fail "join failed — nothing was enrolled; see the error above, then re-run join"
+    "${dest}/localmesh-agent" service install \
+      || fail "service install failed — the node is enrolled; retry: ${dest}/localmesh-agent service install"
   else
     exec "${dest}/localmesh-agent" "$@"
   fi
@@ -175,7 +178,8 @@ else
     cfgdir="${LOCALMESH_AGENT_DIR:-$HOME/.localmesh}"
     if [ -f "$cfgdir/agent.json" ]; then
       log "registering OS service"
-      "${dest}/localmesh-agent" service install
+      "${dest}/localmesh-agent" service install \
+        || fail "service install failed — retry: ${dest}/localmesh-agent service install"
     else
       log "note: --service given but no config at $cfgdir/agent.json — join first"
     fi

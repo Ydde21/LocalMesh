@@ -134,11 +134,16 @@ if (-not $NoJoin -and $Server -and $Token) {
   if ($Name) { $joinArgs += @("-name", $Name) }
   if ($Service) {
     # Enroll only (no foreground run), then hand lifecycle to the SCM.
+    # Native commands don't honor $ErrorActionPreference — check exits.
     & $bin @joinArgs "-run=false"
+    if ($LASTEXITCODE -ne 0) { throw "join failed (exit $LASTEXITCODE) — nothing was enrolled; see the error above, then re-run join" }
     & $bin service install
+    if ($LASTEXITCODE -ne 0) { throw "service install failed (exit $LASTEXITCODE) — the node is enrolled; retry: $bin service install" }
     & $bin service start
+    if ($LASTEXITCODE -ne 0) { throw "service start failed (exit $LASTEXITCODE) — retry: $bin service start" }
   } else {
     & $bin @joinArgs
+    exit $LASTEXITCODE
   }
 } else {
   if ($Service) {
@@ -147,7 +152,9 @@ if (-not $NoJoin -and $Server -and $Token) {
     if (Test-Path $cfg) {
       Write-Host "  registering Windows service (requires elevation)"
       & $bin service install
+      if ($LASTEXITCODE -ne 0) { throw "service install failed (exit $LASTEXITCODE) — retry: $bin service install" }
       & $bin service start
+      if ($LASTEXITCODE -ne 0) { throw "service start failed (exit $LASTEXITCODE) — retry: $bin service start" }
     } else {
       Write-Host "  note: -Service given but no config at $cfg — join first"
     }

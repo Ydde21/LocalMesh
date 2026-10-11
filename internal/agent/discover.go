@@ -23,7 +23,11 @@ var ErrNoClusters = errors.New("no LocalMesh clusters found on this network — 
 // DiscoverServers browses the local link for advertised LocalMesh
 // control planes. An empty slice is a normal result, not an error.
 func DiscoverServers(ctx context.Context, timeout time.Duration) ([]discovery.Cluster, error) {
-	return discovery.Browse(ctx, discovery.BrowseOptions{Timeout: timeout})
+	clusters, err := discovery.Browse(ctx, discovery.BrowseOptions{Timeout: timeout})
+	if err != nil && errors.Is(err, discovery.ErrUnavailable) {
+		return nil, fmt.Errorf("%w — use 'join --server <url>' for manual enrollment instead", err)
+	}
+	return clusters, err
 }
 
 // DiscoverJoinOptions controls `join -discover`: which cluster to pick
