@@ -29,7 +29,9 @@ name: Release Verify
 #   ollama-live       real-Ollama HA smoke, never faked — runs on every
 #                     tag/release; dispatch-gated opt-in otherwise
 #   published-verify  release events only: rebuild this tag's source and
-#                     byte-compare against the published SHA256SUMS
+#                     byte-compare published binaries; verify the signed
+#                     manifest against the published pubkey + sums; prove
+#                     all four published SBOMs describe this revision
 #   release-gate      aggregate: fails if any required job failed OR
 #                     was skipped
 #
@@ -278,22 +280,36 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: provenance — scan revision == event commit
+        # The SBOMs and vuln findings must describe the exact revision
+        # this run was triggered for. HEAD == GITHUB_SHA by construction
+        # on every trigger here; asserting it keeps a future `ref:`
+        # override on this checkout from silently breaking the binding.
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA" || {
+            echo "FAIL: checkout $(git rev-parse HEAD) != event commit $GITHUB_SHA" >&2; exit 1; }
+          echo "provenance: security scan runs on $GITHUB_SHA"
       - name: install govulncheck (pinned)
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
       - name: govulncheck ./...
         run: govulncheck ./...
-      - name: "stray-binary decoy (regression: root build litter must not poison the source SBOM)"
+      - name: "stray-binary decoys (regression: root build litter must not poison the source SBOM)"
         # v0.12 release-candidate finding: an extensionless binary dropped
         # at the repo root was cataloged by syft and failed the gate on
         # ITS toolchain. .syft.yaml + the grype excludes below root-anchor
-        # the product names; a live decoy proves it every run.
-        run: go build -o ./localmesh-agent ./cmd/localmesh-agent
+        # the product names; live decoys for both binary names prove it
+        # every run (one name could be a lucky exclusion-list accident).
+        run: |
+          go build -o ./localmesh-agent ./cmd/localmesh-agent
+          go build -o ./localmesh-server ./cmd/localmesh-server
       - name: image build + SBOM + grype policy scan (scripts/ci-security-scan.sh)
         run: bash scripts/ci-security-scan.sh
-      - name: assert decoy excluded and deps still cataloged
+      - name: assert decoys excluded and deps still cataloged
         # A cataloged Go binary always contributes a `stdlib` component —
-        # its absence proves the decoy was excluded; the library floor
-        # proves the exclusions did not over-match real dependencies.
+        # its absence proves the decoys were excluded. The library floor
+        # and the named sentinels prove the exclusions did not over-match
+        # real dependencies: an exclude pattern that ate a real module
+        # would drop these counts and names.
         run: |
           set -e
           bin_count=$(jq '[.components[] | select(.name=="stdlib")] | length' dist/security/sbom-source.cdx.json)
@@ -304,8 +320,13 @@ jobs:
           if [ "$dep_count" -lt 50 ]; then
             echo "FAIL: sbom-source suspiciously small ($dep_count components) — exclusion over-matched" >&2; exit 1
           fi
-          rm -f ./localmesh-agent
-          echo "stray-binary regression OK: decoy excluded, $dep_count real components cataloged"
+          for sentinel in github.com/coder/websocket next; do
+            if [ "$(jq --arg n "$sentinel" '[.components[] | select(.name==$n)] | length' dist/security/sbom-source.cdx.json)" -eq 0 ]; then
+              echo "FAIL: sentinel dependency $sentinel missing from sbom-source — exclusions are hiding real components" >&2; exit 1
+            fi
+          done
+          rm -f ./localmesh-agent ./localmesh-server
+          echo "stray-binary regression OK: decoys excluded, $dep_count real components cataloged (sentinels present)"
       - name: upload security reports (dist/security/)
         if: always()
         uses: actions/upload-artifact@v7.0.1
@@ -355,6 +376,14 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: provenance — artifact revision == event commit
+        # Same binding as the security job: the CI-built release tree
+        # (binaries, dev-signed manifest) must be built from the exact
+        # commit this run gates on.
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA" || {
+            echo "FAIL: checkout $(git rev-parse HEAD) != event commit $GITHUB_SHA" >&2; exit 1; }
+          echo "provenance: release artifacts built on $GITHUB_SHA"
       - name: pin SOURCE_DATE_EPOCH to the commit time (deterministic manifest)
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
       - name: generate ephemeral dev signing key
@@ -488,13 +517,15 @@ jobs:
         run: bash scripts/ci-ollama-ha-smoke.sh
 
   # ------------------------------------------------------------------
-  # Published-bytes verification — RELEASE EVENTS ONLY. The other jobs
+  # Published-artifact provenance — RELEASE EVENTS ONLY. The other jobs
   # verify the CI-built release tree; this one closes the loop on the
-  # actual published artifacts: download the published SHA256SUMS,
-  # rebuild this tag's source under the release ceremony's env pins,
-  # and require every published binary to byte-match. A tampered or
-  # stale-uploaded asset fails the gate. Not in `needs:` of anything —
-  # it is a leaf; release-gate requires it on release events.
+  # actual published assets: rebuild this tag's source under the release
+  # ceremony's env pins and require every published binary to byte-match,
+  # verify the signed manifest against the published pubkey AND bind its
+  # digests to the byte-verified checksums, and prove all four published
+  # SBOMs describe this same revision. A tampered or stale-uploaded asset
+  # fails the gate. Not in `needs:` of anything — it is a leaf;
+  # release-gate requires it on release events.
   # ------------------------------------------------------------------
   published-verify:
     name: published-verify (published binaries rebuild from tag source)
@@ -509,7 +540,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: published binaries == fresh build of this tag (scripts/ci-verify-published.sh)
+      - name: published binaries + manifest + SBOMs == this tag's source (scripts/ci-verify-published.sh)
         run: bash scripts/ci-verify-published.sh
 
   # ------------------------------------------------------------------

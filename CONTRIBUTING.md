@@ -9,6 +9,14 @@ workflow this repo enforces.
 
 Requires: Go (see `go.mod`), Node 20+, and Docker for the test stack.
 
+On macOS, also install the Xcode Command Line Tools
+(`xcode-select --install`). `/usr/bin/git` is an Apple shim that is a
+no-op without them, and cgo-dependent paths — the race detector, any
+future cgo dependency — need the clang toolchain. `CGO_ENABLED=0`
+works around missing cgo for plain `go build`/`go test`, but it is NOT
+equivalent to full native verification: it silently skips cgo paths.
+Verify on a machine with CLT before calling a change done.
+
 ```bash
 make dev-up                       # postgres on :5433 (deploy/dev.compose.yml)
 LOCALMESH_DEV_INSECURE_HTTP=1 \

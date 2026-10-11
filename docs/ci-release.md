@@ -70,13 +70,13 @@ solely on `release` events — required there, skip-tolerated elsewhere.
 | smokes | ✓ ×4 legs | ✓ ×4 legs | ✓ ×4 legs | ✓ ×4 legs | each leg self-provisions postgres via docker |
 | chaos | ✓ | ✓ | ✓ | ✓ | `scripts/ci-chaos.sh` |
 | stress | ✓ | ✓ | ✓ | ✓ | `scripts/ci-stress.sh -q`, default 10 rounds |
-| security | ✓ | ✓ | ✓ | ✓ | govulncheck@v1.8.0 + `scripts/ci-security-scan.sh` + stray-binary decoy regression; reports → `security-reports` artifact |
+| security | ✓ | ✓ | ✓ | ✓ | provenance assertion (HEAD == event commit) + govulncheck@v1.8.0 + `scripts/ci-security-scan.sh` + two-binary decoy regression with named-dep sentinels; reports → `security-reports` artifact |
 | repro | ✓ | ✓ | ✓ | ✓ | `scripts/ci-repro-build.sh` |
 | release-artifacts | ✓ | ✓ | ✓ | ✓ | `--dev` ephemeral-key + `--unsigned`; verifies both; uploads `release-dist` |
 | install-e2e | ✓ +`--ha` | ✓ +`--ha` | ✓ | ✓ | `scripts/ci-clean-install.sh`; `--ha` leg also runs on `clean_install_ha=true` dispatches |
 | artifact-install | ✓ | ✓ | ✓ | ✓ | `scripts/ci-artifact-install.sh` on the downloaded `release-dist` artifact |
 | ollama-live | ✓ | ✓ | ✗ | ✓ | real Ollama only; `REQUIRE_REAL_OLLAMA=1` — never faked; required on tag/release events |
-| published-verify | ✗ | ✓ | ✗ | ✗ | `scripts/ci-verify-published.sh` — published SHA256SUMS vs fresh build of the tag; retries while assets upload |
+| published-verify | ✗ | ✓ | ✗ | ✗ | `scripts/ci-verify-published.sh` — published binaries, signed manifest, and all four SBOMs proven against the tag source; retries while assets upload |
 | release-gate | ✓ | ✓ | ✓ | ✓ | aggregate; fails on failure/skip |
 
 ## Design decisions (and why)
@@ -114,9 +114,17 @@ solely on `release` events — required there, skip-tolerated elsewhere.
   the published `SHA256SUMS` (retrying while the asset upload lands —
   the release event can fire before assets do), rebuilds the tagged
   source via the release ceremony's env pins, and requires every
-  published binary to byte-match. Signatures/manifest are excluded by
-  design — signer metadata legitimately differs from the unsigned
-  rebuild; the binaries are what installers verify.
+  published binary to byte-match. It then proves provenance for the
+  rest of the asset set: the signed manifest must verify against the
+  published pubkey, name the tag's version, and describe exactly the
+  byte-verified checksums; the published source SBOM must equal a
+  fresh syft catalog of the tag checkout (component sets — CycloneDX
+  documents embed timestamps, so bytes legitimately differ); the
+  image SBOMs must catalog the product binaries on the release
+  toolchain pin, and the web SBOM's `next` version must equal the
+  tag's package-lock. Signatures on the manifest are *verified*, not
+  byte-compared — signer metadata legitimately differs from the
+  unsigned rebuild.
 - **Stress runs the script default (10 rounds)** under a 75-minute cap.
   `bash scripts/ci-stress.sh -n 5 -q` is the documented shorter screen
   if wall clock becomes a problem — the flag already exists; do not
