@@ -20,6 +20,7 @@ package server_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -187,9 +188,17 @@ func TestChaos2AgentUpdateAcrossFailover(t *testing.T) {
 		wls, err := st.ListWorkloads(ctx, store.WorkloadFilter{Status: "running", Limit: 4})
 		return err == nil && len(wls) > 0
 	}, "node busy before update claim")
-	chaosWait(t, 15*time.Second, func() bool {
+	// The claim pass needs an updateplane tick (1s cadence) that sees
+	// the node online, plus the fenced claim write — 15s proved
+	// marginal under CPU pressure. The drain clock starts at the claim
+	// write (ClaimPendingUpdate stamps updated_at), not here.
+	chaosWaitDiag(t, 30*time.Second, func() bool {
 		return updatePhase(t, st, u.ID) == store.UpdDraining
-	}, "update pending→draining")
+	}, "update pending→draining", func() string {
+		return fmt.Sprintf("phase=%q online=%v drained=%v maintenance=%q",
+			updatePhaseQuiet(st, u.ID), a.srv.Hub().Online(nodeID),
+			a.srv.Hub().Drained(nodeID), maintQuiet(st, nodeID))
+	})
 	if m, _ := nodeMaintenance(t, st, nodeID); m != store.MaintUpdating {
 		t.Fatalf("maintenance = %q during drain, want updating", m)
 	}
@@ -224,22 +233,38 @@ func TestChaos2AgentUpdateAcrossFailover(t *testing.T) {
 
 	// Agent reconnects → node drained → dispatch → honest refusal
 	// (unpinned key) → terminal 'failed' with the reason recorded.
+	// NOTE the drain clock runs from the ORIGINAL claim on `a` — a slow
+	// fence+restart+reconnect can legitimately land 'drain timeout'
+	// instead of the refusal; the diagnostic separates the two.
 	chaosWait(t, 60*time.Second, func() bool { return b.srv.Hub().Online(nodeID) },
 		"agent reconnect")
-	chaosWait(t, 60*time.Second, func() bool {
-		return store.UpdTerminal(updatePhase(t, bst, u.ID))
-	}, "update to reach a terminal phase")
+	chaosWaitDiag(t, 60*time.Second, func() bool {
+		return store.UpdTerminal(updatePhaseQuiet(bst, u.ID))
+	}, "update to reach a terminal phase", func() string {
+		return fmt.Sprintf("phase=%q online=%v drained=%v maintenance=%q",
+			updatePhaseQuiet(bst, u.ID), b.srv.Hub().Online(nodeID),
+			b.srv.Hub().Drained(nodeID), maintQuiet(bst, nodeID))
+	})
 	u2, err := bst.GetAgentUpdate(ctx, u.ID)
 	if err != nil {
 		t.Fatalf("get update: %v", err)
 	}
 	if u2.Phase != store.UpdFailed || !strings.Contains(u2.Error, "signing key") {
-		t.Fatalf("update landed phase=%q err=%q — want 'failed' (agent refused unsigned release)",
-			u2.Phase, u2.Error)
+		t.Fatalf("update landed phase=%q err=%q (drain clock ran %s) — "+
+			"want 'failed' (agent refused unsigned release); "+
+			"online=%v drained=%v maintenance=%q",
+			u2.Phase, u2.Error, time.Since(u2.UpdatedAt).Round(10*time.Millisecond),
+			b.srv.Hub().Online(nodeID), b.srv.Hub().Drained(nodeID), maintQuiet(bst, nodeID))
 	}
 	if u2.FinishedAt == nil {
 		t.Error("terminal update missing finished_at — still counted live")
 	}
+	// finishUpdate commits the terminal phase and clears the marker as
+	// separate writes — poll the marker rather than reading the gap.
+	chaosWait(t, 15*time.Second, func() bool {
+		m, _ := nodeMaintenance(t, bst, nodeID)
+		return m != store.MaintUpdating
+	}, "updating marker release")
 	if m, _ := nodeMaintenance(t, bst, nodeID); m != store.MaintNone {
 		t.Fatalf("maintenance marker leaked across failover: %q", m)
 	}
@@ -407,21 +432,36 @@ func TestChaos2RolloutApprovalSurvivesKill(t *testing.T) {
 	// The gate still WORKS post-restart: approving B releases n2's
 	// update — it claims, dispatches on the reconnected agent, and
 	// lands honest 'failed' (unpinned key) → halt → rollout 'failed'.
+	//
+	// Approve only once n2 is online AND drained: claim stamps
+	// updated_at (the drain clock), and dispatch needs both gates on
+	// the following tick. Claiming while the conn is still unstable
+	// burns the 120s drain budget on a reconnect flap and the update
+	// finishes 'drain timeout' instead of reaching the agent's honest
+	// refusal — a real production outcome, but not the path under test.
+	chaosWaitDiag(t, 60*time.Second, func() bool {
+		return b.srv.Hub().Online(n2) && b.srv.Hub().Drained(n2)
+	}, "batch node reconnect+drain before approval", func() string {
+		return fmt.Sprintf("n2 online=%v drained=%v inFlight=%d maintenance=%q",
+			b.srv.Hub().Online(n2), b.srv.Hub().Drained(n2),
+			b.srv.Hub().InFlight(n2), maintQuiet(bst, n2))
+	})
 	code, _, _ = b.env().adminReq(t, http.MethodPost,
 		"/api/v1/rollouts/"+roB+"/approve", nil)
 	if code != http.StatusOK {
 		t.Fatalf("approve rollout B post-restart: %d", code)
 	}
-	chaosWait(t, 60*time.Second, func() bool { return b.srv.Hub().Online(n2) },
-		"batch node reconnect")
 	waitRolloutState(t, bst, roB, 90*time.Second, store.RolloutFailed)
 	u2, err := bst.GetAgentUpdate(ctx, pendB.ID)
 	if err != nil {
 		t.Fatalf("get released update: %v", err)
 	}
 	if u2.Phase != store.UpdFailed || !strings.Contains(u2.Error, "signing key") {
-		t.Fatalf("released update phase=%q err=%q — want 'failed' via honest agent refusal",
-			u2.Phase, u2.Error)
+		t.Fatalf("released update phase=%q err=%q (updated_at %s ago) — "+
+			"want 'failed' via honest agent refusal; "+
+			"n2 online=%v drained=%v inFlight=%d",
+			u2.Phase, u2.Error, time.Since(u2.UpdatedAt).Round(10*time.Millisecond),
+			b.srv.Hub().Online(n2), b.srv.Hub().Drained(n2), b.srv.Hub().InFlight(n2))
 	}
 
 	// A is untouched by B's lifecycle — still parked on its offline

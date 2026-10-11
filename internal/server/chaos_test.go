@@ -33,6 +33,7 @@ package server_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -247,9 +248,18 @@ func TestChaosStaleEpochCannotDispatch(t *testing.T) {
 	}
 
 	// Install the real epoch → the queued op claims+dispatches once.
+	// The path is two queue passes (claim, then send on the next tick)
+	// plus several store round-trips — 5s was marginal under load.
 	q.SetEpoch(epoch)
-	chaosWait(t, 5*time.Second, func() bool { return disp.sentCount() == 1 },
-		"rightful-epoch queue dispatch")
+	chaosWaitDiag(t, 15*time.Second, func() bool { return disp.sentCount() == 1 },
+		"rightful-epoch queue dispatch", func() string {
+			status := "<unreadable>"
+			if s, err := st.GetModelOpState(ctx, op2.ID); err == nil {
+				status = s.Status
+			}
+			return fmt.Sprintf("op2 status=%q disp.sent=%d online=%v",
+				status, disp.sentCount(), disp.Online(nodeID))
+		})
 	time.Sleep(200 * time.Millisecond)
 	if n := disp.sentCount(); n != 1 {
 		t.Fatalf("queue sent %d frames for one op", n)
@@ -278,9 +288,12 @@ func TestChaosStaleEpochCannotDispatch(t *testing.T) {
 		t.Fatalf("stale manager moved update to %q", got)
 	}
 	mgr.SetEpoch(epoch)
-	chaosWait(t, 5*time.Second, func() bool {
+	// pending → draining (claim pass) → dispatched (drain pass) needs
+	// two consecutive ticks plus the claim/send writes — 5s was
+	// marginal under CPU pressure; the dump names the stalled gate.
+	chaosWaitDiag(t, 15*time.Second, func() bool {
 		return updatePhase(t, st, u.ID) == store.UpdDispatched
-	}, "update to dispatch under real epoch")
+	}, "update to dispatch under real epoch", updateWaitDiag(st, u.ID, nodeID, udisp))
 	if n := udisp.sentCount(); n != 1 {
 		t.Fatalf("update manager sent %d frames for one update", n)
 	}
@@ -549,10 +562,12 @@ func TestChaosAgentUpdateInterrupted(t *testing.T) {
 	defer mcancel()
 	go mgr.Run(mctx)
 
-	// pending → draining (maintenance marker set) → dispatched.
-	chaosWait(t, 5*time.Second, func() bool {
+	// pending → draining (maintenance marker set) → dispatched: two
+	// orchestrator ticks plus the claim/send writes; 5s was marginal
+	// under CPU pressure, and the dump names the stalled gate.
+	chaosWaitDiag(t, 15*time.Second, func() bool {
 		return updatePhase(t, st, u.ID) == store.UpdDispatched
-	}, "update pending→dispatched")
+	}, "update pending→dispatched", updateWaitDiag(st, u.ID, nodeID, disp))
 	if n := disp.sentCount(); n != 1 {
 		t.Fatalf("upgrade frames sent = %d, want 1", n)
 	}
@@ -565,9 +580,9 @@ func TestChaosAgentUpdateInterrupted(t *testing.T) {
 	disp.set(nodeID, false, false, "")
 	mgr.OnNodeDisconnected(nodeID)
 
-	chaosWait(t, 5*time.Second, func() bool {
+	chaosWaitDiag(t, 15*time.Second, func() bool {
 		return updatePhase(t, st, u.ID) == store.UpdInterrupted
-	}, "update to reach 'interrupted'")
+	}, "update to reach 'interrupted'", updateWaitDiag(st, u.ID, nodeID, disp))
 	u2, err := st.GetAgentUpdate(ctx, u.ID)
 	if err != nil {
 		t.Fatalf("get update: %v", err)
@@ -575,6 +590,12 @@ func TestChaosAgentUpdateInterrupted(t *testing.T) {
 	if u2.FinishedAt == nil {
 		t.Error("interrupted update has no finished_at — left live")
 	}
+	// finishUpdate commits the terminal phase and clears the marker as
+	// separate writes — poll the marker instead of reading the gap.
+	chaosWaitDiag(t, 10*time.Second, func() bool {
+		m, _ := nodeMaintenance(t, st, nodeID)
+		return m != store.MaintUpdating
+	}, "updating marker release", updateWaitDiag(st, u.ID, nodeID, disp))
 	if m, _ := nodeMaintenance(t, st, nodeID); m != store.MaintNone {
 		t.Fatalf("maintenance marker leaked: %q — node stays fenced", m)
 	}

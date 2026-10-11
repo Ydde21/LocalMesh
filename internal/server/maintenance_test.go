@@ -83,8 +83,10 @@ func TestMaintenanceExcludesNewWork(t *testing.T) {
 	agCtx, agCancel := context.WithCancel(context.Background())
 	defer agCancel()
 	go ag.Run(agCtx)
-	nodes := e.waitNodeOnline(t, 1)
-	nodeID := nodes[0]["id"].(string)
+	// Wait for the capability report's model inventory, not just the WS
+	// registration ("online") — the first report can lag registration.
+	node := e.waitNodeModel(t, "m1:latest")
+	nodeID := node["id"].(string)
 
 	if !hasModel(modelsAvailable(t, e), "m1:latest") {
 		t.Fatal("baseline: m1 not advertised")
@@ -268,8 +270,10 @@ func TestModelsOfflineNodeFiltered(t *testing.T) {
 	ag := agent.New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	agCtx, agCancel := context.WithCancel(context.Background())
 	go ag.Run(agCtx)
-	nodes := e.waitNodeOnline(t, 1)
-	nodeID := nodes[0]["id"].(string)
+	// Wait for the capability report's model inventory, not just the WS
+	// registration ("online") — the first report can lag registration.
+	node := e.waitNodeModel(t, "ghost:latest")
+	nodeID := node["id"].(string)
 
 	if !hasModel(modelsAvailable(t, e), "ghost:latest") {
 		t.Fatal("baseline: model not advertised")
