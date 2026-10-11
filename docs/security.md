@@ -86,6 +86,13 @@ cannot exhaust the database pool:
 Limits are in-memory token buckets — per-process, not coordinated across
 replicas (LocalMesh is a single control-plane instance by design).
 
+`LOCALMESH_TRUST_PROXY` gates `X-Forwarded-For` handling for the rate
+limiter — off by default, so forwarding headers are never trusted unless
+a known reverse proxy is in front. When it *is* on, the **rightmost**
+XFF entry wins — the one the trusted proxy appended — so a client cannot
+rotate the header to mint fresh rate-limit buckets. The dashboard's
+login limiter enforces the identical contract (`web/lib/session.ts`).
+
 ## Dashboard sessions
 
 Sessions are stateless signed cookies (HMAC-SHA256 over expiry+nonce,
@@ -130,10 +137,25 @@ admin key out of browsers:
 - Sessions are the signed cookies described above — stateless, so they
   survive web restarts as long as `session.key` persists (a regenerated
   or ephemeral key = everyone logs in again).
-- Password verification is constant-time; 5 failures/minute per IP → 429.
+- Password verification is constant-time; 5 failures/minute per
+  rate-limit identity → 429. The identity is the rightmost
+  `X-Forwarded-For` entry when `LOCALMESH_TRUST_PROXY` is set (same
+  contract as the Go limiter — spoofed leftmost entries can't bypass it),
+  otherwise a single `local` bucket: with no trusted proxy every client
+  shares the 5-failures/minute budget, so a sustained bad-password flood
+  can keep legitimate logins at 429. That is deliberately fail-closed —
+  the alternative is unbounded online guessing at an admin key.
+- Configured passwords shorter than 12 characters log a warning at
+  startup — a weak dashboard password is the front door to an admin key.
 - Mutations through the BFF additionally require a same-origin request.
 - **The admin key never ships in client JavaScript** — it lives only in
   the web container's env / the mounted key file.
+- The session cookie is `HttpOnly`+`SameSite=Lax` always and carries
+  `Secure` when the request URL is HTTPS. For TLS-terminating proxies,
+  `cookieSecure()` in `web/lib/session.ts` also honors
+  `X-Forwarded-Proto: https` under `LOCALMESH_TRUST_PROXY` — wiring it
+  into the auth route is a one-line patch tracked as I-1 in the v0.10
+  audit.
 
 ## Command safety
 
@@ -243,8 +265,10 @@ revoke/reinstate/delete, settings changes, model ops. Use it to answer
 
 The full operational guide is
 [docs/production-hardening.md](production-hardening.md) (threat model,
-checklist, first-run flow, rotation runbook); the pre-beta audit behind
-it is [docs/security-audit-v09.md](security-audit-v09.md). Highlights:
+checklist, first-run flow, rotation runbook); the audits behind it are
+[docs/security-audit-v09.md](security-audit-v09.md) and
+[docs/security-audit-v10.md](security-audit-v10.md) (current).
+Highlights:
 
 - [ ] Don't expose 8443 to the internet — reach it over LAN, WireGuard,
       or Tailscale/Headscale. If you must publish it, front it with a
@@ -272,7 +296,3 @@ A delete that would remove a model's **last replica** is refused with
 can't silently make a model unschedulable cluster-wide. The check
 counts replicas across all node records (an offline node's copy still
 counts: it isn't deleted, just unreachable).
-
-`LOCALMESH_TRUST_PROXY` gates `X-Forwarded-For` handling for the rate
-limiter — off by default, so forwarding headers are never trusted
-unless a known reverse proxy is in front.

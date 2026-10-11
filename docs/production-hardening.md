@@ -3,7 +3,9 @@
 Operational security guide for running LocalMesh outside the lab. It
 complements [security.md](security.md) (the trust model — what the
 system guarantees) with the deployment side: what *you* must guarantee.
-The audit that informed this guide is [security-audit-v09.md](security-audit-v09.md).
+The audits that informed this guide are
+[security-audit-v09.md](security-audit-v09.md) and
+[security-audit-v10.md](security-audit-v10.md) (current).
 
 ## Threat model in one paragraph
 
@@ -64,8 +66,14 @@ flag nobody audited. Those are deployment responsibilities — this doc.
       LAN broadcast (cluster name, CA fingerprint — public info, but a
       broadcast is still a beacon). The hardened example ships it off.
 - [ ] **`LOCALMESH_TRUST_PROXY` stays unset** unless a reverse proxy
-      overwrites `X-Forwarded-For` — with it on and no proxy, clients
-      spoof their rate-limit identity.
+      overwrites (or appends to) `X-Forwarded-For` — with it on and no
+      proxy, clients spoof their rate-limit identity. When it is on,
+      both the Go limiter and the dashboard login limiter trust only the
+      **rightmost** XFF entry — the one your proxy appended — so
+      client-supplied leftmost entries can't mint fresh buckets. The
+      flag will also gate `X-Forwarded-Proto` trust for the session
+      cookie's `Secure` flag once the I-1 patch is wired in (see the
+      dashboard checklist below).
 
 ### Secrets and keys
 
@@ -124,8 +132,13 @@ flag nobody audited. Those are deployment responsibilities — this doc.
       The session cookie gets its `Secure` flag only when the request
       reaches Next over https — behind a TLS-terminating proxy it stays
       a non-`Secure` cookie (it is still `HttpOnly`+`SameSite=Lax`).
+      `web/lib/session.ts` ships `cookieSecure()`, which honors
+      `X-Forwarded-Proto: https` under `LOCALMESH_TRUST_PROXY` only (it
+      can't be spoofed on direct connections); wiring it into the auth
+      route is the one-line patch tracked as I-1 in the v0.10 audit.
       Localhost/LAN/VPN access is the intended deployment; a public
-      dashboard should sit behind a TLS proxy that redirects http→https.
+      dashboard should sit behind a TLS proxy that redirects
+      http→https.
 - [ ] **`LOCALMESH_TLS_INSECURE=1` is dev-only** — the production path
       is `LOCALMESH_CA_FILE` (compose wires it from the data volume).
 - [ ] **Browser-facing attack surface is the BFF** — every `/api/lm/*`
@@ -185,8 +198,16 @@ curl --cacert <(docker compose exec server cat /data/ca.pem) \
 - Enrollment tokens authenticate submission, not identity — an attacker
   with a live token can submit hardware data and burn a use; approval is
   the real gate. Verify fingerprints.
-- The dashboard login rate limit is per-IP in-process; see audit R-1 —
-  keep the dashboard on trusted networks regardless.
+- The dashboard login rate limit is in-process per rate-limit
+  identity. Audit finding R-1 (XFF bypass) is closed: the limiter
+  honors `X-Forwarded-For` only under `LOCALMESH_TRUST_PROXY` and only
+  the rightmost entry, matching the Go control plane. Residual
+  trade-off: without `TRUST_PROXY` every client shares one `local`
+  bucket, so sustained bad-password floods can lock out legitimate
+  logins for the window — deliberately fail-closed against unlimited
+  guessing; set `TRUST_PROXY` behind a real proxy to restore per-client
+  buckets. Keep the dashboard on trusted networks regardless.
 
-See [security-audit-v09.md](security-audit-v09.md) for the full findings
-table and what the regression suite already verifies.
+See [security-audit-v10.md](security-audit-v10.md) (and the v0.9 audit it
+re-classifies) for the full findings table and what the regression suite
+already verifies.
