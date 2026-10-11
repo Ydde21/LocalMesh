@@ -43,7 +43,8 @@ security ─┤
 repro ─┤
 release-artifacts ─┬─> artifact-install ─┐
 install-e2e ─────────────────────────────┤
-ollama-live (opt-in, dispatch only) ─────┤
+ollama-live (release/tag; dispatch opt-in) ┤
+published-verify (release events only) ──┤
                                          ▼
                                    release-gate
 ```
@@ -53,28 +54,30 @@ release-artifacts`) and `release-gate` (`needs:` every job above,
 `if: always()`). The gate parses `toJSON(needs)` and fails unless every
 required job reports `success` — **`skipped` counts as failure** for
 required jobs. A job dropped from `needs:` reads as `missing` → FAIL,
-so the gate cannot silently shrink. `ollama-live` is the single
-exception: skipped is acceptable unless the run was dispatched with
-`ollama_live=true`, in which case it must have succeeded.
+so the gate cannot silently shrink. Two exceptions: `ollama-live` may
+skip only on plain dispatches (it is required on tag/release events and
+when `ollama_live=true` is requested), and `published-verify` exists
+solely on `release` events — required there, skip-tolerated elsewhere.
 
 ## What runs when
 
-| Job | Tag push | Dispatch (defaults) | Dispatch `ollama_live=true` | Notes |
-|---|---|---|---|---|
-| verify | ✓ | ✓ | ✓ | `make verify` verbatim (npm ci first for the web leg) |
-| cross-compile | ✓ | ✓ | ✓ | 5 agent + 2 server targets |
-| agent-smoke | ✓ ×3 OS | ✓ ×3 OS | ✓ ×3 OS | same contract as ci.yml |
-| agent-runtime | ✓ ×3 OS | ✓ ×3 OS | ✓ ×3 OS | same contract as ci-runtime.yml |
-| smokes | ✓ ×3 legs | ✓ ×3 legs | ✓ ×3 legs | each leg self-provisions postgres via docker |
-| chaos | ✓ | ✓ | ✓ | `scripts/ci-chaos.sh` |
-| stress | ✓ | ✓ | ✓ | `scripts/ci-stress.sh -q`, default 10 rounds |
-| security | ✓ | ✓ | ✓ | govulncheck@v1.8.0 + `scripts/ci-security-scan.sh`; reports → `security-reports` artifact |
-| repro | ✓ | ✓ | ✓ | `scripts/ci-repro-build.sh` |
-| release-artifacts | ✓ | ✓ | ✓ | `--dev` ephemeral-key + `--unsigned`; verifies both; uploads `release-dist` |
-| install-e2e | ✓ | ✓ | ✓ | `scripts/ci-clean-install.sh`; `--ha` leg needs `clean_install_ha=true` |
-| artifact-install | ✓ | ✓ | ✓ | `scripts/ci-artifact-install.sh` on the downloaded `release-dist` artifact |
-| ollama-live | ✗ | ✗ | ✓ | real Ollama only; `REQUIRE_REAL_OLLAMA=1` — never faked |
-| release-gate | ✓ | ✓ | ✓ | aggregate; fails on failure/skip |
+| Job | Tag push | Release published | Dispatch (defaults) | Dispatch `ollama_live=true` | Notes |
+|---|---|---|---|---|---|
+| verify | ✓ | ✓ | ✓ | ✓ | `make verify` verbatim (npm ci first for the web leg) |
+| cross-compile | ✓ | ✓ | ✓ | ✓ | 5 agent + 2 server targets |
+| agent-smoke | ✓ ×4 OS | ✓ ×4 OS | ✓ ×4 OS | ✓ ×4 OS | same contract as ci.yml (incl. ubuntu-26.04) |
+| agent-runtime | ✓ ×3 OS | ✓ ×3 OS | ✓ ×3 OS | ✓ ×3 OS | same contract as ci-runtime.yml |
+| smokes | ✓ ×4 legs | ✓ ×4 legs | ✓ ×4 legs | ✓ ×4 legs | each leg self-provisions postgres via docker |
+| chaos | ✓ | ✓ | ✓ | ✓ | `scripts/ci-chaos.sh` |
+| stress | ✓ | ✓ | ✓ | ✓ | `scripts/ci-stress.sh -q`, default 10 rounds |
+| security | ✓ | ✓ | ✓ | ✓ | govulncheck@v1.8.0 + `scripts/ci-security-scan.sh` + stray-binary decoy regression; reports → `security-reports` artifact |
+| repro | ✓ | ✓ | ✓ | ✓ | `scripts/ci-repro-build.sh` |
+| release-artifacts | ✓ | ✓ | ✓ | ✓ | `--dev` ephemeral-key + `--unsigned`; verifies both; uploads `release-dist` |
+| install-e2e | ✓ +`--ha` | ✓ +`--ha` | ✓ | ✓ | `scripts/ci-clean-install.sh`; `--ha` leg also runs on `clean_install_ha=true` dispatches |
+| artifact-install | ✓ | ✓ | ✓ | ✓ | `scripts/ci-artifact-install.sh` on the downloaded `release-dist` artifact |
+| ollama-live | ✓ | ✓ | ✗ | ✓ | real Ollama only; `REQUIRE_REAL_OLLAMA=1` — never faked; required on tag/release events |
+| published-verify | ✗ | ✓ | ✗ | ✗ | `scripts/ci-verify-published.sh` — published SHA256SUMS vs fresh build of the tag; retries while assets upload |
+| release-gate | ✓ | ✓ | ✓ | ✓ | aggregate; fails on failure/skip |
 
 ## Design decisions (and why)
 
@@ -94,18 +97,26 @@ exception: skipped is acceptable unless the run was dispatched with
 - **SOURCE_DATE_EPOCH** is pinned to the commit timestamp in
   `release-artifacts` so `release-manifest.json`'s `created_at` is
   deterministic per commit — complements `ci-repro-build.sh`.
-- **`ollama-live` is opt-in, never faked.** `ci-ollama-ha-smoke.sh`
-  exits 0-with-SKIP when no real Ollama answers; that would silently
-  weaken the gate, so the job only exists when explicitly requested and
-  runs with `REQUIRE_REAL_OLLAMA=1` (hard fail). Default path starts an
-  `ollama/ollama` container on the runner (models pulled by the script
-  itself); the `ollama_url` input targets an external/GPU endpoint
-  instead — the intended use on self-hosted or GPU-reachable runners.
+- **`ollama-live` is required on every release path, never faked.**
+  `ci-ollama-ha-smoke.sh` exits 0-with-SKIP when no real Ollama answers;
+  that would silently weaken the gate, so the job runs with
+  `REQUIRE_REAL_OLLAMA=1` (hard fail). On tag pushes and published
+  releases it is unconditional — a released tag always carries
+  real-engine HA evidence. Plain dispatches keep it behind
+  `ollama_live=true` so quick RC sanity runs stay cheap; `ollama_url`
+  targets an external/GPU endpoint there.
 - **`install-e2e` runs by default** — everything it needs (docker
   compose v2, go, curl, python3) exists on `ubuntu-latest`. The `--ha`
-  leg nearly doubles its wall clock for coverage `smokes
-  (ci-ha-smoke.sh)` already provides at process level, so it is behind
-  `clean_install_ha=true`.
+  leg (container-level SIGKILL failover through the router) runs on
+  every tag push and published release, plus `clean_install_ha=true`
+  dispatches; plain dispatches stay cheap.
+- **`published-verify` exists only on `release` events.** It downloads
+  the published `SHA256SUMS` (retrying while the asset upload lands —
+  the release event can fire before assets do), rebuilds the tagged
+  source via the release ceremony's env pins, and requires every
+  published binary to byte-match. Signatures/manifest are excluded by
+  design — signer metadata legitimately differs from the unsigned
+  rebuild; the binaries are what installers verify.
 - **Stress runs the script default (10 rounds)** under a 75-minute cap.
   `bash scripts/ci-stress.sh -n 5 -q` is the documented shorter screen
   if wall clock becomes a problem — the flag already exists; do not
@@ -149,10 +160,10 @@ Verified-existing scripts invoked: `ci-chaos.sh`, `ci-stress.sh`,
 - **No GPUs / homogeneous cloud hardware.** Engine detection, NVIDIA
   paths, and real-model performance are covered by unit/parser tests
   and `docs/fleet-validation.md` on real machines — not here.
-- **Real Ollama is off by default.** `ollama-live` can run a genuine
-  containerized Ollama, but CPU-only 0.5b inference says nothing about
-  production model sizes; a GPU-reachable `ollama_url` is the useful
-  mode.
+- **Real Ollama runs on release events, but stays honest.** The
+  containerized `ollama-live` leg proves HA mechanics with small models;
+  CPU-only 0.5b inference still says nothing about production model
+  sizes — a GPU-reachable `ollama_url` dispatch is the useful mode.
 - **Cross-machine paths.** mDNS discovery, LAN failover timing, and
   real NAT/firewall shapes are out of scope; the agent-smoke matrix
   SKIPs multicast where the sandbox forbids it.

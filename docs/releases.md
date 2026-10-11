@@ -54,10 +54,21 @@ exposes `LOCALMESH_SIGNING_KEY` at release time only.
 
 ## Cutting a release
 
+Before tagging, run the full RC gate **on the exact release-candidate
+commit** — including the heavy opt-in legs:
+
 ```bash
+gh workflow run release-verify.yml -f ollama_live=true -f clean_install_ha=true
+# ... wait for release-gate, THEN tag the verified commit:
 git tag v0.6.0
 LOCALMESH_SIGNING_KEY=~/.localmesh/keys/localmesh-release.sec ./scripts/release.sh
 ```
+
+Tag pushes and published releases re-run the whole battery anyway —
+including the real-Ollama HA smoke, the clean-install `--ha` leg, and
+`published-verify` (a rebuild of the tagged source byte-compared
+against the shipped `SHA256SUMS`) — so the published artifacts are
+always covered; the dispatch is what makes the gate *pre-publication*.
 
 The script:
 

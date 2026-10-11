@@ -23,9 +23,13 @@ name: Release Verify
 #   repro             scripts/ci-repro-build.sh
 #   release-artifacts release.sh --dev (ephemeral key) + --unsigned,
 #                     each checked by verify-release.sh; dist/ uploaded
-#   install-e2e       scripts/ci-clean-install.sh (+ opt-in --ha leg)
+#   install-e2e       scripts/ci-clean-install.sh (+ --ha leg on
+#                     release/tag events or clean_install_ha dispatch)
 #   artifact-install  scripts/ci-artifact-install.sh against the CI dist/
-#   ollama-live       OPT-IN: real-Ollama HA smoke, never faked
+#   ollama-live       real-Ollama HA smoke, never faked — runs on every
+#                     tag/release; dispatch-gated opt-in otherwise
+#   published-verify  release events only: rebuild this tag's source and
+#                     byte-compare against the published SHA256SUMS
 #   release-gate      aggregate: fails if any required job failed OR
 #                     was skipped
 #
@@ -278,8 +282,30 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
       - name: govulncheck ./...
         run: govulncheck ./...
+      - name: "stray-binary decoy (regression: root build litter must not poison the source SBOM)"
+        # v0.12 release-candidate finding: an extensionless binary dropped
+        # at the repo root was cataloged by syft and failed the gate on
+        # ITS toolchain. .syft.yaml + the grype excludes below root-anchor
+        # the product names; a live decoy proves it every run.
+        run: go build -o ./localmesh-agent ./cmd/localmesh-agent
       - name: image build + SBOM + grype policy scan (scripts/ci-security-scan.sh)
         run: bash scripts/ci-security-scan.sh
+      - name: assert decoy excluded and deps still cataloged
+        # A cataloged Go binary always contributes a `stdlib` component —
+        # its absence proves the decoy was excluded; the library floor
+        # proves the exclusions did not over-match real dependencies.
+        run: |
+          set -e
+          bin_count=$(jq '[.components[] | select(.name=="stdlib")] | length' dist/security/sbom-source.cdx.json)
+          dep_count=$(jq '[.components[] | select(.type=="library")] | length' dist/security/sbom-source.cdx.json)
+          if [ "$bin_count" -ne 0 ]; then
+            echo "FAIL: root-level stray binary was cataloged into sbom-source (stdlib components: $bin_count)" >&2; exit 1
+          fi
+          if [ "$dep_count" -lt 50 ]; then
+            echo "FAIL: sbom-source suspiciously small ($dep_count components) — exclusion over-matched" >&2; exit 1
+          fi
+          rm -f ./localmesh-agent
+          echo "stray-binary regression OK: decoy excluded, $dep_count real components cataloged"
       - name: upload security reports (dist/security/)
         if: always()
         uses: actions/upload-artifact@v7.0.1
@@ -381,8 +407,10 @@ jobs:
           cache: true
       - name: clean-install e2e (disposable compose project)
         run: bash scripts/ci-clean-install.sh
-      - name: clean-install --ha (opt-in via workflow_dispatch input)
-        if: inputs.clean_install_ha == true
+      - name: clean-install --ha (release/tag events, or dispatch opt-in)
+        # Always-on for tag pushes and published releases: the RC commit
+        # gets the container-level SIGKILL failover leg every time.
+        if: inputs.clean_install_ha == true || github.event_name != 'workflow_dispatch'
         run: bash scripts/ci-clean-install.sh --ha
 
   # Install-from-artifacts e2e. Depends on release-artifacts so the CI-
@@ -424,18 +452,20 @@ jobs:
         run: bash scripts/ci-artifact-install.sh
 
   # ------------------------------------------------------------------
-  # OPT-IN ONLY: the real-Ollama HA smoke. Never faked, never run by
-  # default — on a hosted runner it needs the ollama/ollama image plus
-  # model pulls and CPU inference, so it is dispatch-gated. Set
-  # ollama_live=true (optionally with ollama_url for an external/GPU
-  # endpoint). REQUIRE_REAL_OLLAMA=1 makes the script FAIL instead of
-  # SKIP when no real engine answers.
+  # Real-Ollama HA smoke — never faked. REQUIRED on tag pushes and
+  # published releases (the release gate treats a skip there as a
+  # failure); dispatch runs still gate it behind ollama_live=true so a
+  # quick RC sanity dispatch stays cheap. The default path starts an
+  # ollama/ollama container on the runner (models pulled by the script
+  # itself); on dispatch, the ollama_url input targets an external/GPU
+  # endpoint instead. REQUIRE_REAL_OLLAMA=1 makes the script FAIL
+  # instead of SKIP when no real engine answers.
   # ------------------------------------------------------------------
   ollama-live:
     name: ollama-live (real Ollama HA)
     runs-on: ubuntu-latest
     timeout-minutes: 75
-    if: github.event_name == 'workflow_dispatch' && inputs.ollama_live == true
+    if: github.event_name != 'workflow_dispatch' || inputs.ollama_live == true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -443,7 +473,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: start real Ollama container (skipped when ollama_url is set)
-        if: inputs.ollama_url == ''
+        if: ${{ !inputs.ollama_url }}
         run: |
           docker run -d --name ollama -l localmesh.test=1 \
             -p '127.0.0.1:11434:11434' ollama/ollama:latest
@@ -458,10 +488,38 @@ jobs:
         run: bash scripts/ci-ollama-ha-smoke.sh
 
   # ------------------------------------------------------------------
+  # Published-bytes verification — RELEASE EVENTS ONLY. The other jobs
+  # verify the CI-built release tree; this one closes the loop on the
+  # actual published artifacts: download the published SHA256SUMS,
+  # rebuild this tag's source under the release ceremony's env pins,
+  # and require every published binary to byte-match. A tampered or
+  # stale-uploaded asset fails the gate. Not in `needs:` of anything —
+  # it is a leaf; release-gate requires it on release events.
+  # ------------------------------------------------------------------
+  published-verify:
+    name: published-verify (published binaries rebuild from tag source)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'release'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: published binaries == fresh build of this tag (scripts/ci-verify-published.sh)
+        run: bash scripts/ci-verify-published.sh
+
+  # ------------------------------------------------------------------
   # Aggregate gate. needs: every job above. if: always() so it still
   # runs when a dependency fails; the step then enforces:
   #   * every required job result == success  (skipped == FAIL)
-  #   * ollama-live: skipped is fine unless the input requested it
+  #   * ollama-live: REQUIRED on tag/release events and requested
+  #     dispatches; skip tolerated on plain dispatches
+  #   * published-verify: REQUIRED on release events; skip tolerated
+  #     elsewhere (the job only exists there)
   # A jq-missing job (renamed out of needs:) reads "null" -> FAIL, so
   # the gate cannot silently shrink.
   # ------------------------------------------------------------------
@@ -484,9 +542,15 @@ jobs:
       - install-e2e
       - artifact-install
       - ollama-live
+      - published-verify
     env:
       NEEDS_JSON: ${{ toJSON(needs) }}
-      OLLAMA_REQ: ${{ inputs.ollama_live || false }}
+      # ollama-live is required on every non-dispatch trigger (tag pushes
+      # and published releases) and whenever a dispatch requests it.
+      OLLAMA_REQ: ${{ inputs.ollama_live || github.event_name != 'workflow_dispatch' }}
+      # published-verify only EXISTS on release events; required then,
+      # tolerated-skipped otherwise.
+      PUB_REQ: ${{ github.event_name == 'release' }}
     steps:
       - name: evaluate gate
         shell: bash
@@ -513,11 +577,20 @@ jobs:
           done
           r=$(echo "$NEEDS_JSON" | jq -r '.["ollama-live"].result // "missing"')
           if [ "$OLLAMA_REQ" = "true" ]; then
-            [ "$r" = "success" ] || { echo "GATE FAIL: ollama-live was requested -> $r"; failed=1; }
+            [ "$r" = "success" ] || { echo "GATE FAIL: ollama-live required on this trigger -> $r"; failed=1; }
           else
             case "$r" in
               success|skipped) : ;;
               *) echo "GATE FAIL: ollama-live -> $r"; failed=1 ;;
+            esac
+          fi
+          r=$(echo "$NEEDS_JSON" | jq -r '.["published-verify"].result // "missing"')
+          if [ "$PUB_REQ" = "true" ]; then
+            [ "$r" = "success" ] || { echo "GATE FAIL: published-verify required on release events -> $r"; failed=1; }
+          else
+            case "$r" in
+              success|skipped) : ;;
+              *) echo "GATE FAIL: published-verify -> $r"; failed=1 ;;
             esac
           fi
           [ "$failed" -eq 0 ] || exit 1
