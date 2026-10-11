@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+
+	"golang.org/x/crypto/blake2b"
 )
 
 // Native minisign signature verification — no minisign binary needed.
@@ -22,14 +24,21 @@ import (
 //	  untrusted comment: signature from minisign secret key
 //	  base64( alg[2] || keynum[8] || sig[64] )            → 74 bytes
 //	  trusted comment: <free text>
-//	  base64( "ED" || keynum[8] || sig'[64] )
+//	  base64( sig'[64] )                                  → 64 bytes, bare
 //
-// alg "Ed" signs the file bytes with plain Ed25519. alg "ED" is the
-// Ed25519ph variant minisign uses for files too large to load whole —
-// it needs a prehash construction outside the Go stdlib, so native
-// verification accepts "Ed" only and tells the caller to fall back to
-// the `minisign -V` binary for "ED". Release artifacts signed by
-// scripts/release.sh are always small enough for "Ed".
+// The global-signature line in real minisign output is the bare
+// 64-byte Ed25519 signature — no algorithm/keynum prefix. An earlier
+// localmesh emitter wrote a 74-byte "ED"||keynum||sig' line instead;
+// the parser accepts BOTH forms so existing localmesh signatures stay
+// verifiable, while SignMinisign now emits the spec form so real
+// `minisign -V` accepts our releases.
+//
+// alg "Ed" signs the file bytes with plain Ed25519. alg "ED" (what
+// real `minisign -S` emits by default) is a plain Ed25519 signature
+// over the file's BLAKE2b-512 digest — minisign hashes the file for
+// streaming size, not an RFC8032 dom2 construction (see
+// message_load_hashed in jedisct1/minisign), so a stdlib Ed25519
+// verify over the digest is exactly correct.
 //
 // The second signature is a pure Ed25519 signature over
 // sig[64] || trusted_comment, binding the comment to the file sig.
@@ -37,7 +46,7 @@ import (
 
 const (
 	minisignAlgEd     = "Ed" // plain Ed25519 over the message
-	minisignAlgED     = "ED" // Ed25519ph (prehashed) — not natively verified
+	minisignAlgED     = "ED" // Ed25519 over BLAKE2b-512(message) — real minisign's default
 	minisignAlgSc     = "Sc" // secret-key KDF marker, recognized only for errors
 	minisignPubLen    = 2 + 8 + ed25519.PublicKeySize
 	minisignSigLen    = 2 + 8 + ed25519.SignatureSize
@@ -141,16 +150,24 @@ func ParseMinisignSignature(data []byte) (*MinisignSignature, error) {
 		if err != nil {
 			return nil, fmt.Errorf("minisign signature: bad global-signature base64: %w", err)
 		}
-		if len(raw2) != minisignSigLen {
-			return nil, fmt.Errorf("minisign signature: want %d decoded global-signature bytes, got %d", minisignSigLen, len(raw2))
+		switch len(raw2) {
+		case ed25519.SignatureSize:
+			// Spec form (real minisign output): the bare 64-byte signature.
+			s.GlobalSig = append([]byte(nil), raw2...)
+		case minisignSigLen:
+			// Legacy localmesh form: "ED" || keynum[8] || sig[64].
+			// Kept so signatures emitted by older SignMinisign stay
+			// verifiable; new signatures use the spec form.
+			if string(raw2[:2]) != minisignAlgED {
+				return nil, fmt.Errorf("minisign signature: global signature must carry %q marker, got %q", minisignAlgED, raw2[:2])
+			}
+			if !bytes.Equal(raw2[2:10], s.KeyNum[:]) {
+				return nil, fmt.Errorf("minisign signature: global signature keynum does not match file signature")
+			}
+			s.GlobalSig = append([]byte(nil), raw2[10:]...)
+		default:
+			return nil, fmt.Errorf("minisign signature: bad global-signature size %d (want %d or %d)", len(raw2), ed25519.SignatureSize, minisignSigLen)
 		}
-		if string(raw2[:2]) != minisignAlgED {
-			return nil, fmt.Errorf("minisign signature: global signature must carry %q marker, got %q", minisignAlgED, raw2[:2])
-		}
-		if !bytes.Equal(raw2[2:10], s.KeyNum[:]) {
-			return nil, fmt.Errorf("minisign signature: global signature keynum does not match file signature")
-		}
-		s.GlobalSig = append([]byte(nil), raw2[10:]...)
 	} else if len(nonEmpty) == 3 {
 		return nil, fmt.Errorf("minisign signature: truncated trusted-comment block")
 	}
@@ -178,7 +195,10 @@ func VerifyMinisign(pubData, data, sigData []byte) error {
 			return fmt.Errorf("signature does not verify")
 		}
 	case minisignAlgED:
-		return fmt.Errorf("prehashed Ed25519ph signature — verify with `minisign -V -p <pub> -m <file>` instead")
+		h := blake2b.Sum512(data)
+		if !ed25519.Verify(pub.Key, h[:], sig.Sig) {
+			return fmt.Errorf("signature does not verify")
+		}
 	}
 	if sig.GlobalSig != nil {
 		msg := append(append([]byte(nil), sig.Sig...), []byte(sig.TrustedComment)...)
@@ -202,15 +222,11 @@ func SignMinisign(priv ed25519.PrivateKey, keynum [minisignKeyNumLen]byte, data 
 	raw = append(raw, sig...)
 
 	global := ed25519.Sign(priv, append(append([]byte(nil), sig...), []byte(trustedComment)...))
-	raw2 := make([]byte, 0, minisignSigLen)
-	raw2 = append(raw2, minisignAlgED...)
-	raw2 = append(raw2, keynum[:]...)
-	raw2 = append(raw2, global...)
 
 	return []byte(fmt.Sprintf("untrusted comment: signature from minisign secret key\n%s\ntrusted comment: %s\n%s\n",
 		base64.StdEncoding.EncodeToString(raw),
 		trustedComment,
-		base64.StdEncoding.EncodeToString(raw2)))
+		base64.StdEncoding.EncodeToString(global)))
 }
 
 // GenerateMinisignKeyPair creates an ephemeral Ed25519 keypair in

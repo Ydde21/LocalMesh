@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/blake2b"
 	"time"
 )
 
@@ -165,19 +167,31 @@ func TestMinisignTamperedTrustedComment(t *testing.T) {
 	}
 }
 
-func TestMinisignPrehashedRejected(t *testing.T) {
-	// Forge an "ED" (Ed25519ph) signature block — must produce a clear
-	// "use minisign -V" error, not a silent pass/fail.
-	pub, sig, _, _ := minisignFixture(t, []byte("m"), "c")
-	lines := strings.Split(string(sig), "\n")
-	raw, _ := base64.StdEncoding.DecodeString(lines[1])
-	copy(raw[:2], "ED") // switch alg marker
-	lines[1] = base64.StdEncoding.EncodeToString(raw)
-	forged := strings.Join(lines, "\n")
+func TestMinisignPrehashed(t *testing.T) {
+	// "ED" is real minisign's default: Ed25519 over BLAKE2b-512(file).
+	data := []byte("m")
+	pub, _, priv, keynum := minisignFixture(t, data, "c")
+	digest := blake2b.Sum512(data)
+	sig := ed25519.Sign(priv, digest[:])
+	raw := append(append([]byte("ED"), keynum[:]...), sig...)
+	ed := fmt.Sprintf("untrusted comment: signature from minisign secret key\n%s\n",
+		base64.StdEncoding.EncodeToString(raw))
+	if err := VerifyMinisign(pub, data, []byte(ed)); err != nil {
+		t.Fatalf("real-minisign ED signature must verify: %v", err)
+	}
+	if err := VerifyMinisign(pub, []byte("other"), []byte(ed)); err == nil {
+		t.Fatal("ED signature over wrong data must fail")
+	}
 
-	err := VerifyMinisign(pub, []byte("m"), []byte(forged))
-	if err == nil || !strings.Contains(err.Error(), "minisign") {
-		t.Fatalf("expected prehashed-rejection error mentioning minisign, got %v", err)
+	// An Ed-mode signature with the marker flipped to ED must fail —
+	// the underlying signature is over the raw bytes, not the digest.
+	_, sigEd, _, _ := minisignFixture(t, data, "c")
+	lines := strings.Split(string(sigEd), "\n")
+	rawEd, _ := base64.StdEncoding.DecodeString(lines[1])
+	copy(rawEd[:2], "ED")
+	lines[1] = base64.StdEncoding.EncodeToString(rawEd)
+	if err := VerifyMinisign(pub, data, []byte(strings.Join(lines, "\n"))); err == nil {
+		t.Fatal("Ed signature relabeled ED must not verify")
 	}
 }
 
