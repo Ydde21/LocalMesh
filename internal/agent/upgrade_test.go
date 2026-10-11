@@ -594,9 +594,13 @@ func TestVerifyHealthOnConfirmingBoot(t *testing.T) {
 	if st.OperationID != "op-ok" || st.ToVersion != "dev" {
 		t.Fatalf("verify_health = %+v", st)
 	}
-	if _, ok, _ := readPendingMarker(mkPath); ok {
-		t.Fatal("marker not cleared after verify_health")
-	}
+	// The report lands before the marker is cleared — deliberately: a
+	// dropped frame must not read as a confirmed update. Poll rather
+	// than race the clear.
+	waitFor(t, 5*time.Second, "marker cleared after verify_health", func() bool {
+		_, ok, _ := readPendingMarker(mkPath)
+		return !ok
+	})
 }
 
 // TestFailedReportOnVersionMismatch: marker names a version this
@@ -1354,9 +1358,10 @@ func TestSettleWindowConfirmsHealthy(t *testing.T) {
 	if el := time.Since(start); el < 80*time.Millisecond {
 		t.Fatalf("verify_health reported after %v — settle window skipped", el)
 	}
-	if _, ok, _ := readPendingMarker(mkPath); ok {
-		t.Fatal("marker not cleared after verify_health")
-	}
+	waitFor(t, 5*time.Second, "marker cleared after verify_health", func() bool {
+		_, ok, _ := readPendingMarker(mkPath)
+		return !ok
+	})
 	hp, _ := a.updateHistoryPath()
 	waitFor(t, 5*time.Second, "confirmation in history", func() bool {
 		h, _ := readUpdateHistory(hp)
@@ -1481,9 +1486,10 @@ func TestSettleExhaustionRollsBack(t *testing.T) {
 		t.Fatalf("rolled_back report = %+v", st)
 	}
 	endSession(t, f, ch2)
-	if _, ok, _ := readPendingMarker(mkPath); ok {
-		t.Fatal("marker not cleared after rolled_back landed")
-	}
+	waitFor(t, 5*time.Second, "marker cleared after rolled_back", func() bool {
+		_, ok, _ := readPendingMarker(mkPath)
+		return !ok
+	})
 }
 
 // TestAttemptBudgetRollsBackAtBoot: the boot check resolves an
@@ -1546,9 +1552,10 @@ func TestAttemptBudgetRollsBackAtBoot(t *testing.T) {
 		t.Fatalf("rolled_back report = %+v", st)
 	}
 	endSession(t, f, ch)
-	if _, ok, _ := readPendingMarker(mkPath); ok {
-		t.Fatal("marker not cleared after rolled_back landed")
-	}
+	waitFor(t, 5*time.Second, "marker cleared after rolled_back", func() bool {
+		_, ok, _ := readPendingMarker(mkPath)
+		return !ok
+	})
 }
 
 // ---------------------------------------------------------------------------

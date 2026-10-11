@@ -25,7 +25,7 @@ assignees: ""
 
 ## Checklist
 
-Mirrors the numbered protocol in [docs/beta-testing.md](https://github.com/localmesh/localmesh/blob/main/docs/beta-testing.md) —
+Mirrors the numbered protocol in [docs/beta-testing.md](https://github.com/Ydde21/LocalMesh/blob/main/docs/beta-testing.md) —
 `scripts/beta-validate.sh` fills in the scriptable legs automatically
 and prompts you through the operator legs. Check what you verified;
 leave unchecked what you could not test, and say why in *Anomalies*.
@@ -72,7 +72,7 @@ leave unchecked what you could not test, and say why in *Anomalies*.
 ## Verdict
 
 <!-- Pick one and keep it honest — see
-     https://github.com/localmesh/localmesh/blob/main/docs/fleet-validation.md
+     https://github.com/Ydde21/LocalMesh/blob/main/docs/fleet-validation.md
      for what each means:
 
      PHYSICAL FLEET VERIFIED — all legs passed on real, separate machines

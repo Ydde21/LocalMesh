@@ -1,8 +1,8 @@
 blank_issues_enabled: true
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/localmesh/localmesh/security/advisories/new
+    url: https://github.com/Ydde21/LocalMesh/security/advisories/new
     about: Report privately — see SECURITY.md. Please do not file public issues for vulnerabilities.
   - name: Troubleshooting guide
-    url: https://github.com/localmesh/localmesh/blob/main/docs/troubleshooting.md
+    url: https://github.com/Ydde21/LocalMesh/blob/main/docs/troubleshooting.md
     about: Symptom → cause → fix. Check here plus `localmesh-agent doctor` before filing.

@@ -723,7 +723,7 @@ echo "  $(redact "$JSON")"
 echo
 echo "NEXT: attach BOTH files to a new GitHub issue using the"
 echo "      'Hardware compatibility report' template:"
-echo "      https://github.com/localmesh/localmesh/issues/new?template=hardware-compat.md"
+echo "      https://github.com/Ydde21/LocalMesh/issues/new?template=hardware-compat.md"
 echo "      Nothing was uploaded — review the bundle before sharing."
 echo "      Full multi-device validation? docs/beta-testing.md +"
 echo "      scripts/beta-validate.sh is the fleet driver."
@@ -777,7 +777,7 @@ json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' '; }
     printf ',\n'
   fi
   printf '  "privacy": "redacted by construction: hostnames hashed, usernames and creds scrubbed, non-loopback IPv4 truncated to /24, paths basename-collapsed; no prompts or completions",\n'
-  printf '  "attach_to": "https://github.com/localmesh/localmesh/issues/new?template=hardware-compat.md"\n'
+  printf '  "attach_to": "https://github.com/Ydde21/LocalMesh/issues/new?template=hardware-compat.md"\n'
   printf '}\n'
 } > "$JSON"
 

@@ -89,8 +89,8 @@ assignees: ""
 ---
 
 Running **more than one** device? This template is single-device — use
-the [Beta validation report](https://github.com/localmesh/localmesh/issues/new?template=beta-validation.md)
+the [Beta validation report](https://github.com/Ydde21/LocalMesh/issues/new?template=beta-validation.md)
 template instead (run `scripts/beta-validate.sh` per device) so the
 fleet-level legs (cross-device scheduling, failover, revoke) are
 covered. Found a concrete bug rather than a compatibility datapoint?
-File a [bug report](https://github.com/localmesh/localmesh/issues/new?template=bug_report.md).
+File a [bug report](https://github.com/Ydde21/LocalMesh/issues/new?template=bug_report.md).

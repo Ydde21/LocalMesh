@@ -649,7 +649,7 @@ echo "  $JSON"
 echo
 echo "NEXT: attach BOTH files to a new GitHub issue using the"
 echo "      'Beta validation report' template:"
-echo "      https://github.com/localmesh/localmesh/issues/new?template=beta-validation.md"
+echo "      https://github.com/Ydde21/LocalMesh/issues/new?template=beta-validation.md"
 echo "      Nothing was uploaded — review the bundle before sharing."
 
 # --- JSON emitter ---------------------------------------------------------------
@@ -689,7 +689,7 @@ json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' '; }
   done
   printf '  ],\n'
   printf '  "privacy": "redacted by construction: no credentials, tokens, prompts, or completions; home paths collapse to ~; hostname is included by design",\n'
-  printf '  "attach_to": "https://github.com/localmesh/localmesh/issues/new?template=beta-validation.md"\n'
+  printf '  "attach_to": "https://github.com/Ydde21/LocalMesh/issues/new?template=beta-validation.md"\n'
   printf '}\n'
 } > "$JSON"
 
