@@ -109,17 +109,19 @@ func cmdUpdateApply() {
 	service := fs.Bool("service", false, "restart via the OS service manager afterwards")
 	relaunch := fs.Bool("relaunch", false, "restart via detached `<target> run` afterwards")
 	rollback := fs.Bool("rollback", false, "restore <target>.bak instead of installing -staged")
+	cfgPath := fs.String("config", "", "config path forwarded to the relaunched `run`")
 	wait := fs.Duration("wait", 60*time.Second, "bound on the pid wait + swap retries")
 	fs.Parse(os.Args[2:])
 	if err := agent.UpdateApply(context.Background(), agent.UpdateApplyOptions{
-		Target:    *target,
-		Staged:    *staged,
-		ParentPID: *pid,
-		Rollback:  *rollback,
-		Service:   *service,
-		Relaunch:  *relaunch,
-		WaitBound: *wait,
-		Out:       os.Stderr,
+		Target:     *target,
+		Staged:     *staged,
+		ParentPID:  *pid,
+		Rollback:   *rollback,
+		Service:    *service,
+		Relaunch:   *relaunch,
+		ConfigPath: *cfgPath,
+		WaitBound:  *wait,
+		Out:        os.Stderr,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, "update-apply:", err)
 		os.Exit(1)
