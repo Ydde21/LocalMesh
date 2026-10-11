@@ -29,7 +29,7 @@ running server's.
 
 | Server | Agent | Result |
 |--------|-------|--------|
-| v0.10–v0.12 | v0.5–v0.12 | accepted (proto v1 both ways) |
+| v0.10–v0.13 | v0.5–v0.13 | accepted (proto v1 both ways) |
 | v0.11+ | older than `min_agent_protocol` | rejected at handshake — upgrade the agent |
 | v0.10  | v0.11+ (proto still v1) | accepted — but run server-first order anyway so future floors/gates apply |
 | v0.9   | v0.10+ (if proto bumps) | rejected at handshake — upgrade the server first |

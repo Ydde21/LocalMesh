@@ -4,6 +4,63 @@ Notable changes per release. Versions are stamped at release time by
 `scripts/release.sh` (git tag → `main.version`); this file follows the
 repo's `vX.Y` naming. Detail-level references live in `docs/`.
 
+## v0.13 — release verification & provenance
+
+Hardening pass on the release machinery itself: the gates that ship a
+release now prove the full published asset set — binaries, signed
+manifest, and SBOMs — all correspond to the same tagged revision, and
+the diagnostics that investigate CI flakes no longer destroy their own
+evidence. **No product-code change** — v0.10+ interops freely (proto
+v1 both ways).
+
+### Release integrity
+
+- **Published-asset provenance is end-to-end verified.**
+  `ci-verify-published.sh` previously only byte-compared published
+  binaries against a rebuild. It now additionally anchors the checkout
+  to the tag target, verifies the signed `release-manifest.json`
+  against the published public key (binds every manifest digest to the
+  byte-verified checksums), and proves all four published SBOMs
+  describe the tag revision: the source SBOM must equal a fresh syft
+  catalog of the tag, image SBOMs must catalog the product binaries on
+  the release toolchain pin, and the web SBOM's `next` version must
+  equal the tag's package-lock.
+- **Scan/artifact revision binding is asserted, not assumed.** The
+  `security` and `release-artifacts` jobs now fail if the checkout
+  drifts from the event commit — a future `ref:` override can't
+  silently scan the wrong tree.
+- **Stray-binary SBOM regression covers both product names** and adds
+  named-dependency sentinels (`coder/websocket`, `next`) — exclusion
+  patterns that hide real dependencies now fail loudly instead of
+  passing silently.
+
+### Fixed
+
+- **Smoke failures no longer delete their own evidence.** `cleanup()`
+  in `ci-ha-smoke.sh`, `ci-e2e-smoke.sh`, and `ci-update-smoke.sh` ran
+  `rm -rf` on the tmpdir *before* printing the process log tails —
+  every failure showed empty logs and the real error was destroyed.
+  Tails now print before removal; the `ci-ha-smoke` silent-exit flake
+  will surface its actual cause on the next occurrence.
+- **`wait` exit-status harvesting made `set -e`-safe** — the
+  diagnostics could die before printing the status they existed to
+  report.
+- **Postgres readiness gate tightened.** `pg_isready` can report ready
+  while the server still rejects real sessions during its init tail;
+  all three live-stack smokes now require a successful `SELECT 1`
+  before launching the control plane.
+- **Upgrade test hygiene.** The upgrade goroutine is drained inside
+  `endSession` (before seam stubs restore and `t.TempDir()` removal) —
+  fixes both the APFS `unlinkat` cleanup race and a latent
+  `os.Exit(0)` panic. All post-state `waitFor` timeouts aligned to the
+  suite's 8s convention for loaded Windows/macOS runners.
+
+### Docs
+
+- **Xcode CLT is a documented prerequisite on macOS** — `/usr/bin/git`
+  is an Apple shim without it, and `CGO_ENABLED=0` skips cgo paths and
+  is not equivalent to full native verification.
+
 ## v0.12 — beta experience & installer integrity
 
 Reliability pass driven by the first-run user journey and installer

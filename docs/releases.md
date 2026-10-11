@@ -134,7 +134,7 @@ mirror you downloaded the binaries from:
 
 ```bash
 # from a trusted clone/tag:
-git show v0.12.0:keys/localmesh-release.pub > localmesh-release.pub
+git show v0.13.0:keys/localmesh-release.pub > localmesh-release.pub
 # (keys/localmesh-dev.pub verifies DEV-signed RC builds only —
 # it is not a trust anchor)
 ```
@@ -152,9 +152,9 @@ You need at minimum `SHA256SUMS`, `SHA256SUMS.minisig`,
 artifact(s) you will install, in one directory:
 
 ```bash
-base=https://github.com/Ydde21/LocalMesh/releases/download/v0.12.0
+base=https://github.com/Ydde21/LocalMesh/releases/download/v0.13.0
 for f in SHA256SUMS SHA256SUMS.minisig release-manifest.json \
-         release-manifest.json.minisig localmesh-agent-0.12.0-linux-amd64; do
+         release-manifest.json.minisig localmesh-agent-0.13.0-linux-amd64; do
   curl -fsSL "$base/$f" -o "dist/$f"
 done
 ```
@@ -207,7 +207,7 @@ banner) when `signer.dev` is set — a WARN is allowed to exit 0, so
 ```bash
 # dry-run: fetch metadata, verify signature + checksums + protocol,
 # print the plan — touches nothing else
-localmesh-agent update -release https://github.com/Ydde21/LocalMesh/releases/download/v0.12.0 \
+localmesh-agent update -release https://github.com/Ydde21/LocalMesh/releases/download/v0.13.0 \
   -pubkey ~/localmesh-release.pub
 
 # apply: stage <bin>.new, verify, swap, keep <bin>.bak

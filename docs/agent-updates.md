@@ -23,7 +23,7 @@ its server.
 
 ```bash
 localmesh-agent version
-# localmesh-agent v0.12.0 proto=1 linux/amd64 go1.27.2
+# localmesh-agent v0.13.0 proto=1 linux/amd64 go1.27.2
 ```
 
 (`version` prints build stamp, wire protocol, platform, and Go toolchain
@@ -48,7 +48,7 @@ The installers resolve the manifest for you — `install-agent.sh` /
 before anything is installed. Fetching by hand:
 
 ```bash
-TAG=v0.12.0   # the release matching your control plane
+TAG=v0.13.0   # the release matching your control plane
 curl -fsSLO "https://github.com/Ydde21/LocalMesh/releases/download/$TAG/release-manifest.json"
 FILE=$(python3 -c 'import json;m=json.load(open("release-manifest.json"));print([a["file"] for a in m["artifacts"] if a["os"]=="linux" and a["arch"]=="amd64" and "agent" in a["file"]][0])')
 curl -fsSLO "https://github.com/Ydde21/LocalMesh/releases/download/$TAG/$FILE"

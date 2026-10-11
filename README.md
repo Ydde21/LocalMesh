@@ -336,11 +336,15 @@ make verify                       # full regression gate (fmt+vet+tests+race+web
 
 ## Release status
 
-**v0.12.0 is the current release** — the beta-experience cut:
-fail-closed installer integrity verification (both POSIX and
-PowerShell), first-run enrollment/service/scheduler UX hardening,
-node24-native CI with Ubuntu 26.04 legs, and a fully green release
-gate. Notes: [docs/release-notes-0.12.md](docs/release-notes-0.12.md).
+**v0.13.0 is the current release** — the release-machinery hardening
+cut: published-artifact provenance verified end-to-end (binaries,
+signed manifest, all four SBOMs bound to the tagged revision),
+smoke-diagnostics that preserve evidence, and a fully green release
+gate. No product-code change — same runtime as 0.12.0. Notes:
+[docs/release-notes-0.13.md](docs/release-notes-0.13.md).
+
+`v0.12.0` — the beta-experience cut:
+[docs/release-notes-0.12.md](docs/release-notes-0.12.md).
 
 `v0.11.0` — the post-beta stabilization cut:
 [docs/release-notes-0.11.md](docs/release-notes-0.11.md).

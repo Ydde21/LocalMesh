@@ -101,7 +101,8 @@ if [ -z "$DSN" ]; then
   DSN="postgres://postgres:localmeshtest@127.0.0.1:$port/localmesh?sslmode=disable"
   ready=0
   for _ in $(seq 60); do
-    docker exec "$pg_name" pg_isready -U postgres -d localmesh >/dev/null 2>&1 && { ready=1; break; }
+    docker exec "$pg_name" pg_isready -U postgres -d localmesh >/dev/null 2>&1 \
+      && docker exec "$pg_name" psql -U postgres -d localmesh -tAc 'SELECT 1' >/dev/null 2>&1 && { ready=1; break; }
     sleep 1
   done
   [ "$ready" -eq 1 ] || bad "postgres container never became ready"
