@@ -108,6 +108,7 @@ func (s *Scheduler) Schedule(ctx context.Context, req Request, attempt int) (*Pi
 	start := time.Now()
 	deadline := start.Add(cfg.QueueTimeout)
 	var lastFiltered []string
+	var lastEmpty bool
 
 	for {
 		var views []nodehub.View
@@ -124,6 +125,7 @@ func (s *Scheduler) Schedule(ctx context.Context, req Request, attempt int) (*Pi
 			return pick, nil
 		}
 		lastFiltered = collectFiltered(views, req, cfg)
+		lastEmpty = len(views) == 0
 
 		// Wait for a state change or deadline.
 		remain := time.Until(deadline)
@@ -150,7 +152,10 @@ func (s *Scheduler) Schedule(ctx context.Context, req Request, attempt int) (*Pi
 	}
 
 	msg := "no eligible node"
-	if len(lastFiltered) > 0 {
+	switch {
+	case lastEmpty:
+		msg = "no nodes enrolled — run `localmesh-agent join` on a machine to add capacity"
+	case len(lastFiltered) > 0:
 		msg += ": " + strings.Join(lastFiltered, "; ")
 	}
 	return nil, fmt.Errorf("%w (%s)", ErrNoCapacity, msg)

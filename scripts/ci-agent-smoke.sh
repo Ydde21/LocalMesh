@@ -258,11 +258,25 @@ if [ "$__code" -eq 2 ] && printf '%s' "$__out" | grep -q 'requires --token'; the
 else
   bad "join validation" "join without token expected exit 2, got $__code: $__out"
 fi
-run_capture "$bin" join --server "$DEAD_SERVER" --token lme_deadbeef000000000000 -wait 5s
+# Fresh agent dir — join now refuses to clobber an enrolled config, and
+# the dead-server network path must still be exercised for real.
+UNENROLLED="$SCRATCH/unenrolled"
+if [ "$is_windows" -eq 1 ] && have cygpath; then
+  UNENROLLED="$(cygpath -w "$UNENROLLED")"
+fi
+run_capture env "LOCALMESH_AGENT_DIR=$UNENROLLED" "$bin" join --server "$DEAD_SERVER" --token lme_deadbeef000000000000 -wait 5s
 if [ "$__code" -eq 1 ] && printf '%s' "$__out" | grep -qi 'error'; then
   pass "join failure path: unreachable server → graceful exit 1"
 else
   bad "join failure path" "expected graceful exit 1, got $__code: $__out"
+fi
+# Re-join on an enrolled config must refuse, not silently clobber the
+# node credential — the guard that landed with first-run UX hardening.
+run_capture "$bin" join --server "$DEAD_SERVER" --token lme_deadbeef000000000000 -wait 5s
+if [ "$__code" -eq 1 ] && printf '%s' "$__out" | grep -qi 'already enrolled'; then
+  pass "join re-enroll guard: refuses to clobber enrolled config"
+else
+  bad "join re-enroll guard" "expected 'already enrolled' exit 1, got $__code: $__out"
 fi
 run_capture "$bin" service bogus
 if [ "$__code" -eq 1 ] && printf '%s' "$__out" | grep -q 'unknown service action'; then

@@ -1,6 +1,8 @@
 package scheduler
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -403,5 +405,20 @@ func TestResidencyBeatsEstimate(t *testing.T) {
 				t.Fatalf("cold node's need should read 'measured' via peer residency, got: %s", joined)
 			}
 		}
+	}
+}
+
+func TestScheduleNoNodesMessage(t *testing.T) {
+	// First-run dead end: zero enrolled nodes must not read as the
+	// generic "no eligible node" — tell the user to enroll one.
+	c := cfg()
+	c.QueueTimeout = 50 * time.Millisecond
+	s := New(nil, c)
+	_, err := s.Schedule(context.Background(), Request{Model: "m"}, 1)
+	if err == nil || !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("want ErrNoCapacity, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "no nodes enrolled") {
+		t.Fatalf("want actionable message, got: %v", err)
 	}
 }
