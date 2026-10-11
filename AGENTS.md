@@ -8,7 +8,11 @@ AI cluster behind a single OpenAI-compatible endpoint.
 
 - `cmd/localmesh-server` — control plane (TLS, auth, node hub, scheduler,
   OpenAI gateway, admin API, SSE broker)
-- `cmd/localmesh-agent` — node agent CLI (`join` / `run` / `status`)
+- `cmd/localmesh-agent` — node agent CLI (`join` / `run` / `status` /
+  `doctor` / `report` / `service` / `update` / `update-key` / `discover`)
+- `cmd/localmesh-router` — TCP active/standby router: the stable
+  endpoint a HA pair sits behind (rise/fall hysteresis, `/status` +
+  `/statusz` + `/metrics` + `/healthz` on `-status`)
 - `cmd/fakeollama` — Ollama test double
 - `internal/contracts` — wire types shared by server AND agent (keep it
   dependency-free in both directions)
@@ -24,8 +28,17 @@ AI cluster behind a single OpenAI-compatible endpoint.
 ```bash
 go vet ./...                    # lint
 go test ./...                   # unit + e2e (e2e starts postgres:16-alpine)
-make build                      # → bin/localmesh-{server,agent}
-make release                    # cross-compile agents → dist/
+make build                      # → bin/localmesh-{server,agent,router}
+make verify                     # full regression gate (fmt+vet+tests+race+web)
+make verify-fast                # backend-only gate after every integration
+make verify-stress              # repeats the historically flaky test groups
+make chaos-test                 # build-tagged failure suite
+make release                    # signed release → dist/ (needs
+                                # LOCALMESH_SIGNING_KEY or ~/.localmesh/keys;
+                                # dev builds: --dev / --unsigned — see
+                                # docs/release-signing.md)
+bash scripts/ci-clean-install.sh        # disposable compose clean-install e2e
+bash scripts/beta-validate.sh           # per-device external-beta validator
 cd web && npm run lint && npm run build
 
 # live-stack verification (docker required; each starts its own postgres)

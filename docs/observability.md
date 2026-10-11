@@ -399,10 +399,13 @@ them; add them in `internal/server/metrics` + `SetGauges` if needed:
   a control-plane restart are invisible to it (documented on the panel).
 - **No SSE subscriber count** — the broker keeps the set private
   (`doc.go` notes this needs a broker accessor first).
-- **Router has no `/metrics`** — `internal/router` serves only JSON
-  `/status` + `/healthz` on `LOCALMESH_ROUTER_STATUS`. A Prometheus
-  endpoint there (backend readiness, elected-active, probe errors)
-  would close the failover-visibility gap.
+- **Router `/metrics` exists but is unscraped by default** —
+  `internal/router/diag.go` serves Prometheus exposition (uptime,
+  connections accepted/dropped, election transitions, backend probe/dial
+  counters) alongside `/status`, `/statusz`, `/healthz` on
+  `LOCALMESH_ROUTER_STATUS`. Add the status listener as a scrape target
+  to close failover visibility; keep it bind-local (the diagnostics are
+  not meant for public exposure).
 - **Standby serves no metrics pre-promotion** — by design; the `up`
   flip is the promotion signal. Its *presence* is now visible via
   `control_plane_peers`/`localmesh_control_plane_peers` (see above) —

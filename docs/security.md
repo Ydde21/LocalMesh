@@ -83,8 +83,10 @@ cannot exhaust the database pool:
 - Failed bearer authentication — a source accumulating >20 401s/minute
   is throttled with 429 before the credential lookup runs
 
-Limits are in-memory token buckets — per-process, not coordinated across
-replicas (LocalMesh is a single control-plane instance by design).
+Limits are in-memory token buckets — per-process, not coordinated
+between the active and standby control planes (each enforces its own
+share during its tenure; the stable router endpoint means clients see
+one logical service).
 
 `LOCALMESH_TRUST_PROXY` gates `X-Forwarded-For` handling for the rate
 limiter — off by default, so forwarding headers are never trusted unless
@@ -160,9 +162,10 @@ admin key out of browsers:
 ## Command safety
 
 The agent's remote surface is deliberately narrow. Over the WebSocket the
-server can ask for exactly six things: run an inference request against
-an installed engine, cancel it, pull a model, delete a model, install an
-admin-approved signed release (`agent.upgrade`, v0.7), and abort a
+server can ask for exactly seven things: run an inference request against
+an installed engine, cancel it, pull a model, delete a model, abort an
+in-flight model operation (`model_op_abort`), install an admin-approved
+signed release (`agent.upgrade`, v0.7), and abort a
 not-yet-installed upgrade. There is no shell, no arbitrary process
 execution, no file access — an attacker who seizes the control plane can
 schedule inference on your nodes but cannot run commands on them. The
