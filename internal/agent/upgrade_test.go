@@ -142,6 +142,23 @@ func upgradeTestAgent(t *testing.T, f *fakeCP, dir string, pubData []byte) *Agen
 	a := testAgent(t, f, newFakeEngine())
 	a.SetConfigPath(filepath.Join(dir, "agent.json"))
 	a.updTarget = filepath.Join(dir, "localmesh-agent")
+	// runUpgrade runs in its own goroutine the session never joins; its
+	// final marker/staging writes can land after endSession returns and
+	// race the caller's t.TempDir() cleanup (unlinkat EEXIST on APFS).
+	// Registered after the caller's t.TempDir(), so LIFO cleanup drains
+	// the job before the dir is removed.
+	t.Cleanup(func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			a.upgMu.Lock()
+			done := a.upg == nil
+			a.upgMu.Unlock()
+			if done || time.Now().After(deadline) {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
 	if pubData != nil {
 		if _, err := PinUpdateKey(a.cfg, pubData); err != nil {
 			t.Fatal(err)
@@ -597,7 +614,7 @@ func TestVerifyHealthOnConfirmingBoot(t *testing.T) {
 	// The report lands before the marker is cleared — deliberately: a
 	// dropped frame must not read as a confirmed update. Poll rather
 	// than race the clear.
-	waitFor(t, 8*time.Second, "marker cleared after verify_health", func() bool {
+	waitFor(t, 5*time.Second, "marker cleared after verify_health", func() bool {
 		_, ok, _ := readPendingMarker(mkPath)
 		return !ok
 	})
@@ -1358,7 +1375,7 @@ func TestSettleWindowConfirmsHealthy(t *testing.T) {
 	if el := time.Since(start); el < 80*time.Millisecond {
 		t.Fatalf("verify_health reported after %v — settle window skipped", el)
 	}
-	waitFor(t, 8*time.Second, "marker cleared after verify_health", func() bool {
+	waitFor(t, 5*time.Second, "marker cleared after verify_health", func() bool {
 		_, ok, _ := readPendingMarker(mkPath)
 		return !ok
 	})
@@ -1486,7 +1503,7 @@ func TestSettleExhaustionRollsBack(t *testing.T) {
 		t.Fatalf("rolled_back report = %+v", st)
 	}
 	endSession(t, f, ch2)
-	waitFor(t, 8*time.Second, "marker cleared after rolled_back", func() bool {
+	waitFor(t, 5*time.Second, "marker cleared after rolled_back", func() bool {
 		_, ok, _ := readPendingMarker(mkPath)
 		return !ok
 	})
@@ -1552,7 +1569,7 @@ func TestAttemptBudgetRollsBackAtBoot(t *testing.T) {
 		t.Fatalf("rolled_back report = %+v", st)
 	}
 	endSession(t, f, ch)
-	waitFor(t, 8*time.Second, "marker cleared after rolled_back", func() bool {
+	waitFor(t, 5*time.Second, "marker cleared after rolled_back", func() bool {
 		_, ok, _ := readPendingMarker(mkPath)
 		return !ok
 	})
