@@ -77,6 +77,10 @@ chaos-test:
 verify-stress:
 	@bash scripts/ci-stress.sh
 
+# Single-device hardware-compat evidence bundle (redacted txt+json).
+hw-validate:
+	@bash scripts/hw-validate.sh
+
 # Versioned release: all 5 agent targets + server binaries, SHA256SUMS,
 # manifest, signature. Requires LOCALMESH_SIGNING_KEY (minisign secret
 # key path) — without it the script refuses; dev-only unsigned output

@@ -307,7 +307,7 @@ if [ -n "${BIN:-}" ] && [ -x "$BIN" ]; then
   echo "\$ $(redact "$BIN") status"; printf '%s\n' "$ST" | sed 's/^/     /'
   case "$ST" in
     *"not enrolled"*)
-      skp "2. enrollment state" "not enrolled — join first (docs/beta-testing.md §4)"
+      skp "2. enrollment state" "not enrolled — join first (docs/beta-testing.md §2)"
       ;;
     *"server:"*)
       ENROLLED=1
