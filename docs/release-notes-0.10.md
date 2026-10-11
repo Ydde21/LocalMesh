@@ -193,7 +193,7 @@ swept the security surface again — full detail in
 ## Install
 
 ```bash
-git clone https://github.com/localmesh/localmesh && cd localmesh
+git clone https://github.com/Ydde21/LocalMesh && cd LocalMesh
 sh scripts/install-localmesh.sh          # or: cp .env.example .env; docker compose up -d
 ```
 

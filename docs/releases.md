@@ -140,7 +140,7 @@ You need at minimum `SHA256SUMS`, `SHA256SUMS.minisig`,
 artifact(s) you will install, in one directory:
 
 ```bash
-base=https://releases.example.com/v0.10.0
+base=https://github.com/Ydde21/LocalMesh/releases/download/v0.10.0
 for f in SHA256SUMS SHA256SUMS.minisig release-manifest.json \
          release-manifest.json.minisig localmesh-agent-0.10.0-linux-amd64; do
   curl -fsSL "$base/$f" -o "dist/$f"
@@ -195,7 +195,7 @@ banner) when `signer.dev` is set — a WARN is allowed to exit 0, so
 ```bash
 # dry-run: fetch metadata, verify signature + checksums + protocol,
 # print the plan — touches nothing else
-localmesh-agent update -release https://releases.example.com/v0.6.0 \
+localmesh-agent update -release https://github.com/Ydde21/LocalMesh/releases/download/v0.10.0 \
   -pubkey ~/localmesh-release.pub
 
 # apply: stage <bin>.new, verify, swap, keep <bin>.bak

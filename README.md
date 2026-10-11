@@ -122,10 +122,10 @@ make build && ./bin/localmesh-agent join \
   -server https://<control-plane>:8443 \
   -token <enrollment-token>
 
-# or the installer (macOS/Linux; install-agent.ps1 on Windows):
-# downloads the latest PUBLISHED release — until 0.10.0 is
-# maintainer-signed and published, build from source as above
-curl -fsSL https://raw.githubusercontent.com/localmesh/localmesh/main/scripts/install-agent.sh | \
+# or the installer (macOS/Linux; install-agent.ps1 on Windows) —
+# downloads + checksum-verifies the latest published release:
+curl -fsSL https://raw.githubusercontent.com/Ydde21/LocalMesh/main/scripts/install-agent.sh | \
+  LOCALMESH_REPO=Ydde21/LocalMesh \
   sh -s -- --server https://<control-plane>:8443 --token <enrollment-token>
 ```
 

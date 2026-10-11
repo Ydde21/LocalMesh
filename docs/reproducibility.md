@@ -160,7 +160,7 @@ module/toolchain downloads** (all into a private `GOMODCACHE`).
 ## How an external verifier reproduces a release
 
 ```bash
-git clone https://github.com/localmesh/localmesh && cd localmesh
+git clone https://github.com/Ydde21/LocalMesh && cd LocalMesh
 git checkout <release-tag-or-commit>
 
 # 1. Rebuild the release under the pinned toolchain + epoch

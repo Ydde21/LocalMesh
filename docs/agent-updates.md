@@ -49,20 +49,20 @@ before anything is installed. Fetching by hand:
 
 ```bash
 TAG=v0.10.0   # the release matching your control plane
-curl -fsSLO "https://github.com/localmesh/localmesh/releases/download/$TAG/release-manifest.json"
+curl -fsSLO "https://github.com/Ydde21/LocalMesh/releases/download/$TAG/release-manifest.json"
 FILE=$(python3 -c 'import json;m=json.load(open("release-manifest.json"));print([a["file"] for a in m["artifacts"] if a["os"]=="linux" and a["arch"]=="amd64" and "agent" in a["file"]][0])')
-curl -fsSLO "https://github.com/localmesh/localmesh/releases/download/$TAG/$FILE"
-curl -fsSLO "https://github.com/localmesh/localmesh/releases/download/$TAG/SHA256SUMS"
+curl -fsSLO "https://github.com/Ydde21/LocalMesh/releases/download/$TAG/$FILE"
+curl -fsSLO "https://github.com/Ydde21/LocalMesh/releases/download/$TAG/SHA256SUMS"
 ```
 
 Windows (`install-agent.ps1` equivalent — elevated not needed for the
 download itself):
 
 ```powershell
-Invoke-WebRequest "https://github.com/localmesh/localmesh/releases/download/$Tag/release-manifest.json" -OutFile release-manifest.json
+Invoke-WebRequest "https://github.com/Ydde21/LocalMesh/releases/download/$Tag/release-manifest.json" -OutFile release-manifest.json
 # pick localmesh-agent-<ver>-windows-amd64.exe from the manifest, then:
-Invoke-WebRequest "https://github.com/localmesh/localmesh/releases/download/$Tag/<file>" -OutFile localmesh-agent.exe
-Invoke-WebRequest "https://github.com/localmesh/localmesh/releases/download/$Tag/SHA256SUMS" -OutFile SHA256SUMS
+Invoke-WebRequest "https://github.com/Ydde21/LocalMesh/releases/download/$Tag/<file>" -OutFile localmesh-agent.exe
+Invoke-WebRequest "https://github.com/Ydde21/LocalMesh/releases/download/$Tag/SHA256SUMS" -OutFile SHA256SUMS
 ```
 
 ## 3. Verify the checksum

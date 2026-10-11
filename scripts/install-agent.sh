@@ -1,7 +1,7 @@
 #!/bin/sh
 # LocalMesh agent installer for macOS and Linux.
 #
-#   curl -fsSL https://localmesh.example/install-agent.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Ydde21/LocalMesh/main/scripts/install-agent.sh | sh
 #   sh install-agent.sh --server https://mesh.local:8443 --token lme_...
 #
 # What it does:

@@ -98,15 +98,18 @@ curl --cacert ca.pem -X POST https://localhost:8443/api/v1/enrollment-tokens \
 ### macOS / Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/localmesh/localmesh/main/scripts/install-agent.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Ydde21/LocalMesh/main/scripts/install-agent.sh | \
+  LOCALMESH_REPO=Ydde21/LocalMesh sh
 ```
 
 The installer detects OS/arch, resolves the release manifest, verifies
 the artifact's SHA-256 (and the minisign signature when
 `LOCALMESH_RELEASE_PUBKEY` + `minisign` are present), then installs to
-`/usr/local/bin` (or `~/.local/bin` without root). Or build from source
-(`make build` → `bin/localmesh-agent`), or download a release binary
-yourself (see `docs/releases.md`).
+`/usr/local/bin` (or `~/.local/bin` without root). `LOCALMESH_REPO`
+names the GitHub `owner/repo` release binaries come from — set it when
+installing from a fork or mirror. Or build from source (`make build` →
+`bin/localmesh-agent`), or download a release binary yourself (see
+`docs/releases.md`).
 
 ### Windows (PowerShell)
 
