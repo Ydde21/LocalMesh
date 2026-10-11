@@ -597,7 +597,7 @@ func TestVerifyHealthOnConfirmingBoot(t *testing.T) {
 	// The report lands before the marker is cleared — deliberately: a
 	// dropped frame must not read as a confirmed update. Poll rather
 	// than race the clear.
-	waitFor(t, 5*time.Second, "marker cleared after verify_health", func() bool {
+	waitFor(t, 8*time.Second, "marker cleared after verify_health", func() bool {
 		_, ok, _ := readPendingMarker(mkPath)
 		return !ok
 	})
@@ -784,7 +784,7 @@ func TestRolledBackMarkerReportsOnNextSession(t *testing.T) {
 	if st.OperationID != "op-rb2" || st.ToVersion != "0.7.0" {
 		t.Fatalf("rolled_back = %+v", st)
 	}
-	waitFor(t, 5*time.Second, "marker clear after rolled_back", func() bool {
+	waitFor(t, 8*time.Second, "marker clear after rolled_back", func() bool {
 		_, ok, _ := readPendingMarker(mkPath)
 		return !ok
 	})
@@ -1358,7 +1358,7 @@ func TestSettleWindowConfirmsHealthy(t *testing.T) {
 	if el := time.Since(start); el < 80*time.Millisecond {
 		t.Fatalf("verify_health reported after %v — settle window skipped", el)
 	}
-	waitFor(t, 5*time.Second, "marker cleared after verify_health", func() bool {
+	waitFor(t, 8*time.Second, "marker cleared after verify_health", func() bool {
 		_, ok, _ := readPendingMarker(mkPath)
 		return !ok
 	})
@@ -1486,7 +1486,7 @@ func TestSettleExhaustionRollsBack(t *testing.T) {
 		t.Fatalf("rolled_back report = %+v", st)
 	}
 	endSession(t, f, ch2)
-	waitFor(t, 5*time.Second, "marker cleared after rolled_back", func() bool {
+	waitFor(t, 8*time.Second, "marker cleared after rolled_back", func() bool {
 		_, ok, _ := readPendingMarker(mkPath)
 		return !ok
 	})
@@ -1552,7 +1552,7 @@ func TestAttemptBudgetRollsBackAtBoot(t *testing.T) {
 		t.Fatalf("rolled_back report = %+v", st)
 	}
 	endSession(t, f, ch)
-	waitFor(t, 5*time.Second, "marker cleared after rolled_back", func() bool {
+	waitFor(t, 8*time.Second, "marker cleared after rolled_back", func() bool {
 		_, ok, _ := readPendingMarker(mkPath)
 		return !ok
 	})

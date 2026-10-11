@@ -65,7 +65,17 @@ trap cleanup EXIT
 
 wait_pid_or_bad() { # pid name — fails fast if the process died
   [ -n "$1" ] && kill -0 "$1" 2>/dev/null && return 0
-  bad "$2 exited unexpectedly — see log tail above"
+  local st=0
+  # `wait` under set -e would kill the script before the status is
+  # harvested — the || form is mandatory here, never `wait; st=$?`.
+  wait "$1" 2>/dev/null || st=$?
+  echo "NOTE: $2 exited with status $st" >&2
+  case "$st" in
+    137) echo "NOTE: status 137 = SIGKILL — likely runner OOM or an external kill; the process never got to log anything" >&2 ;;
+    139) echo "NOTE: status 139 = SIGSEGV — crash before logging was possible" >&2 ;;
+    127) echo "NOTE: status 127 = pid not a child of this shell or already reaped — status lost" >&2 ;;
+  esac
+  bad "$2 exited unexpectedly (status $st) — see log tail above"
 }
 
 # --- binaries ---------------------------------------------------------------
