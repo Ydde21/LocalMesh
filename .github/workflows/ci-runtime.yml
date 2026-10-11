@@ -19,10 +19,29 @@ name: CI Runtime
 # naming the missing capability, never faked passes. Anything that can
 # run must pass.
 
+# Heavy-tier coverage lives in release-verify.yml (v* tags + dispatch);
+# this file stays the per-PR runtime floor. Docs-only changes are
+# ignored; tags are never filtered (this workflow doesn't run on tags).
+
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'LICENSE'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'LICENSE'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   agent-runtime:

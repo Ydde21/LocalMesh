@@ -1,13 +1,37 @@
 name: CI
 
+# The PR/push floor — deliberately cheap and deterministic. The heavy
+# tier (docker live-stack smokes, chaos/stress, security scan, release
+# mechanics, install e2e) lives in release-verify.yml and fires only on
+# v* tags and manual dispatch. See docs/ci-release.md for the tier map.
+#
+# paths-ignore: docs-only changes do not fire CI. Tags are NOT filtered
+# here (this workflow does not run on tags at all).
+
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'LICENSE'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'LICENSE'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   go:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -21,6 +45,7 @@ jobs:
 
   cross-compile:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -42,6 +67,7 @@ jobs:
   agent-smoke:
     name: agent-smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -80,6 +106,7 @@ jobs:
   agent-integration:
     name: agent-integration (linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:16-alpine
@@ -106,6 +133,7 @@ jobs:
 
   web:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: web

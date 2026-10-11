@@ -1,0 +1,491 @@
+name: Release Verify
+
+# The authoritative release-verification workflow for LocalMesh.
+#
+#   * push of a v* tag      -> the full battery below
+#   * workflow_dispatch     -> the full battery, plus opt-in extras
+#
+# ci.yml / ci-runtime.yml remain the PR/push floor (fast, deterministic,
+# no heavy docker stacks). This file is the RC/tag gate: it orchestrates
+# the repo's own scripts and make targets — it does not reimplement them.
+#
+#   verify            make verify: gofmt + vet + full tests (postgres
+#                     containers) + -race + 5-target cross-compile +
+#                     web tsc/lint/build
+#   cross-compile     the release build matrix as plain go build
+#   agent-smoke       3-OS matrix: scripts/ci-agent-smoke.sh
+#   agent-runtime     3-OS matrix: scripts/ci-agent-runtime.sh
+#   smokes            docker live-stack scripts, one matrix leg each:
+#                     ci-ha-smoke.sh, ci-e2e-smoke.sh, ci-update-smoke.sh
+#   chaos             scripts/ci-chaos.sh (build-tagged failure suite)
+#   stress            scripts/ci-stress.sh (flake-repro rounds)
+#   security          govulncheck (pinned) + scripts/ci-security-scan.sh
+#   repro             scripts/ci-repro-build.sh
+#   release-artifacts release.sh --dev (ephemeral key) + --unsigned,
+#                     each checked by verify-release.sh; dist/ uploaded
+#   install-e2e       scripts/ci-clean-install.sh (+ opt-in --ha leg)
+#   artifact-install  scripts/ci-artifact-install.sh against the CI dist/
+#   ollama-live       OPT-IN: real-Ollama HA smoke, never faked
+#   release-gate      aggregate: fails if any required job failed OR
+#                     was skipped
+#
+# No secrets are referenced anywhere in this workflow. There is NO
+# production signing key in CI: release mechanics are checked with a
+# dev key generated and discarded inside the job (the manifest records
+# signer.dev=true), plus an unsigned build exercising --allow-unsigned.
+#
+# See docs/ci-release.md for the tier map, timing budget, and the
+# script-contract assumptions for the parallel workstreams.
+
+on:
+  push:
+    # Tags are never path-filtered: a v* push always runs everything.
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      ollama_live:
+        description: >-
+          Run the real-Ollama HA smoke (ci-ollama-ha-smoke.sh). Spins an
+          ollama/ollama container unless ollama_url points at an external
+          endpoint; pulls qwen2.5:0.5b + smollm2:135m and fails hard if
+          unreachable. Slow on CPU-only runners — off by default.
+        type: boolean
+        default: false
+      ollama_url:
+        description: >-
+          Optional external Ollama endpoint (e.g. http://gpu-box:11434).
+          Only used when ollama_live is set; skips the container leg.
+        type: string
+        default: ''
+      clean_install_ha:
+        description: >-
+          Also run ci-clean-install.sh --ha (container-level SIGKILL
+          failover through the router) after the standard journey.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Never auto-cancel: two dispatches on the same ref must queue, not kill
+# each other mid-gate.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ------------------------------------------------------------------
+  # make verify — the same gate a maintainer runs before calling a
+  # milestone done. go test spins postgres containers (docker is
+  # present on ubuntu-latest); the web leg needs node_modules first.
+  # ------------------------------------------------------------------
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: npm ci (make verify runs tsc + lint + build inside web/)
+        run: npm ci
+        working-directory: web
+      - name: make verify
+        run: make verify
+
+  # The release build matrix as plain compile checks: the five agent
+  # targets plus both server targets release.sh produces. (make verify
+  # already compiles the five agent targets; this job also covers the
+  # server cross-builds and keeps target breakage visible in the graph.)
+  cross-compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: agent + server builds for all release targets
+        run: |
+          for t in "darwin arm64" "darwin amd64" "linux amd64" "linux arm64" "windows amd64"; do
+            set -- $t
+            GOOS=$1 GOARCH=$2 go build -o /dev/null ./cmd/localmesh-agent
+          done
+          for t in "linux amd64" "linux arm64"; do
+            set -- $t
+            GOOS=$1 GOARCH=$2 go build -o /dev/null ./cmd/localmesh-server
+          done
+          echo "cross-compile ok (5 agent + 2 server targets)"
+
+  # Same contract as ci.yml's agent-smoke: native vet+test+race on the
+  # agent packages, then ci-agent-smoke.sh (build, headless run, service
+  # lifecycle, doctor/config contracts).
+  agent-smoke:
+    name: agent-smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet
+        run: go vet ./internal/agent/...
+      - name: go test
+        run: go test -count=1 ./internal/agent/...
+      - name: go test -race
+        # -race needs cgo: gcc on linux/windows, clang on macOS. Guarded
+        # on Windows so an image change drops to a loud SKIP line
+        # instead of a red job.
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ] && ! command -v gcc >/dev/null 2>&1; then
+            echo "SKIP: race detector requires cgo+gcc; no gcc on this windows image"
+            exit 0
+          fi
+          go test -race -count=1 ./internal/agent/...
+      - name: build + headless + runtime smoke (service lifecycle, doctor contract, config round-trip)
+        # bash resolves to Git Bash on windows runners.
+        shell: bash
+        run: bash scripts/ci-agent-smoke.sh
+
+  # Same contract as ci-runtime.yml: natively-built agent + fakeollama
+  # executed on each OS — version format, -h per subcommand, unenrolled
+  # degradation, config round-trip, bounded run, fakeollama engine leg.
+  agent-runtime:
+    name: agent-runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: native build + runtime-executable checks (version, help, doctor, run, fakeollama leg)
+        # bash resolves to Git Bash on windows runners.
+        shell: bash
+        run: bash scripts/ci-agent-runtime.sh
+
+  # Live-stack smokes — one matrix leg per script, each self-provisions
+  # its postgres:16-alpine container via docker (LOCALMESH_DATABASE_URL
+  # left unset on purpose: the scripts' own provisioning path is part
+  # of what is being verified). ci-e2e-smoke.sh is the same end-to-end
+  # leg ci.yml runs as agent-integration; it is not duplicated as a
+  # separate job here.
+  smokes:
+    name: smokes (${{ matrix.script }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        script: [ci-ha-smoke.sh, ci-e2e-smoke.sh, ci-update-smoke.sh]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: ${{ matrix.script }}
+        run: bash scripts/${{ matrix.script }}
+
+  # Build-tagged distributed-failure suite — real postgres containers,
+  # killed mid-flight. `make chaos-test` just execs ci-chaos.sh; the
+  # script is invoked directly so the job does not depend on Makefile
+  # wiring details.
+  chaos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: chaos suite
+        run: bash scripts/ci-chaos.sh
+
+  # Flake-repro harness: repeats the historically timing-sensitive tests
+  # against real postgres containers. Runs the script's default 10
+  # rounds — the intended release signal. If runtime ever becomes the
+  # problem, `bash scripts/ci-stress.sh -n 5 -q` is the documented
+  # shorter screen (flag exists in the script; do not edit it here).
+  stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: stress matrix (default rounds, quiet on pass)
+        run: bash scripts/ci-stress.sh -q
+
+  # ------------------------------------------------------------------
+  # Security gate — REQUIRED. No continue-on-error anywhere in this
+  # job: a govulncheck finding or a grype policy failure must block the
+  # release, and release-gate treats a skipped security job as a
+  # failure too.
+  #
+  # govulncheck is pinned to v1.8.0 (published 2026-09-08): the newest
+  # release that had baked >=7 days when this file was written. v1.9.0
+  # shipped 2026-10-11 and is deliberately excluded — bump the pin only
+  # to releases >=7 days old so a same-day upstream bug can't break
+  # the gate.
+  # ------------------------------------------------------------------
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: install govulncheck (pinned)
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+      - name: govulncheck ./...
+        run: govulncheck ./...
+      - name: image build + SBOM + grype policy scan (scripts/ci-security-scan.sh)
+        run: bash scripts/ci-security-scan.sh
+      - name: upload security reports (dist/security/)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: dist/security/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # Clean-checkout reproducibility gate — builds the release twice from
+  # pristine checkouts and compares digests. Full history so the script
+  # can resolve tags/describe however it needs to.
+  repro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: reproducible-build check (scripts/ci-repro-build.sh)
+        run: bash scripts/ci-repro-build.sh
+
+  # ------------------------------------------------------------------
+  # Release mechanics check. Decision: --dev with an ephemeral key
+  # (PLUS an --unsigned pass), not --unsigned alone — the dev-signed
+  # leg exercises strictly more of the pipeline: real signature
+  # generation, key-id derivation, manifest signer metadata, and
+  # verify-release.sh's real --pubkey verification. --unsigned only
+  # exercises the checksum/manifest half, so it is run as a second
+  # leg against a separate dist to cover the --allow-unsigned path.
+  # The key is generated in-job into $RUNNER_TEMP and deleted at the
+  # end; it is a dev-marked throwaway, not a secret and never a fleet
+  # trust root (manifest signer.dev=true).
+  # ------------------------------------------------------------------
+  release-artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git describe --tags drives the version stamp
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: pin SOURCE_DATE_EPOCH to the commit time (deterministic manifest)
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+      - name: generate ephemeral dev signing key
+        run: |
+          keydir="$RUNNER_TEMP/ci-keys"
+          mkdir -p "$keydir"
+          go run ./internal/release/cmd/sign keygen -dev \
+            -sec "$keydir/ci-dev.sec" -pub "$keydir/ci-dev.pub"
+          echo "DEVKEY_DIR=$keydir" >> "$GITHUB_ENV"
+      - name: release.sh --dev (full signed pipeline, throwaway key)
+        run: LOCALMESH_SIGNING_KEY="$DEVKEY_DIR/ci-dev.sec" bash scripts/release.sh --dev -d dist
+      - name: verify-release.sh dist --pubkey (real signature verification)
+        run: bash scripts/verify-release.sh dist --pubkey "$DEVKEY_DIR/ci-dev.pub"
+      - name: release.sh --unsigned + verify-release.sh --allow-unsigned
+        run: |
+          bash scripts/release.sh --unsigned -d dist-unsigned
+          bash scripts/verify-release.sh dist-unsigned --allow-unsigned
+      - name: discard ephemeral key
+        if: always()
+        run: '[ -n "${DEVKEY_DIR:-}" ] && rm -rf "$DEVKEY_DIR" || true'
+      - name: upload release dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: |
+            dist/
+            dist-unsigned/
+          retention-days: 30
+
+  # The documented clean-machine install journey on a disposable compose
+  # project — the heaviest job in the workflow (builds the server + web
+  # images, runs the full enroll→infer→restart story). Standard mode on
+  # every run; the --ha failover leg is opt-in because it nearly doubles
+  # the wall clock for coverage that smoke-ha already provides at the
+  # process level.
+  install-e2e:
+    name: install-e2e (clean install)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: clean-install e2e (disposable compose project)
+        run: bash scripts/ci-clean-install.sh
+      - name: clean-install --ha (opt-in via workflow_dispatch input)
+        if: inputs.clean_install_ha == true
+        run: bash scripts/ci-clean-install.sh --ha
+
+  # Install-from-artifacts e2e. Depends on release-artifacts so the CI-
+  # built dist/ (dev-signed + unsigned trees) is on disk before the
+  # script runs — see docs/ci-release.md for the contract assumption.
+  artifact-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [release-artifacts]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: download release-dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+      - name: install-from-artifacts e2e (scripts/ci-artifact-install.sh)
+        # CI dist/ is the flat release dir (release.sh -d dist); the
+        # script's default dist/0.10.0-rc1 is the local-RC layout.
+        env:
+          ARTIFACT_INSTALL_DIST: dist
+        run: bash scripts/ci-artifact-install.sh
+
+  # ------------------------------------------------------------------
+  # OPT-IN ONLY: the real-Ollama HA smoke. Never faked, never run by
+  # default — on a hosted runner it needs the ollama/ollama image plus
+  # model pulls and CPU inference, so it is dispatch-gated. Set
+  # ollama_live=true (optionally with ollama_url for an external/GPU
+  # endpoint). REQUIRE_REAL_OLLAMA=1 makes the script FAIL instead of
+  # SKIP when no real engine answers.
+  # ------------------------------------------------------------------
+  ollama-live:
+    name: ollama-live (real Ollama HA)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    if: github.event_name == 'workflow_dispatch' && inputs.ollama_live == true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: start real Ollama container (skipped when ollama_url is set)
+        if: inputs.ollama_url == ''
+        run: |
+          docker run -d --name ollama -l localmesh.test=1 \
+            -p '127.0.0.1:11434:11434' ollama/ollama:latest
+          for i in $(seq 60); do
+            curl -sf http://127.0.0.1:11434/api/version && break || sleep 2
+          done
+          curl -sf http://127.0.0.1:11434/api/version
+      - name: ci-ollama-ha-smoke.sh against real Ollama
+        env:
+          OLLAMA_URL: ${{ inputs.ollama_url || 'http://127.0.0.1:11434' }}
+          REQUIRE_REAL_OLLAMA: '1'
+        run: bash scripts/ci-ollama-ha-smoke.sh
+
+  # ------------------------------------------------------------------
+  # Aggregate gate. needs: every job above. if: always() so it still
+  # runs when a dependency fails; the step then enforces:
+  #   * every required job result == success  (skipped == FAIL)
+  #   * ollama-live: skipped is fine unless the input requested it
+  # A jq-missing job (renamed out of needs:) reads "null" -> FAIL, so
+  # the gate cannot silently shrink.
+  # ------------------------------------------------------------------
+  release-gate:
+    name: release-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs:
+      - verify
+      - cross-compile
+      - agent-smoke
+      - agent-runtime
+      - smokes
+      - chaos
+      - stress
+      - security
+      - repro
+      - release-artifacts
+      - install-e2e
+      - artifact-install
+      - ollama-live
+    env:
+      NEEDS_JSON: ${{ toJSON(needs) }}
+      OLLAMA_REQ: ${{ inputs.ollama_live || false }}
+    steps:
+      - name: evaluate gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "== job results =="
+          echo "$NEEDS_JSON" | jq -r 'to_entries[] | "  \(.key): \(.value.result)"'
+          {
+            echo "### release-gate"
+            echo
+            echo "| job | result |"
+            echo "|---|---|"
+            echo "$NEEDS_JSON" | jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"'
+          } >> "$GITHUB_STEP_SUMMARY"
+          failed=0
+          for j in verify cross-compile agent-smoke agent-runtime smokes \
+                    chaos stress security repro release-artifacts \
+                    install-e2e artifact-install; do
+            r=$(echo "$NEEDS_JSON" | jq -r ".[\"$j\"].result // \"missing\"")
+            if [ "$r" != "success" ]; then
+              echo "GATE FAIL: $j -> $r"
+              failed=1
+            fi
+          done
+          r=$(echo "$NEEDS_JSON" | jq -r '.["ollama-live"].result // "missing"')
+          if [ "$OLLAMA_REQ" = "true" ]; then
+            [ "$r" = "success" ] || { echo "GATE FAIL: ollama-live was requested -> $r"; failed=1; }
+          else
+            case "$r" in
+              success|skipped) : ;;
+              *) echo "GATE FAIL: ollama-live -> $r"; failed=1 ;;
+            esac
+          fi
+          [ "$failed" -eq 0 ] || exit 1
+          echo "release-gate: PASS — all required jobs succeeded"
