@@ -384,6 +384,10 @@ jobs:
         with:
           name: release-dist
       - name: install-from-artifacts e2e (scripts/ci-artifact-install.sh)
+        # CI dist/ is the flat release dir (release.sh -d dist); the
+        # script's default dist/0.10.0-rc1 is the local-RC layout.
+        env:
+          ARTIFACT_INSTALL_DIST: dist
         run: bash scripts/ci-artifact-install.sh
 
   # ------------------------------------------------------------------
