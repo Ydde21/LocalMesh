@@ -46,6 +46,10 @@ type Manifest struct {
 type Signer struct {
 	Algorithm string `json:"algorithm"` // "minisign", "openssl", or "unsigned"
 	KeyID     string `json:"key_id,omitempty"`
+	// Dev marks a release signed with a development key
+	// (scripts/release.sh --dev). Verifiers warn on it; operators must
+	// never pin a dev key id as a fleet trust anchor.
+	Dev bool `json:"dev,omitempty"`
 }
 
 // Artifact is one downloadable binary in the release.

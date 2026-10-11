@@ -199,6 +199,11 @@ func VerifyRelease(dir string, opts VerifyOptions) (*Report, error) {
 			r.emit("WARN", "signer", "manifest declares signer %q but no signature files exist",
 				man.Signer.Algorithm)
 		}
+		if man.Signer.Dev {
+			r.emit("WARN", "signer", "manifest marks this as a DEV-signed release (key %s) — "+
+				"do not pin this key id as a fleet trust anchor or ship it to production nodes",
+				man.Signer.KeyID)
+		}
 	}
 	return r, nil
 }

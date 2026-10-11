@@ -7,7 +7,7 @@
 //
 // Usage:
 //
-//	sign keygen -sec KEY.sec -pub KEY.pub
+//	sign keygen -sec KEY.sec -pub KEY.pub [-dev]
 //	sign pubkey -sec KEY.sec          # re-emit public key file
 //	sign -sec KEY.sec -m FILE         # writes FILE.minisig
 package main
@@ -49,6 +49,8 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `sign — localmesh release signing helper (minisign-compatible output)
 
   sign keygen -sec KEY.sec -pub KEY.pub   generate a signing keypair
+      -dev                                mark the key dev-only —
+                                          release.sh refuses it without --dev
   sign pubkey -sec KEY.sec                print the public key file
   sign -sec KEY.sec -m FILE               write FILE.minisig
 
@@ -62,6 +64,7 @@ func cmdKeygen(args []string) error {
 	fs := flag.NewFlagSet("keygen", flag.ContinueOnError)
 	sec := fs.String("sec", "", "secret key output path")
 	pub := fs.String("pub", "", "public key output path")
+	dev := fs.Bool("dev", false, "mark the key dev-only: release.sh refuses it without --dev")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -72,13 +75,16 @@ func cmdKeygen(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(*sec, release.MarshalSigningSecretKey(k.KeyNum, priv), 0o600); err != nil {
+	if err := os.WriteFile(*sec, release.MarshalSigningSecretKey(k.KeyNum, priv, *dev), 0o600); err != nil {
 		return err
 	}
 	if err := os.WriteFile(*pub, pubData, 0o644); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "sign: wrote %s (keep secret) and %s (distribute)\n  key id: %s\n", *sec, *pub, k.KeyIDHex)
+	if *dev {
+		fmt.Fprintf(os.Stderr, "sign: %s is marked DEV — scripts/release.sh requires --dev to use it\n", *sec)
+	}
 	return nil
 }
 

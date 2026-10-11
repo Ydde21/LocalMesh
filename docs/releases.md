@@ -31,41 +31,51 @@ execution across the fleet. The design:
 
 ## One-time: maintainer key
 
-Preferred — a real minisign key:
+`docs/release-signing.md` is the authoritative doc for generation,
+custody (`~/.localmesh/keys`, offline/HSM — never the repo), backup,
+rotation, and compromise. Short form:
 
 ```bash
-minisign -G -p localmesh-release.pub -s localmesh-release.sec
-# record the key id minisign prints; distribute localmesh-release.pub
-# with install media (NOT inside the release)
+# production identity — passphrase-encrypted real minisign key:
+minisign -G -p ~/.localmesh/keys/localmesh-release.pub \
+            -s ~/.localmesh/keys/localmesh-release.sec
+
+# throwaway/dev identity (CI, RC validation) — explicitly marked:
+go run ./internal/release/cmd/sign keygen -dev \
+  -sec ~/.localmesh/keys/localmesh-dev.sec \
+  -pub ~/.localmesh/keys/localmesh-dev.pub
 ```
 
-Fallback — an openssl PEM key (RSA shown; ECDSA/Ed25519 also work):
-
-```bash
-openssl genrsa -out localmesh-release.pem 4096
-openssl pkey -in localmesh-release.pem -pubout -out localmesh-release.pub.pem
-```
-
-Keep the secret offline; CI can hold it in a secrets store and expose
-`LOCALMESH_SIGNING_KEY` at release time only.
+The public key is distributed with install media / pinned on agents —
+NEVER inside the release. CI holds the secret in a secrets store and
+exposes `LOCALMESH_SIGNING_KEY` at release time only.
 
 ## Cutting a release
 
 ```bash
 git tag v0.6.0
-LOCALMESH_SIGNING_KEY=~/keys/localmesh-release.sec ./scripts/release.sh
+LOCALMESH_SIGNING_KEY=~/.localmesh/keys/localmesh-release.sec ./scripts/release.sh
 ```
 
 The script:
 
 1. Resolves `VERSION` (`git describe --tags`, else `0.0.0-dev+sha`).
-2. Builds the five agent targets plus linux/{amd64,arm64} servers with
+2. Resolves the signing key: `LOCALMESH_SIGNING_KEY`, else the
+   convention `$LOCALMESH_KEYS_DIR/localmesh-release.sec`
+   (`LOCALMESH_KEYS_DIR` defaults to `~/.localmesh/keys`).
+   **Dev-key guard:** a key generated with `sign keygen -dev` (embedded
+   marker) or carrying a `<keyfile>.dev` sidecar is refused unless
+   `--dev` is passed — a dev key can never sign a release silently.
+   `LOCALMESH_RELEASE_KEY_ID`, when set, must equal the derived signer
+   key id — pin it in CI so a wrong secret aborts instead of signing.
+   `--dev` records `signer.dev: true` in the manifest.
+3. Builds the five agent targets plus linux/{amd64,arm64} servers with
    `CGO_ENABLED=0 -trimpath -buildvcs=false -ldflags "-s -w -X main.version=$VERSION"`.
-3. Writes `dist/SHA256SUMS`.
-4. Signs `SHA256SUMS` (`SHA256SUMS.minisig` or `.sig`).
-5. Emits `dist/release-manifest.json` (version, wire protocol compiled
-   in from `internal/contracts`, per-artifact sha256/size, signer key id)
-   and signs it too.
+4. Writes `dist/SHA256SUMS`.
+5. Signs `SHA256SUMS` (`SHA256SUMS.minisig` or `.sig`).
+6. Emits `dist/release-manifest.json` (version, wire protocol compiled
+   in from `internal/contracts`, per-artifact sha256/size, signer
+   algorithm + key id + dev flag) and signs it too.
 
 Unsigned releases are possible only with an explicit `--unsigned`,
 which prints a warning and produces a release that `update` and
@@ -76,6 +86,23 @@ be checked with `--allow-unsigned`).
 cross-compile; the integrator may point it at `scripts/release.sh
 --unsigned` or leave it for dev use only.
 
+### Reproducibility
+
+The build flags above make binaries byte-reproducible: same git commit
++ same Go toolchain → identical `SHA256SUMS`. (Measured for v0.10:
+two `--unsigned` builds produced identical sums; see the release
+notes' "Reproduce this build" block.) Signatures embed a timestamp and
+the manifest embeds `created_at`, so they differ run to run —
+`SOURCE_DATE_EPOCH` pins `created_at` for a byte-identical manifest.
+
+### Release notes
+
+`scripts/release-notes.sh -v <ver> -d dist` renders a notes skeleton:
+the matching `## vX.Y` CHANGELOG section, a sha256 table generated from
+the signed `SHA256SUMS` (so the notes can't drift), and complete
+verify/install/upgrade instructions. Review the highlights, then paste
+into the GitHub release or `dist/RELEASE-NOTES.md`.
+
 ## Operator verification
 
 ```bash
@@ -85,8 +112,11 @@ cross-compile; the integrator may point it at `scripts/release.sh
 Verifies the signature over `SHA256SUMS` and `release-manifest.json`
 against the supplied public key, checks every artifact against
 `SHA256SUMS`, validates the manifest schema, confirms the five agent
-platforms, and cross-checks with the real `minisign -V`/`openssl dgst`
-tools when they happen to be installed. Any failure exits non-zero.
+platforms, warns when the manifest is marked `signer.dev`, and
+cross-checks with the real `minisign -V`/`openssl dgst` tools when they
+happen to be installed. Every FAIL line comes with a `→` remediation
+hint (re-download the artifact vs wrong pubkey vs repackaged release);
+any failure exits non-zero.
 
 ## Updating an agent (opt-in)
 
