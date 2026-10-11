@@ -96,7 +96,10 @@ else
     base="https://github.com/${REPO}/releases/download/${VERSION}"
     artifact="localmesh-agent-${VERSION}-${os}-${arch}"
     mf="$(mktemp)"
-    curl -fsSL "$base/release-manifest.json" -o "$mf" 2>/dev/null || mf=""
+    if ! curl -fsSL "$base/release-manifest.json" -o "$mf" 2>/dev/null; then
+      mf=""
+      log "note: release manifest unreachable — a signed SHA256SUMS becomes the only integrity check"
+    fi
   fi
 
   log "downloading $base/$artifact"
@@ -106,15 +109,22 @@ else
   fi
   chmod +x "$src"
 
-  # Checksum verification (always). Signature verification when a
-  # pubkey + minisign are available — the artifact must never be
-  # trusted on transport alone (docs/releases.md).
+  # Integrity verification (always — fail closed). The artifact must
+  # match the release manifest checksum AND/OR a signature-verified
+  # SHA256SUMS entry; at least one positive verification is required —
+  # an artifact must never be trusted on transport alone.
+  verified=0
   if [ -n "$mf" ] && [ -s "$mf" ]; then
-    want="$(tr -d '\n\t ' < "$mf" | grep -o "\"${artifact}\"[^}]*" | grep -o '"sha256":"[a-f0-9]*"' | grep -o '[a-f0-9]\{64\}')"
+    # || true: a trailing grep -o exits 1 on no match, and under set -e a
+    # failed command substitution in an assignment kills the script with
+    # NO output — an absent artifact must reach the integrity check, not
+    # silently die here.
+    want="$(tr -d '\n\t ' < "$mf" | grep -o "\"${artifact}\"[^}]*" | grep -o '"sha256":"[a-f0-9]*"' | grep -o '[a-f0-9]\{64\}' || true)"
     if [ -n "$want" ]; then
       got="$(sha256_of "$src")"
       [ "$got" = "$want" ] || fail "checksum mismatch for $artifact ($got != $want) — aborting"
       log "checksum verified against release manifest"
+      verified=1
     fi
   fi
   if [ -n "${LOCALMESH_RELEASE_PUBKEY:-}" ] && command -v minisign >/dev/null 2>&1; then
@@ -127,13 +137,18 @@ else
         || minisign -V -x "$sig" -m "$sums" -P "$(cat "$LOCALMESH_RELEASE_PUBKEY")" \
         || fail "signature verification failed — refusing to install"
       srcsum="$(sha256_of "$src")"
-      grep -q "${srcsum}  \*\?$artifact" "$sums" \
-        || log "note: artifact not in signed SHA256SUMS (manifest checksum already verified)"
-      log "release signature verified"
+      if grep -q "${srcsum}  \*\?$artifact" "$sums"; then
+        verified=1
+        log "release signature verified"
+      else
+        log "note: artifact not in signed SHA256SUMS${want:+ (manifest checksum already verified)}"
+      fi
     fi
   else
-    log "note: LOCALMESH_RELEASE_PUBKEY unset or minisign missing — checksum verified only"
+    log "note: LOCALMESH_RELEASE_PUBKEY unset or minisign missing — signature verification unavailable"
   fi
+  [ "$verified" = "1" ] \
+    || fail "integrity verification unavailable — could not match ${artifact} against the release manifest or a signed SHA256SUMS (set LOCALMESH_RELEASE_PUBKEY + install minisign to verify via signature)"
 fi
 
 # --- install ---------------------------------------------------------------
@@ -143,11 +158,8 @@ if [ ! -w "$DEST_SYSTEM" ]; then
   mkdir -p "$dest"
 fi
 log "installing to ${dest}/localmesh-agent"
-if [ -w "$DEST_SYSTEM" ] || [ "$dest" = "$DEST_USER" ]; then
-  cp "$src" "${dest}/localmesh-agent"
-else
-  sudo cp "$src" "${dest}/localmesh-agent"
-fi
+cp "$src" "${dest}/localmesh-agent" \
+  || fail "install failed — could not write ${dest}/localmesh-agent"
 
 case ":$PATH:" in
   *":${dest}:"*) : ;;

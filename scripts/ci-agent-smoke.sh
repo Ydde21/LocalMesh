@@ -97,6 +97,8 @@ else
   bash -n scripts/ci-agent-smoke.sh
   bash -n scripts/ci-e2e-smoke.sh
   echo "shell scripts: syntax OK"
+  step "install-agent.sh integrity-verification tests"
+  sh scripts/test-install-agent.sh
 fi
 
 # ---------------------------------------------------------------------------
