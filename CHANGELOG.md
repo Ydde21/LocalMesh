@@ -4,6 +4,80 @@ Notable changes per release. Versions are stamped at release time by
 `scripts/release.sh` (git tag → `main.version`); this file follows the
 repo's `vX.Y` naming. Detail-level references live in `docs/`.
 
+## v0.10 — public beta release candidate (in preparation)
+
+Release-candidate hardening for the first maintainer-signed release.
+A dev-signed `0.10.0-rc1` exists for validation; trusted `0.10.0`
+publication is gated on maintainer signing — draft notes in
+`docs/release-notes-0.10.md`, identity model in
+`docs/release-signing.md`.
+
+### Added
+
+- **Model-op dedupe closed + operator retry** — `interrupted` ops now
+  join the per-`(node, model)` unique set (migration `0014`): a
+  resubmit is a clean duplicate-conflict, not a second live op, and
+  the interrupted dispatch attempt stays consumed.
+  `POST /api/v1/model-operations/{id}/retry` re-queues a parked op
+  deliberately (admin, audited).
+- **Standby visibility + node disk** — both control-plane roles
+  heartbeat `control_plane_peers` rows (migration `0015`), surfaced as
+  `GET /api/v1/control-plane/peers` and the
+  `localmesh_control_plane_peers{role}` gauge; agents report disk
+  free/total end to end behind `GET /api/v1/nodes/{id}/disk`;
+  latency histograms and TTFT fields on workload metrics/events.
+  Guide: `docs/observability.md`.
+- **Dashboard** — inference playground (`/playground`) exercising the
+  real gateway, actionable error mapping across surfaces (structured
+  BFF upstream errors), onboarding polish, copyable API snippets,
+  standby/disk fields.
+- **Release-signing identity workflow** — signer resolved by key
+  format (minisign / PEM / repo-native `.sec`), `$LOCALMESH_KEYS_DIR`
+  convention (`~/.localmesh/keys`), `LOCALMESH_RELEASE_KEY_ID`
+  allowlist aborts a wrong secret before building. Dev-key guard: a
+  `sign keygen -dev` key or `<keyfile>.dev` sidecar is refused unless
+  `--dev`; `--dev` records `signer.dev: true` in the manifest —
+  a dev key can never sign silently. `scripts/release-notes.sh`
+  renders notes from the signed sums; `verify-release.sh` warns on
+  dev manifests. Docs: `docs/releases.md`, `docs/release-signing.md`.
+- **Install & clean-install verification** — `scripts/install-localmesh.sh`
+  runs the documented install (`--ha` for the standby+router stack);
+  `scripts/ci-clean-install.sh` proves it e2e on a disposable compose
+  project (enroll → infer → model ops → restart recovery → dashboard
+  smoke; `--ha` adds a real failover leg). Compose env wiring unified
+  across all shipped files.
+
+### Security
+
+- **XFF parity completed** — dashboard login limiter takes the
+  rightmost `X-Forwarded-For` entry under `LOCALMESH_TRUST_PROXY`
+  (the v0.9 leftmost fix was still client-controlled behind appending
+  proxies — audit N-1, completing R-1).
+- **Session hardening** — cookie `Secure` set correctly behind
+  TLS-terminating proxies (`X-Forwarded-Proto` only under
+  `LOCALMESH_TRUST_PROXY`); login bodies bounded at 4 KB.
+- **Gateway error sanitization** — internal failures return a generic
+  message to inference clients; detail stays in the server log.
+- **Model-op frame ownership** — progress/completion frames dropped
+  unless the reporting node owns the op.
+- **Rate-limit bounds** — distinct-key map capped at 65,536 with
+  fail-open reset; spoofed-identity churn can't grow memory.
+- **v0.10 audit + regression suite** — `docs/security-audit-v10.md`
+  re-classifies every v0.9 finding; `security_v10_test.go` adds 10
+  pinned cases; `govulncheck` clean pre-RC.
+
+### Fixed
+
+- **Update timeouts on the DB clock** — server-stamped `updated_at`
+  replaces host `time.Now()`; clock-skewed nodes no longer trip (or
+  escape) update deadlines falsely.
+- **Chaos drain-park race** — the drain-park flake is closed; the
+  stress harness's CPU burners now self-terminate with the script.
+- **Test de-flaking wave** — capability re-report, readiness gates,
+  and event-driven waits replace sleeps across e2e/chaos/updateplane.
+- Chaos suite grows to **22 failure-injection tests** (dedupe fencing
+  mid-retry, DB-outage dispatch blocking).
+
 ## v0.9 — beta hardening (in preparation)
 
 Real-world fleet validation, end-to-end AI high availability, database

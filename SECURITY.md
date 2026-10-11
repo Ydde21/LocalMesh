@@ -14,8 +14,9 @@ triage, coordinate a fix, and credit you on disclosure.
 
 Include, when you can:
 
-- the affected version (`localmesh-server`/`localmesh-agent version`
-  output, or the release tag)
+- the affected version (`localmesh-agent version` output, the
+  unauthenticated `GET /api/v1/version` response from the control
+  plane, or the release tag / image tag)
 - the component (control plane, agent, dashboard, wire protocol,
   release/update path)
 - reproduction steps or a proof of concept
@@ -93,4 +94,7 @@ answer whether your finding is a bug or the design working as intended.
 
 Operators hardening a deployment should start with
 [docs/production-hardening.md](docs/production-hardening.md); the
-pre-beta security audit is [docs/security-audit-v09.md](docs/security-audit-v09.md).
+pre-release security audits are
+[docs/security-audit-v09.md](docs/security-audit-v09.md) and
+[docs/security-audit-v10.md](docs/security-audit-v10.md) — the v0.10
+audit re-classifies every v0.9 finding against current code.

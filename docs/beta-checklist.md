@@ -141,10 +141,11 @@ As of this beta tag:
       reconciled across a mid-flight SIGKILL, two promotions with real
       inference after each). It skips gracefully when no Ollama is
       present; `REQUIRE_REAL_OLLAMA=1` enforces the leg.
-- [x] Chaos suite — `make chaos-test` / `scripts/ci-chaos.sh`, 18
+- [x] Chaos suite — `make chaos-test` / `scripts/ci-chaos.sh`, 22
       failure-injection tests against real Postgres and real agent
-      sockets (DB pause/restart/lock-loss, mid-stream cancel, SIGKILL
-      orphan, failover mid-pull/update/rollout) — `docs/chaos.md`.
+      sockets (DB pause/restart/lock-loss, DB-outage dispatch block,
+      mid-stream cancel, SIGKILL orphan, failover mid-pull/update/
+      rollout, model-op dedupe fencing mid-retry) — `docs/chaos.md`.
 - [ ] **Physical multi-device fleet validation: not yet completed.**
       This is the external beta's central item. The runbook is
       `docs/fleet-validation.md`; the tester kit is
@@ -168,12 +169,20 @@ As of this beta tag:
 - [ ] `bash scripts/ci-ha-smoke.sh` + `bash scripts/ci-ollama-ha-smoke.sh`
       green (the v0.9 HA gate; the ollama leg must find a real engine or
       run with `REQUIRE_REAL_OLLAMA=1` where one exists)
-- [ ] `make chaos-test` green (18 failure-injection tests)
+- [ ] `bash scripts/ci-clean-install.sh` green (stock stack); `--ha` leg
+      green where the HA stack is the shipping recipe
+- [ ] `make chaos-test` green (22 failure-injection tests)
 - [ ] `go vet ./... && go test ./...` green; `cd web && npm run lint &&
       npm run build` green
 - [ ] `bash -n` clean on `scripts/*.sh` incl. `scripts/beta-validate.sh`
-- [ ] `CHANGELOG.md` updated for the tag
-- [ ] `git tag vX.Y.Z && LOCALMESH_SIGNING_KEY=… ./scripts/release.sh`
-      → `verify-release.sh` clean on the produced `dist/`
+- [ ] `CHANGELOG.md` updated for the tag; release notes drafted
+      (`docs/release-notes-0.10.md`, or `scripts/release-notes.sh`
+      against the built `dist/`)
+- [ ] `git tag vX.Y.Z && LOCALMESH_SIGNING_KEY=<release-key>
+      ./scripts/release.sh` — signed with the **production release
+      key**, never a dev key (`--dev` marks `signer.dev` and is RC-only;
+      pin `LOCALMESH_RELEASE_KEY_ID` so a wrong secret aborts)
+- [ ] `verify-release.sh dist --pubkey <release.pub>` clean on the
+      produced `dist/` — no `signer.dev` warning on a trusted release
 - [ ] Installers resolve the published manifest
       (`release-manifest.json`, `SHA256SUMS`, signature files present)

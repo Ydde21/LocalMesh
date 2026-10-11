@@ -84,6 +84,11 @@ hardware.
 
 ## Quick start
 
+The path below is the **standard (single control-plane)** install — the
+HA variant is further down. `scripts/install-localmesh.sh` runs the
+same steps for you (`sh scripts/install-localmesh.sh`, `--ha` for the
+HA stack); the manual commands show what it does.
+
 ### 1. Run the control plane
 
 ```bash
@@ -107,25 +112,34 @@ no manual key copying is needed. The control plane listens on
 
 ### 2. Join a device
 
-On any machine with Ollama installed:
+First create an enrollment token in the dashboard (**Settings → Device
+enrollment**) or via `POST /api/v1/enrollment-tokens`. Then, on any
+machine with Ollama installed:
 
 ```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/localmesh/localmesh/main/scripts/install-agent.sh | sh
-
-# or build from source
+# from a checkout — builds bin/localmesh-agent
 make build && ./bin/localmesh-agent join \
   -server https://<control-plane>:8443 \
   -token <enrollment-token>
+
+# or the installer (macOS/Linux; install-agent.ps1 on Windows):
+# downloads the latest PUBLISHED release — until 0.10.0 is
+# maintainer-signed and published, build from source as above
+curl -fsSL https://raw.githubusercontent.com/localmesh/localmesh/main/scripts/install-agent.sh | \
+  sh -s -- --server https://<control-plane>:8443 --token <enrollment-token>
 ```
 
-Create an enrollment token in the dashboard (**Settings → Device
-enrollment**) or via the API. New devices land in **pending** until you
-approve them — then they connect, report hardware, and start serving.
-On the same LAN the agent can also find the cluster itself:
-`localmesh-agent discover` browses mDNS advertisements and verifies
-the advertised cluster CA fingerprint against the CA the server actually
-presents (pin out-of-band instead with `join -ca-fingerprint`).
+New devices land in **pending** until you approve them — then they
+connect, report hardware, and start serving. On the same LAN the agent
+can also find the cluster itself: `localmesh-agent discover` browses
+mDNS advertisements and verifies the advertised cluster CA fingerprint
+against the CA the server actually presents, and `join -discover`
+enrolls through it (pin out-of-band instead with `join
+-ca-fingerprint`).
+
+Give the node a model so it can serve — on the device
+(`ollama pull llama3.1:8b`), or from the dashboard / `POST
+/api/v1/models/pull`, which dispatches the pull to an eligible node.
 
 Pre-flight checks and fleet rollout:
 
@@ -144,9 +158,15 @@ attach to your report.
 
 ### 3. Call the API
 
+The gateway is TLS-only — grab the cluster CA first, then call it with
+an `lmk_` key (the bootstrap admin key, or a finer-scoped key you
+minted):
+
 ```bash
+docker compose exec server cat /data/ca.pem > ca.pem
+
 curl https://localhost:8443/v1/chat/completions \
-  --cacert <cluster-ca.pem> \
+  --cacert ca.pem \
   -H "Authorization: Bearer lmk_..." \
   -H "Content-Type: application/json" \
   -d '{
@@ -240,7 +260,8 @@ Stated plainly — the long version with verification detail lives in
 ```
 cmd/
   localmesh-server/     control plane entrypoint
-  localmesh-agent/      node agent CLI (join/run/status)
+  localmesh-agent/      node agent CLI (join / discover / run / status /
+                        doctor / report / service / update / update-key)
   localmesh-router/     TCP active-standby router for the HA pair
   fakeollama/           test double for Ollama (dev + e2e)
 internal/
@@ -267,9 +288,10 @@ LOCALMESH_DATABASE_URL='postgres://localmesh:localmesh@localhost:5433/localmesh?
 cd web && npm install && npm run dev   # dashboard on :3000
 
 go vet ./... && go test ./...     # unit + e2e (spins a Postgres container)
-make release                      # signed release → dist/ (needs
-                                  # LOCALMESH_SIGNING_KEY, or hack
-                                  # scripts/release.sh --unsigned)
+make verify                       # full regression gate (fmt+vet+tests+race+web)
+./scripts/release.sh              # signed release → dist/ (needs
+                                  # LOCALMESH_SIGNING_KEY; dev builds use
+                                  # --dev / --unsigned — see docs/release-signing.md)
 ```
 
 ## Documentation
@@ -277,25 +299,47 @@ make release                      # signed release → dist/ (needs
 - [docs/architecture.md](docs/architecture.md) — components, wire protocol, design decisions
 - [docs/api.md](docs/api.md) — gateway + admin API reference
 - [docs/onboarding.md](docs/onboarding.md) — installing agents, enrollment, approvals
+- [docs/services.md](docs/services.md) — running the agent under launchd / systemd / SCM
 - [docs/security.md](docs/security.md) — trust model, credentials, privacy
 - [docs/reliability.md](docs/reliability.md) — failure semantics + single-active ownership
 - [docs/backup-recovery.md](docs/backup-recovery.md) — backup/restore runbook
 - [docs/networking.md](docs/networking.md) — LAN discovery, TLS endpoints, remote joins
+- [docs/production-hardening.md](docs/production-hardening.md) — secrets, binds, and the hardened compose reference
+- [docs/observability.md](docs/observability.md) — `/api/v1/metrics`, optional Prometheus/Grafana stack
 - [docs/performance.md](docs/performance.md) — benchmark methodology + results
-- [docs/testing.md](docs/testing.md) — test infrastructure and cleanup contract
-- [docs/ci.md](docs/ci.md) — CI matrix: what each job proves
-- [docs/agent-updates.md](docs/agent-updates.md) — release + update security model
-- [docs/updates-orchestration.md](docs/updates-orchestration.md) — managed-upgrade runbook (release keys, rollouts, canaries, air-gap proxy)
 - [docs/ha-deployment.md](docs/ha-deployment.md) — HA deployment: standby pair + localmesh-router stable endpoint
 - [docs/ha-design.md](docs/ha-design.md) — active-standby design + failover semantics
+- [docs/postgres-ha.md](docs/postgres-ha.md) — external DSN, HA Postgres, backup notes
+- [docs/router.md](docs/router.md) — localmesh-router flags + diagnostics surface
+- [docs/agent-updates.md](docs/agent-updates.md) — release + update security model
+- [docs/updates-orchestration.md](docs/updates-orchestration.md) — managed-upgrade runbook (release keys, rollouts, canaries, air-gap proxy)
+- [docs/update-orchestration-api.md](docs/update-orchestration-api.md) — rollout/update endpoint reference
+- [docs/releases.md](docs/releases.md) — cutting + verifying a signed release
+- [docs/release-signing.md](docs/release-signing.md) — maintainer key custody, rotation, compromise
 - [docs/compatibility.md](docs/compatibility.md) — version/platform/Postgres floors
+- [docs/testing.md](docs/testing.md) — test infrastructure and cleanup contract
+- [docs/chaos.md](docs/chaos.md) — failure-injection suite + expected semantics
+- [docs/ci.md](docs/ci.md) — CI matrix: what each job proves
 - [docs/beta-testing.md](docs/beta-testing.md) — external beta: environments, protocol, reporting
 - [docs/beta-checklist.md](docs/beta-checklist.md) — public-beta readiness audit
 - [docs/fleet-validation.md](docs/fleet-validation.md) — physical multi-device validation runbook
+- [docs/security-audit-v09.md](docs/security-audit-v09.md) / [docs/security-audit-v10.md](docs/security-audit-v10.md) — pre-release security audits + findings
 - [docs/troubleshooting.md](docs/troubleshooting.md) — symptom → cause → fix
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [SECURITY.md](SECURITY.md) — vulnerability reporting + scope
 - [CONTRIBUTING.md](CONTRIBUTING.md)
+
+## Release status
+
+v0.10 is at **release candidate**: `0.10.0-rc1` exists built and signed
+with a *dev* key (manifest marks `signer.dev: true`) — it is for
+validation, not fleet trust. The first trusted published release
+(`0.10.0`) is gated on maintainer signing with the production release
+key; agents only ever install updates signed by the operator-pinned
+key, so a dev-signed build can never silently ship to a fleet.
+Draft notes: [docs/release-notes-0.10.md](docs/release-notes-0.10.md).
+Process: [docs/releases.md](docs/releases.md) +
+[docs/release-signing.md](docs/release-signing.md).
 
 ## License
 
