@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useWorkloads, useWorkload } from "@/lib/api";
 import { fmtMs, fmtAgo } from "@/lib/format";
-import { Panel, Empty, Meter, LoadingRows, ErrorState } from "@/components/ui";
+import { Panel, Empty, Meter, LoadingRows, ErrorState, ErrorNote } from "@/components/ui";
 import { StatusBadge } from "@/components/status";
 import type { CandidateReport } from "@/lib/types";
 import { X } from "lucide-react";
@@ -227,9 +227,9 @@ function WorkloadDetail({ id }: { id: string }) {
                   </div>
                 </div>
               ) : (
-                <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 mono text-[12px] text-red-300">
-                  {w.error}
-                </div>
+                /* Generic failures get the actionable-error mapping —
+                    the raw engine/dispatch string stays verbatim inside. */
+                <ErrorNote error={w.error} />
               )}
             </section>
           )}

@@ -376,6 +376,34 @@ function ControlPlanePanel() {
         {cp.uptime_seconds !== undefined && (
           <Row label="Uptime" value={fmtUptime(cp.uptime_seconds)} />
         )}
+        {/* Standby presence (v0.10+; absent entirely on older servers —
+            the row simply doesn't render then). Heartbeat age is
+            optional; >15s means the standby's lease writes are going
+            cold, same threshold as the owner heartbeat warning. */}
+        {cp.standby != null && (
+          <div className="flex items-baseline justify-between">
+            <span className="text-[12px] text-[var(--color-text-dim)]">Standby</span>
+            {cp.standby.present ? (
+              <span className="flex items-center gap-1.5">
+                {(cp.standby.heartbeat_age_seconds ?? 0) > 15 && (
+                  <span
+                    className="badge badge-warn !px-1.5 !py-0"
+                    title="standby heartbeat is stale — it may be dead or losing database connectivity"
+                  >
+                    stale
+                  </span>
+                )}
+                <span className="mono text-[13px] font-medium">
+                  live
+                  {cp.standby.heartbeat_age_seconds !== undefined &&
+                    ` · last seen ${cp.standby.heartbeat_age_seconds}s ago`}
+                </span>
+              </span>
+            ) : (
+              <span className="text-[12px] text-[var(--color-text-faint)]">none detected</span>
+            )}
+          </div>
+        )}
         {events.length > 0 && (
           <div>
             <div className="mb-1.5 text-[12px] text-[var(--color-text-dim)]">

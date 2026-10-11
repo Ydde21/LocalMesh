@@ -3,13 +3,14 @@
 import { useState } from "react";
 import {
   useEnrollTokens, useEnrollments, useAPIKeys, useSettings, useAudit,
-  useDiagnostics, api,
+  useDiagnostics, useOverview, api,
 } from "@/lib/api";
 import { fmtAgo, fmtMs, fmtUptime, fmtVersion } from "@/lib/format";
 import { Panel, Copyable } from "@/components/ui";
 import { ConfirmDialog } from "@/components/confirm";
+import { ApiSnippets } from "@/components/api-snippets";
 import { useSWRConfig } from "swr";
-import { Plus, KeyRound, Ticket, Check, X, Copy, Info, Download, AlertTriangle } from "lucide-react";
+import { Plus, KeyRound, Ticket, Check, X, Copy, Info, Download, AlertTriangle, Terminal } from "lucide-react";
 import type { APIKey, Diagnostics, EnrollmentToken } from "@/lib/types";
 
 export default function SettingsPage() {
@@ -24,6 +25,7 @@ export default function SettingsPage() {
       <div className="space-y-4">
         <EnrollmentSection />
         <APIKeysSection />
+        <APIAccessSection />
         <SchedulingSection />
         <ModelOpsSection />
         <DiagnosticsSection />
@@ -317,6 +319,22 @@ function APIKeysSection() {
           can&apos;t be restored.
         </ConfirmDialog>
       )}
+    </Section>
+  );
+}
+
+// ---- API access -------------------------------------------------------------
+//
+// Copy-paste client snippets for the gateway — placeholders only, real
+// keys live above and are shown once. server_url comes from /overview
+// (v0.5+; absent → the snippets carry a placeholder host).
+
+function APIAccessSection() {
+  const { data: ov } = useOverview();
+  return (
+    <Section icon={Terminal} title="API access"
+      desc="The cluster is one OpenAI-compatible endpoint — every request is routed to a node that has the model. Try it live in the Playground.">
+      <ApiSnippets serverUrl={ov?.server_url} />
     </Section>
   );
 }
