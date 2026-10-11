@@ -189,7 +189,8 @@ func validateBaseURL(raw string) error {
 
 // RegisterKey validates a public key file (minisign .pub or PEM), derives
 // the signer key_id the same way scripts/release.sh does — the minisign
-// keynum (uppercase hex) or "sha256:<32 hex of DER-fingerprint>" — and
+// keynum as le64 %016X (the id `minisign` prints) or
+// "sha256:<32 hex of DER-fingerprint>" — and
 // stores it. store.ErrDuplicateKey → 409.
 func (m *Manager) RegisterKey(ctx context.Context, pub []byte, comment string) (*store.ReleaseKey, error) {
 	pk, err := release.ParsePublicKey(pub)

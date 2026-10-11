@@ -32,9 +32,9 @@ func (k *PublicKey) ID() string {
 
 // RegistryID returns the canonical key id used in release manifests,
 // the server-side release-key registry, and agent_upgrade wire frames —
-// the minisign keynum hex, or "sha256:<hex>" (DER fingerprint, first 32
-// hex chars) for PEM keys. Trust-anchor comparisons must use this, not
-// the display ID().
+// the minisign keynum as le64 %016X (the id `minisign` prints), or
+// "sha256:<hex>" (DER fingerprint, first 32 hex chars) for PEM keys.
+// Trust-anchor comparisons must use this, not the display ID().
 func (k *PublicKey) RegistryID() string {
 	if k.Kind == "minisign" {
 		return k.Minisign.KeyIDHex

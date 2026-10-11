@@ -40,7 +40,8 @@ type Manifest struct {
 }
 
 // Signer identifies who signed the release. KeyID is the minisign
-// keynum (hex) or the SHA-256 fingerprint of the PEM public key. It is
+// keynum as le64 %016X (the id `minisign` prints) or the SHA-256
+// fingerprint of the PEM public key. It is
 // informational only — verification always uses the operator-supplied
 // public key, never a key carried inside the release.
 type Signer struct {

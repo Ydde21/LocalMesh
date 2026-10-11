@@ -32,14 +32,23 @@ need() { command -v "$1" >/dev/null 2>&1 || fail "need $1 installed"; }
 
 usage() { sed -n '2,17p' "$0"; exit "${1:-2}"; }
 
-# Print the signer key id a committed/custody .pub resolves to.
-# Minisign-format pubs carry the hex id in the comment line; PEM pubs
-# derive "sha256:<first-16-bytes>" the same way release.sh does.
+b64dec() { base64 -d 2>/dev/null || base64 -D; }
+
+# Print the signer key id a committed/custody .pub resolves to — the same
+# value release.sh derives for the manifest and server RegisterKey stores.
+# For minisign pubs the canonical id is le64(keynum) as %016X: decode the
+# payload line ("Ed"||keynum[8]||pubkey[32] → 42 bytes) and byte-reverse
+# the stored keynum — the comment text is display-only and is NOT trusted
+# (older localmesh pubs carry the raw-byte hex instead). PEM pubs derive
+# "sha256:<first-16-bytes>" the same way release.sh does.
 key_id_of() {
-	local pub="$1" id
-	if head -1 "$pub" | grep -q 'minisign public key'; then
-		id=$(head -1 "$pub" | sed -n 's/.*minisign public key //p' | tr -d ' \r')
-		[ -n "$id" ] && { printf '%s' "$id"; return; }
+	local pub="$1" payload raw keynum
+	payload=$(grep -v 'untrusted comment:' "$pub" | head -1 | tr -d ' \r')
+	raw=$(printf '%s' "$payload" | b64dec 2>/dev/null | od -An -tx1 -v | tr -d ' \n' || true)
+	if [ "${#raw}" -eq 84 ] && [ "${raw:0:4}" = "4564" ]; then
+		keynum="${raw:4:16}"
+		printf '%s' "$keynum" | sed -E 's/^(.{2})(.{2})(.{2})(.{2})(.{2})(.{2})(.{2})(.{2})$/\8\7\6\5\4\3\2\1/' | tr '[:lower:]' '[:upper:]'
+		return
 	fi
 	if command -v openssl >/dev/null 2>&1 && openssl pkey -pubin -in "$pub" -outform DER >/dev/null 2>&1; then
 		printf 'sha256:%s' "$(openssl pkey -pubin -in "$pub" -outform DER 2>/dev/null | shasum -a 256 | cut -c1-32)"

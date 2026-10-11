@@ -216,8 +216,13 @@ if [ "$UNSIGNED" -eq 0 ]; then
 	# Key id for the manifest.
 	if [ "$ALG" = "minisign" ]; then
 		# .minisig line 2 decodes to alg[2] || keynum[8] || sig[64].
+		# The canonical key id is le64(keynum) as %016X — the stored bytes
+		# byte-reversed — the same string `minisign -V` prints and the pub
+		# file's "minisign public key <ID>" comment carries.
 		KEYID=$(sed -n '2p' "$DIST/SHA256SUMS.minisig" | tr -d '\r' | b64dec | tail -c +3 | head -c 8 \
-			| od -An -tx1 | tr -d ' \n' | tr '[:lower:]' '[:upper:]')
+			| od -An -tx1 -v | tr -d ' \n' \
+			| sed -E 's/^(.{2})(.{2})(.{2})(.{2})(.{2})(.{2})(.{2})(.{2})$/\8\7\6\5\4\3\2\1/' \
+			| tr '[:lower:]' '[:upper:]')
 	elif [ "$ALG" = "openssl" ]; then
 		if [ -n "$PUBKEY" ]; then
 			KEYID=$(openssl pkey -pubin -in "$PUBKEY" -outform DER 2>/dev/null | $SUM | cut -c1-32)

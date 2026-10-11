@@ -5,7 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
+	"encoding/binary"
 	"fmt"
 	"strings"
 
@@ -95,10 +95,11 @@ func ParseMinisignPublicKey(data []byte) (*MinisignPublicKey, error) {
 	return k, nil
 }
 
-// MinisignKeyID renders a keynum the way minisign displays it in
-// comments — uppercase hex of the 8 raw bytes.
+// MinisignKeyID renders a keynum the way real minisign displays it in
+// comments and `minisign -V` output — le64_load(keynum) as %016X, i.e.
+// the stored bytes byte-reversed (see le64_load in jedisct1/minisign).
 func MinisignKeyID(keynum [minisignKeyNumLen]byte) string {
-	return strings.ToUpper(hex.EncodeToString(keynum[:]))
+	return fmt.Sprintf("%016X", binary.LittleEndian.Uint64(keynum[:]))
 }
 
 // MarshalMinisignPublicKey writes the canonical public-key file text.
