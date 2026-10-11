@@ -104,8 +104,14 @@ type DuplicateError struct {
 }
 
 func (e *DuplicateError) Error() string {
-	return fmt.Sprintf("an operation is already active for model %q on node %s (op %s, status %s)",
+	msg := fmt.Sprintf("an operation is already active for model %q on node %s (op %s, status %s)",
 		e.Model, e.NodeID, e.OpID, e.Status)
+	if e.Status == "interrupted" {
+		// The blocker is parked, not executing — give the caller the
+		// resolution path, not just the conflict.
+		msg += " — resolve it first: cancel it or retry it via POST /api/v1/model-operations/" + e.OpID + "/retry"
+	}
+	return msg
 }
 
 // Is lets errors.Is(err, ErrDuplicate) match.
@@ -232,8 +238,10 @@ func (q *Queue) kick() {
 }
 
 // Submit persists an op in 'queued'. Offline nodes are accepted — the op
-// waits until the node is connected. Dedupe: one active op per node+model
-// (any op kind); conflicts return *DuplicateError.
+// waits until the node is connected. Dedupe: one non-terminal op per
+// node+model (any op kind, 'interrupted' included — a parked op still
+// covers its pair until an operator cancels or retries it); conflicts
+// return *DuplicateError.
 func (q *Queue) Submit(ctx context.Context, req SubmitRequest) (*store.ModelOperation, error) {
 	if req.Op != "pull" && req.Op != "delete" {
 		return nil, fmt.Errorf("invalid op %q", req.Op)
@@ -272,7 +280,11 @@ func (q *Queue) Submit(ctx context.Context, req SubmitRequest) (*store.ModelOper
 }
 
 // Run reconciles leftovers from a previous life, then dispatches until
-// ctx ends. Call it in a goroutine.
+// ctx ends. Call it in a goroutine. The ctx MUST die on control-plane
+// ownership loss (server.go wires qctx to the ownership watcher): the
+// boot Reconcile and every dispatch tick stop with the fence, and
+// ClaimDueModelOps epoch-checks each claim so a superseded owner cannot
+// dispatch even mid-shutdown.
 func (q *Queue) Run(ctx context.Context) {
 	if err := q.Reconcile(ctx); err != nil {
 		q.log.Warn("reconcile failed", "err", err)
@@ -294,7 +306,10 @@ func (q *Queue) Run(ctx context.Context) {
 // Reconcile recovers ops orphaned by a previous process: dispatched/
 // running rows are interrupted (their true outcome is unknowable), then
 // retryable pulls resume; deletes stay interrupted. Queued rows pick up
-// naturally on the next pass.
+// naturally on the next pass. Runs once at Run start under the
+// ownership-coupled ctx; even if a stale caller raced in, the resume
+// cannot create a second live op — migration 0014 covers 'interrupted'
+// and ResumeInterruptedPulls's NOT EXISTS guard is the extra belt.
 func (q *Queue) Reconcile(ctx context.Context) error {
 	n, err := q.st.InterruptActiveModelOps(ctx, "interrupted by control-plane restart")
 	if err != nil {
@@ -394,6 +409,57 @@ func (q *Queue) OnFail(ctx context.Context, opID, errStr string, retryable bool)
 		q.log.Debug("fail op", "op", opID, "err", err)
 	}
 	q.kick()
+}
+
+// Retry re-arms an op parked 'interrupted' — the operator resolution
+// path for outcomes too uncertain to auto-retry (deletes are never
+// auto-resumed; a pull can also park if it outlives its resume sweep).
+// Unlike Submit this keeps the op's identity and consumed attempts; the
+// row re-enters 'queued' due immediately, and the epoch-fenced store
+// update means a superseded control plane cannot re-arm work. Only
+// 'interrupted' is eligible: an active op needs no retry and a terminal
+// op needs a fresh submission (which dedupe now blocks anyway while the
+// parked row covers the pair). ErrNotFound for unknown ids, ErrNotActive
+// when the op left 'interrupted' (raced cancel/resume/finish).
+func (q *Queue) Retry(ctx context.Context, opID string) error {
+	op, err := q.st.GetModelOpState(ctx, opID)
+	if err != nil {
+		return err // ErrNotFound propagates
+	}
+	if op.Status != "interrupted" {
+		return ErrNotActive
+	}
+	q.mu.Lock()
+	epoch := q.epoch
+	q.mu.Unlock()
+	ok, err := q.st.RetryModelOp(ctx, opID, epoch)
+	if err != nil {
+		if errors.Is(err, store.ErrActiveModelOp) {
+			// A second live row covers the pair — unreachable on a
+			// post-0014 index, but surface it as a first-class conflict.
+			de := &DuplicateError{NodeID: op.NodeID, Model: op.Model}
+			if ex, gerr := q.st.ActiveModelOpFor(ctx, op.NodeID, op.Model); gerr == nil {
+				de.OpID, de.Op, de.Status = ex.ID, ex.Op, ex.Status
+			}
+			return de
+		}
+		return err
+	}
+	if !ok {
+		// Lost the race (cancel/resume/terminal landed first) or the
+		// epoch check fenced the write — report the honest live state.
+		cur, gerr := q.st.GetModelOpState(ctx, opID)
+		if gerr != nil {
+			return gerr
+		}
+		if cur.Status != "interrupted" {
+			return ErrNotActive
+		}
+		return errors.New("retry could not requeue the interrupted operation (control-plane ownership may have been lost)")
+	}
+	q.log.Info("op retried", "op", opID, "node", op.NodeID, "model", op.Model, "attempt", op.Attempt)
+	q.kick()
+	return nil
 }
 
 // Cancel aborts an op: queued ops cancel in place (never dispatched);
