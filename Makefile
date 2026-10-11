@@ -7,7 +7,7 @@ BIN           := bin
 VERSION       ?= dev
 LDFLAGS       := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build test vet tidy clean clean-test-resources bench release dashboard dev-up dev-down verify verify-fast chaos-test
+.PHONY: all build test vet tidy clean clean-test-resources bench release dashboard dev-up dev-down verify verify-fast verify-stress chaos-test
 
 all: build
 
@@ -71,6 +71,11 @@ bench:
 # from the default `go test ./...` run.
 chaos-test:
 	@bash scripts/ci-chaos.sh
+
+# Repeated runs of the historically flaky integration/chaos tests —
+# the stability gate. -n ROUNDS (default 10), -l N cpu-burner load.
+verify-stress:
+	@bash scripts/ci-stress.sh
 
 # Versioned release: all 5 agent targets + server binaries, SHA256SUMS,
 # manifest, signature. Requires LOCALMESH_SIGNING_KEY (minisign secret

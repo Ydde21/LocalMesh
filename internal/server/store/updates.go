@@ -270,6 +270,25 @@ func (d *DB) RevertUpdate(ctx context.Context, id string) error {
 	return err
 }
 
+// ClearStaleUpdatingMaintenance releases 'updating' node markers whose
+// owning update row no longer exists or is already terminal — the leak
+// a crash between FinishUpdate and the marker clear leaves behind.
+// reasonPrefix is the manager's maintenance_reason marker ("update:").
+func (d *DB) ClearStaleUpdatingMaintenance(ctx context.Context, reasonPrefix string) (int64, error) {
+	tag, err := d.Pool.Exec(ctx,
+		`UPDATE nodes SET maintenance='', maintenance_reason='',
+			maintenance_since=NULL, updated_at=now()
+		 WHERE maintenance='updating' AND maintenance_reason LIKE $1 || '%'
+		   AND NOT EXISTS (SELECT 1 FROM agent_updates u
+		                   WHERE u.id::text = substring(nodes.maintenance_reason
+		                                                from char_length($1)+1)
+		                     AND u.finished_at IS NULL)`, reasonPrefix)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // LiveUpdatesByPhase lists unfinished updates in the given phases — the
 // orchestrator's work set each pass.
 func (d *DB) LiveUpdatesByPhase(ctx context.Context, phases ...string) ([]*AgentUpdate, error) {

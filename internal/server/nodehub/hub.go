@@ -161,7 +161,9 @@ func (h *Hub) Drained(nodeID string) bool {
 	if ok && nc.inFlight() > 0 {
 		return false
 	}
-	ops, err := h.st.ModelOpsActiveByNode(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ops, err := h.st.ModelOpsActiveByNode(ctx)
 	if err != nil {
 		return false // unsure → not drained; callers retry
 	}

@@ -20,15 +20,27 @@ type OwnershipEvent struct {
 }
 
 // AddOwnershipEvent records a lifecycle transition. Best-effort like
-// Audit — failures are caller-logged, never fatal.
+// Audit — failures are caller-logged, never fatal — but a dropped
+// 'promoted' row is how observers learn of a takeover, so the insert
+// retries briefly to ride out a stale pooled connection.
 func (d *DB) AddOwnershipEvent(ctx context.Context, ownerID string, epoch int64, event, detail string) {
 	var owner any
 	if ownerID != "" {
 		owner = ownerID
 	}
-	d.Pool.Exec(ctx,
-		`INSERT INTO ownership_events (owner_id,epoch,event,detail) VALUES ($1,$2,$3,$4)`,
-		owner, epoch, event, detail)
+	for i := 0; i < 3; i++ {
+		_, err := d.Pool.Exec(ctx,
+			`INSERT INTO ownership_events (owner_id,epoch,event,detail) VALUES ($1,$2,$3,$4)`,
+			owner, epoch, event, detail)
+		if err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // ListOwnershipEvents returns recent transitions, newest first.

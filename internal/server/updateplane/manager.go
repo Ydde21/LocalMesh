@@ -397,6 +397,14 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	if interrupted > 0 {
 		m.log.Warn("interrupted orphaned agent updates", "count", interrupted)
 	}
+	// A crash between FinishUpdate and clearUpdating leaves the node's
+	// 'updating' marker set forever — sweep it here while the process
+	// is re-establishing ground truth.
+	if n, err := m.st.ClearStaleUpdatingMaintenance(ctx, maintReasonPrefix); err != nil {
+		m.log.Debug("stale updating-marker sweep", "err", err)
+	} else if n > 0 {
+		m.log.Warn("cleared stale updating markers", "count", n)
+	}
 	return nil
 }
 
@@ -514,6 +522,15 @@ func (m *Manager) OnUpgradeState(ctx context.Context, nodeID string, st contract
 	switch st.Phase {
 	case store.UpdVerifying, store.UpdDownloading, store.UpdStaging,
 		store.UpdInstalling, store.UpdRestarting, store.UpdVerifyHealth:
+		// Progress frames are only meaningful once the upgrade frame
+		// has actually been dispatched — an agent can't be 'installing'
+		// an update it was never sent; accepting it would skip dispatch
+		// and its markUpdating fencing.
+		if !updPostDispatch(u.Phase) {
+			m.log.Warn("progress frame on pre-dispatch update; ignored",
+				"op", st.OperationID, "row_phase", u.Phase, "frame_phase", st.Phase)
+			break
+		}
 		m.setPhase(ctx, u.ID, st.Phase, st.Detail, st.Error)
 	case store.UpdFailed:
 		m.finishUpdate(ctx, u.ID, store.UpdFailed,
@@ -525,6 +542,11 @@ func (m *Manager) OnUpgradeState(ctx context.Context, nodeID string, st contract
 		m.finishUpdate(ctx, u.ID, store.UpdCancelled,
 			firstNonEmpty(st.Error, "aborted by agent"), st.Detail)
 	case store.UpdSucceeded:
+		if !updPostDispatch(u.Phase) {
+			m.log.Warn("success frame on pre-dispatch update; ignored",
+				"op", st.OperationID, "row_phase", u.Phase)
+			break
+		}
 		// A frame claiming success is accepted as far as verify_health —
 		// the authoritative proof is the next hello's version match.
 		m.setPhase(ctx, u.ID, store.UpdVerifyHealth,
@@ -893,6 +915,18 @@ func (m *Manager) guardUpdateMaintenance(ctx context.Context, nodeID string) err
 		}
 	}
 	return nil
+}
+
+// updPostDispatch reports whether a live phase means the upgrade frame
+// has reached the agent — progress reports are only meaningful then.
+func updPostDispatch(phase string) bool {
+	switch phase {
+	case store.UpdDispatched, store.UpdVerifying, store.UpdDownloading,
+		store.UpdStaging, store.UpdInstalling, store.UpdRestarting,
+		store.UpdVerifyHealth:
+		return true
+	}
+	return false
 }
 
 func firstNonEmpty(s, fallback string) string {
