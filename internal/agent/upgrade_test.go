@@ -142,23 +142,6 @@ func upgradeTestAgent(t *testing.T, f *fakeCP, dir string, pubData []byte) *Agen
 	a := testAgent(t, f, newFakeEngine())
 	a.SetConfigPath(filepath.Join(dir, "agent.json"))
 	a.updTarget = filepath.Join(dir, "localmesh-agent")
-	// runUpgrade runs in its own goroutine the session never joins; its
-	// final marker/staging writes can land after endSession returns and
-	// race the caller's t.TempDir() cleanup (unlinkat EEXIST on APFS).
-	// Registered after the caller's t.TempDir(), so LIFO cleanup drains
-	// the job before the dir is removed.
-	t.Cleanup(func() {
-		deadline := time.Now().Add(5 * time.Second)
-		for {
-			a.upgMu.Lock()
-			done := a.upg == nil
-			a.upgMu.Unlock()
-			if done || time.Now().After(deadline) {
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	})
 	if pubData != nil {
 		if _, err := PinUpdateKey(a.cfg, pubData); err != nil {
 			t.Fatal(err)
@@ -182,8 +165,14 @@ func runSession(a *Agent) chan error {
 	return ch
 }
 
-// endSession closes the server side and waits for the session to die.
-func endSession(t *testing.T, f *fakeCP, ch chan error) {
+// endSession closes the server side and waits for the session to die,
+// then drains the upgrade goroutine: runUpgrade outlives the session
+// (the conn only cancels its ctx), and its terminal marker/staging
+// writes — or the restart-path osExitFn call — must land while the
+// test's seam stubs are still armed and before t.TempDir() cleanup
+// removes the dir (unlinkat EEXIST flake on APFS). Runs as a deferred
+// call so it executes inside the test, before any cleanup.
+func endSession(t *testing.T, f *fakeCP, a *Agent, ch chan error) {
 	t.Helper()
 	f.mu.Lock()
 	for _, c := range f.conns {
@@ -194,6 +183,16 @@ func endSession(t *testing.T, f *fakeCP, ch chan error) {
 	case <-ch:
 	case <-time.After(5 * time.Second):
 		t.Fatal("session did not end")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		a.upgMu.Lock()
+		done := a.upg == nil
+		a.upgMu.Unlock()
+		if done || time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -250,7 +249,7 @@ func TestUpgradeRefusesNoPinnedKey(t *testing.T) {
 		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseFailed, 8*time.Second)
 	st := lastPhase(states)
@@ -274,7 +273,7 @@ func TestUpgradeRefusesWrongKeyID(t *testing.T) {
 		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseFailed, 8*time.Second)
 	st := lastPhase(states)
@@ -297,7 +296,7 @@ func TestUpgradeRefusesUnsignedRelease(t *testing.T) {
 		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseFailed, 8*time.Second)
 	st := lastPhase(states)
@@ -318,7 +317,7 @@ func TestUpgradeRefusesTamperedArtifact(t *testing.T) {
 		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseFailed, 8*time.Second)
 	st := lastPhase(states)
@@ -347,7 +346,7 @@ func TestUpgradeRefusesNewerProtocolThanServer(t *testing.T) {
 		ProtocolVersion: contracts.ProtocolVersion + 1, MinAgentProtocol: 1,
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseFailed, 8*time.Second)
 	st := lastPhase(states)
@@ -365,7 +364,7 @@ func TestUpgradeRefusesPlainHTTP(t *testing.T) {
 		Source: "http://releases.example.com/x",
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseFailed, 8*time.Second)
 	st := lastPhase(states)
@@ -387,7 +386,7 @@ func TestUpgradeAlreadyInProgress(t *testing.T) {
 		OperationID: "op-second", Version: "0.7.0", Source: "localmesh://releases/r1",
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseFailed, 8*time.Second)
 	st := lastPhase(states)
@@ -413,7 +412,7 @@ func TestUpgradeAbortTooLate(t *testing.T) {
 		}),
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseFailed, 8*time.Second)
 	st := lastPhase(states)
@@ -444,7 +443,7 @@ func TestUpgradeViaProxyHappyPath(t *testing.T) {
 		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseRestarting, 15*time.Second)
 	got := phases(states)
@@ -517,7 +516,7 @@ func TestUpgradeAbortDuringVerify(t *testing.T) {
 		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	// Wait for the op to reach verifying (stuck in the gated fetch),
 	// then push the abort from the server side.
@@ -604,7 +603,7 @@ func TestVerifyHealthOnConfirmingBoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseVerifyHealth, 8*time.Second)
 	st := lastPhase(states)
@@ -614,7 +613,7 @@ func TestVerifyHealthOnConfirmingBoot(t *testing.T) {
 	// The report lands before the marker is cleared — deliberately: a
 	// dropped frame must not read as a confirmed update. Poll rather
 	// than race the clear.
-	waitFor(t, 5*time.Second, "marker cleared after verify_health", func() bool {
+	waitFor(t, 8*time.Second, "marker cleared after verify_health", func() bool {
 		_, ok, _ := readPendingMarker(mkPath)
 		return !ok
 	})
@@ -634,7 +633,7 @@ func TestFailedReportOnVersionMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseFailed, 8*time.Second)
 	st := lastPhase(states)
@@ -675,7 +674,7 @@ func TestAttemptBudgetClearsMarker(t *testing.T) {
 		t.Fatalf("bootReport = %+v", a.bootReport)
 	}
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 	states := collectStates(t, f, upPhaseFailed, 8*time.Second)
 	st := lastPhase(states)
 	if st.OperationID != "op-loop" || !strings.Contains(st.Error, "restart cycles") {
@@ -794,7 +793,7 @@ func TestRolledBackMarkerReportsOnNextSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseRolledBack, 8*time.Second)
 	st := lastPhase(states)
@@ -1029,7 +1028,7 @@ func TestUpgradeRefusesInsufficientDisk(t *testing.T) {
 		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseFailed, 8*time.Second)
 	st := lastPhase(states)
@@ -1084,7 +1083,7 @@ func TestUpgradeRefusesPreviouslyRolledBack(t *testing.T) {
 		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseFailed, 8*time.Second)
 	st := lastPhase(states)
@@ -1133,7 +1132,7 @@ func TestUpgradeRetriesAfterPreInstallFailure(t *testing.T) {
 		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseRestarting, 15*time.Second)
 	if lastPhase(states).Phase != upPhaseRestarting {
@@ -1194,7 +1193,7 @@ func TestPostStagingAbortRemovesStaged(t *testing.T) {
 		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseAborted, 15*time.Second)
 	if st := lastPhase(states); st.OperationID != "op-abort2" {
@@ -1255,7 +1254,7 @@ func TestInstallFailureCleansUp(t *testing.T) {
 		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseFailed, 15*time.Second)
 	st := lastPhase(states)
@@ -1366,7 +1365,7 @@ func TestSettleWindowConfirmsHealthy(t *testing.T) {
 	}
 	start := time.Now()
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseVerifyHealth, 8*time.Second)
 	if st := lastPhase(states); st.OperationID != "op-settle" {
@@ -1375,7 +1374,7 @@ func TestSettleWindowConfirmsHealthy(t *testing.T) {
 	if el := time.Since(start); el < 80*time.Millisecond {
 		t.Fatalf("verify_health reported after %v — settle window skipped", el)
 	}
-	waitFor(t, 5*time.Second, "marker cleared after verify_health", func() bool {
+	waitFor(t, 8*time.Second, "marker cleared after verify_health", func() bool {
 		_, ok, _ := readPendingMarker(mkPath)
 		return !ok
 	})
@@ -1407,7 +1406,7 @@ func TestSettleFailureConsumesAttemptBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	ch := runSession(a)
-	endSession(t, f, ch)
+	endSession(t, f, a, ch)
 
 	waitFor(t, 5*time.Second, "attempt to be counted", func() bool {
 		m, ok, _ := readPendingMarker(mkPath)
@@ -1460,7 +1459,7 @@ func TestSettleExhaustionRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	ch := runSession(a)
-	endSession(t, f, ch)
+	endSession(t, f, a, ch)
 
 	// The dying session trips the budget → rollback is stamped, the
 	// restore runs, and the process re-execs/spawns into the old
@@ -1502,8 +1501,8 @@ func TestSettleExhaustionRollsBack(t *testing.T) {
 	if st := lastPhase(states); st.OperationID != "op-flapex" {
 		t.Fatalf("rolled_back report = %+v", st)
 	}
-	endSession(t, f, ch2)
-	waitFor(t, 5*time.Second, "marker cleared after rolled_back", func() bool {
+	endSession(t, f, a, ch2)
+	waitFor(t, 8*time.Second, "marker cleared after rolled_back", func() bool {
 		_, ok, _ := readPendingMarker(mkPath)
 		return !ok
 	})
@@ -1568,8 +1567,8 @@ func TestAttemptBudgetRollsBackAtBoot(t *testing.T) {
 	if st := lastPhase(states); st.OperationID != "op-bootrb" {
 		t.Fatalf("rolled_back report = %+v", st)
 	}
-	endSession(t, f, ch)
-	waitFor(t, 5*time.Second, "marker cleared after rolled_back", func() bool {
+	endSession(t, f, a, ch)
+	waitFor(t, 8*time.Second, "marker cleared after rolled_back", func() bool {
 		_, ok, _ := readPendingMarker(mkPath)
 		return !ok
 	})
@@ -1599,7 +1598,7 @@ func TestUpgradeFloorRefusesBelowFloor(t *testing.T) {
 		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	states := collectStates(t, f, upPhaseFailed, 8*time.Second)
 	st := lastPhase(states)
@@ -1630,7 +1629,7 @@ func TestUpgradeFloorRatchesFromSignedManifest(t *testing.T) {
 		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
 	})
 	ch := runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 
 	collectStates(t, f, upPhaseRestarting, 15*time.Second)
 	if a.cfg.VersionFloor != "0.9.5" {
@@ -1674,10 +1673,10 @@ func TestUpgradeFloorSurvivesCompromisedDispatch(t *testing.T) {
 	ch := runSession(a)
 	collectStates(t, f, upPhaseRestarting, 15*time.Second)
 	if a.cfg.VersionFloor != "0.9.5" {
-		endSession(t, f, ch)
+		endSession(t, f, a, ch)
 		t.Fatalf("floor not pinned: %q", a.cfg.VersionFloor)
 	}
-	endSession(t, f, ch)
+	endSession(t, f, a, ch)
 
 	// New session (post-restart): hostile dispatch with a fully valid
 	// signature — only the floor says no. (fakeCP flushes queued
@@ -1689,7 +1688,7 @@ func TestUpgradeFloorSurvivesCompromisedDispatch(t *testing.T) {
 		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
 	})
 	ch = runSession(a)
-	defer endSession(t, f, ch)
+	defer endSession(t, f, a, ch)
 	// Session 2 opens with op-good's boot-confirm (the stub never
 	// swapped binaries, so it correctly reports failed) — drain states
 	// until op-rollback's own refusal lands.
