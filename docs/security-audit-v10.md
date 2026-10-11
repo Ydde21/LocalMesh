@@ -300,3 +300,40 @@ substantive open item — recommend applying I-2 before tagging since it
 is a two-line change, but it does not block: it discloses internal
 error text to already-authenticated inference-key holders, not secrets.
 Everything else is documented, bounded, or optional defense-in-depth.
+
+---
+
+## Final trust review (external-reviewer pass, post-I-1…I-7)
+
+A second, independent-style pass over the *complete* trust surface —
+this time tracing each boundary end to end rather than auditing by
+file — is written up in full in
+[`docs/trust-review-v10.md`](trust-review-v10.md). Findings summary:
+
+- **All seven integrator items verified applied in-tree**, including
+  the optional hardening ones: I-1 (cookie `Secure` honors
+  `X-Forwarded-Proto` only under `TRUST_PROXY`, `session.ts:308-318`),
+  I-2 (gateway snapshot/schedule errors sanitized, `openai.go:78,202`),
+  I-3 (op frames attributed to owning conn via `ownsOp`,
+  `hub.go:410-419`; `upgrade_state` node-checked,
+  `manager.go:514-518`), I-4 (login body cap 4 KiB), I-6 (rate-limiter
+  maps bounded, `server.go:990-994,1084-1087`), I-7 (`X-Poll-Secret`
+  accepted, `handlers.go:247-248`). I-5 (`/readyz` cached/capped) is
+  still open — carried, Medium-Low, patch spec T-6 in the review doc.
+- **Two new positive regression tests** added and green:
+  `TestSecurityV10OpFramesAttributedToOwningNode` (a second fully
+  credentialed node cannot move another node's op out of `dispatched`)
+  and `TestSecurityV10EnrollPollDisclosesNoCredentials` (the approval
+  poll never returns token/secret/hash material). Suite: 12/12
+  `Security|V10` tests pass; `gofmt`/`go vet` clean.
+- **Verdict unchanged: no release-blocking findings.** Residuals are
+  consolidated in the trust-review register (R-1…R-14); the three worth
+  a patch before wide deployment are T-6 (`/readyz` DB-hit DoS),
+  T-5 (node error echo to inference clients — the carried N-2 tail)
+  and T-4 (finish moving the poll secret off the URL — the agent half
+  of N-7). Exact patch specs live in `docs/trust-review-v10.md` §3.
+- **Explicitly NOT reviewed:** physical/host ops, PostgreSQL HA
+  internals, the release-signing pipeline and external CDN/mirror
+  integrity, dashboard React component rendering, and test scaffolding
+  (`cmd/fakeollama`, `internal/testutil`, bench/chaos). See the review
+  doc §6 for the rationale on each.
