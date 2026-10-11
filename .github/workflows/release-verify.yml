@@ -336,6 +336,10 @@ jobs:
         run: |
           bash scripts/release.sh --unsigned -d dist-unsigned
           bash scripts/verify-release.sh dist-unsigned --allow-unsigned
+      - name: stage ephemeral pubkey for artifact-install
+        # Keep all upload paths relative to the workspace — mixing in an
+        # absolute path re-roots the artifact and dist/ disappears.
+        run: cp "$DEVKEY_DIR/ci-dev.pub" ci-dev.pub
       - name: upload release dist artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -343,7 +347,7 @@ jobs:
           path: |
             dist/
             dist-unsigned/
-            ${{ env.DEVKEY_DIR }}/ci-dev.pub
+            ci-dev.pub
           retention-days: 30
       - name: discard ephemeral key
         if: always()
