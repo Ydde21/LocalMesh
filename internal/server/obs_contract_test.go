@@ -68,11 +68,11 @@ func TestMetricsEndpointContract(t *testing.T) {
 		t.Fatal("nodes_total gauge missing")
 	}
 
-	// An inference key also satisfies read scope (Can(readonly) accepts
-	// every valid role) — scrape tokens don't need admin.
+	// T-3 (v0.11): inference keys no longer satisfy readonly — metrics
+	// carry fleet metadata, so scrape integrations use a readonly key.
 	infKey := makeKey(t, e, "inference")
-	if code, _ := metricsGet(t, e, infKey); code != http.StatusOK {
-		t.Fatalf("inference-key metrics = %d, want 200 (read scope)", code)
+	if code, _ := metricsGet(t, e, infKey); code != http.StatusForbidden {
+		t.Fatalf("inference-key metrics = %d, want 403 (T-3 scope)", code)
 	}
 
 	// Connect a node, run one streamed chat to completion — then the

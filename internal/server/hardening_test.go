@@ -104,11 +104,10 @@ func TestRoleEnforcement(t *testing.T) {
 			t.Errorf("inference %s %s: got %d, want 401/403", m.method, m.path, code)
 		}
 	}
-	// Roles are ordered admin > inference > readonly (auth.Can): an
-	// inference key legitimately satisfies readonly reads — it just must
-	// never mutate. This documents that contract.
-	if code, _ := keyReq(t, e, http.MethodGet, "/api/v1/nodes", infKey, nil); code != http.StatusOK {
-		t.Errorf("inference GET /nodes (ordered roles): got %d, want 200", code)
+	// T-3 (v0.11): roles are no longer ordered — inference is a separate
+	// axis confined to /v1/* and must not satisfy readonly reads.
+	if code, _ := keyReq(t, e, http.MethodGet, "/api/v1/nodes", infKey, nil); code != http.StatusForbidden {
+		t.Errorf("inference GET /nodes (T-3 scope): got %d, want 403", code)
 	}
 	// Node credentials are not admin credentials.
 	if code, _ := keyReq(t, e, http.MethodGet, "/api/v1/nodes", "lmn_"+strings.Repeat("a", 40), nil); code != http.StatusUnauthorized && code != http.StatusForbidden {

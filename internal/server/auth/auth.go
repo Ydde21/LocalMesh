@@ -38,7 +38,11 @@ func (p Principal) Can(role string) bool {
 	case RoleInference:
 		return p.Role == RoleAdmin || p.Role == RoleInference
 	case RoleReadonly:
-		return p.Role != ""
+		// Read-only is an admin-axis role: admin and readonly keys pass.
+		// An inference key must NOT satisfy it — inference credentials
+		// are confined to the OpenAI surface (/v1/*) and must not read
+		// fleet, node, model-inventory, workload, or settings metadata.
+		return p.Role == RoleAdmin || p.Role == RoleReadonly
 	}
 	return false
 }
