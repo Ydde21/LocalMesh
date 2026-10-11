@@ -77,10 +77,15 @@ STUB
 chmod +x "$T/bin/curl"
 
 # The installer hardcodes github.com/$REPO/... URL shapes. Patch a copy so
-# release URLs point at the stub-served host instead.
-sed "s|https://github.com/\${REPO}/releases/download/\${VERSION}|https://localmesh.test/dl/v9.9.9|; s|https://github.com/\${REPO}/releases/latest/download|https://localmesh.test/dl/latest|" \
+# release URLs point at the stub-served host instead, and pin DEST_SYSTEM
+# to a scratch dir — hosted runners can write the real /usr/local/bin,
+# which would make the destination non-deterministic (and leave residue).
+sed -e "s|https://github.com/\${REPO}/releases/download/\${VERSION}|https://localmesh.test/dl/v9.9.9|" \
+    -e "s|https://github.com/\${REPO}/releases/latest/download|https://localmesh.test/dl/latest|" \
+    -e "s|DEST_SYSTEM=\"/usr/local/bin\"|DEST_SYSTEM=\"$T/sysbin\"|" \
   scripts/install-agent.sh > "$T/install-agent.sh"
 chmod +x "$T/install-agent.sh"
+mkdir -p "$T/sysbin"
 
 # run_install <with_stub_curl:0|1> -- <args> -> __out __code
 run_install() {
@@ -127,7 +132,7 @@ fi
 # 4. correct sha256 -> installs to ~/.local/bin
 write_manifest "$ART_SHA" > "$FIXT/release-manifest.json"
 run_install 1 --no-join
-if [ "$__code" -eq 0 ] && [ -x "$T/home/.local/bin/localmesh-agent" ]; then
+if [ "$__code" -eq 0 ] && [ -x "$T/sysbin/localmesh-agent" ]; then
   ok "correct sha256 → installs"
 else
   bad "happy-path install failed" "$__code: $__out"
@@ -138,7 +143,7 @@ rm -rf "$T/home"; mkdir -p "$T/home" "$T/home/.local/bin"; __code=0
 __out="$(cd "$T/cwd" && env -i PATH="/usr/bin:/bin" HOME="$T/home" \
           LOCALMESH_AGENT_BIN="$T/fixtures/$ART" \
           sh "$T/install-agent.sh" --no-join 2>&1)" || __code=$?
-if [ "$__code" -eq 0 ] && [ -x "$T/home/.local/bin/localmesh-agent" ]; then
+if [ "$__code" -eq 0 ] && [ -x "$T/sysbin/localmesh-agent" ]; then
   ok "LOCALMESH_AGENT_BIN local path → installs"
 else
   bad "local-binary path failed" "$__code: $__out"
