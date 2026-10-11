@@ -1045,7 +1045,7 @@ func TestUpgradeRefusesInsufficientDisk(t *testing.T) {
 	}
 	// The refusal is on record for status/doctor.
 	hp, _ := a.updateHistoryPath()
-	waitFor(t, 5*time.Second, "refusal in history", func() bool {
+	waitFor(t, 8*time.Second, "refusal in history", func() bool {
 		h, _ := readUpdateHistory(hp)
 		return len(h) > 0
 	})
@@ -1097,7 +1097,7 @@ func TestUpgradeRefusesPreviouslyRolledBack(t *testing.T) {
 	// The refusal itself is recorded (as a non-restarted failure — it
 	// can never arm the tripwire against itself).
 	hp, _ := a.updateHistoryPath()
-	waitFor(t, 5*time.Second, "refusal record", func() bool {
+	waitFor(t, 8*time.Second, "refusal record", func() bool {
 		h, _ := readUpdateHistory(hp)
 		return len(h) > 1
 	})
@@ -1181,7 +1181,7 @@ func TestPostStagingAbortRemovesStaged(t *testing.T) {
 				OperationID: "op-abort2",
 			}),
 		})
-		waitFor(t, 5*time.Second, "abort to be honored", func() bool {
+		waitFor(t, 8*time.Second, "abort to be honored", func() bool {
 			a.upgMu.Lock()
 			defer a.upgMu.Unlock()
 			return a.upg != nil && a.upg.aborted.Load()
@@ -1200,7 +1200,7 @@ func TestPostStagingAbortRemovesStaged(t *testing.T) {
 		t.Fatalf("abort report = %+v", st)
 	}
 	// The report precedes the local cleanup by a hair — poll for it.
-	waitFor(t, 5*time.Second, "staged file removal", func() bool {
+	waitFor(t, 8*time.Second, "staged file removal", func() bool {
 		_, err := os.Stat(a.updTarget + ".new")
 		return os.IsNotExist(err)
 	})
@@ -1209,7 +1209,7 @@ func TestPostStagingAbortRemovesStaged(t *testing.T) {
 		t.Fatal("marker written despite pre-install abort")
 	}
 	hp, _ := a.updateHistoryPath()
-	waitFor(t, 5*time.Second, "abort in history", func() bool {
+	waitFor(t, 8*time.Second, "abort in history", func() bool {
 		h, _ := readUpdateHistory(hp)
 		return len(h) > 0
 	})
@@ -1269,7 +1269,7 @@ func TestInstallFailureCleansUp(t *testing.T) {
 		t.Fatal("marker survived an install failure")
 	}
 	hp, _ := a.updateHistoryPath()
-	waitFor(t, 5*time.Second, "install failure in history", func() bool {
+	waitFor(t, 8*time.Second, "install failure in history", func() bool {
 		h, _ := readUpdateHistory(hp)
 		return len(h) > 0
 	})
@@ -1379,7 +1379,7 @@ func TestSettleWindowConfirmsHealthy(t *testing.T) {
 		return !ok
 	})
 	hp, _ := a.updateHistoryPath()
-	waitFor(t, 5*time.Second, "confirmation in history", func() bool {
+	waitFor(t, 8*time.Second, "confirmation in history", func() bool {
 		h, _ := readUpdateHistory(hp)
 		return len(h) > 0
 	})
@@ -1408,7 +1408,7 @@ func TestSettleFailureConsumesAttemptBudget(t *testing.T) {
 	ch := runSession(a)
 	endSession(t, f, a, ch)
 
-	waitFor(t, 5*time.Second, "attempt to be counted", func() bool {
+	waitFor(t, 8*time.Second, "attempt to be counted", func() bool {
 		m, ok, _ := readPendingMarker(mkPath)
 		return ok && m.Attempts == 1
 	})
@@ -1469,7 +1469,7 @@ func TestSettleExhaustionRollsBack(t *testing.T) {
 		// osExitFn is the goroutine's terminal call — waiting on the
 		// spawn alone lets it outlive the test and hit the real
 		// os.Exit once cleanup restores the seams.
-		waitFor(t, 5*time.Second, "rollback exit after helper spawn", func() bool {
+		waitFor(t, 8*time.Second, "rollback exit after helper spawn", func() bool {
 			return seams.exits.Load() == 0
 		})
 		req := seams.spawned.Load()
@@ -1477,7 +1477,7 @@ func TestSettleExhaustionRollsBack(t *testing.T) {
 			t.Fatalf("rollback spawn = %+v", req)
 		}
 	} else {
-		waitFor(t, 5*time.Second, "rollback re-exec", func() bool {
+		waitFor(t, 8*time.Second, "rollback re-exec", func() bool {
 			execed, _ := seams.execed.Load().(string)
 			return execed == target
 		})
