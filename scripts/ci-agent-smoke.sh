@@ -18,8 +18,10 @@
 # the script exits non-zero only on FAIL. SKIPs are EXPECTED on hosted
 # runners — see docs/ci.md for which ones and why:
 #
-#   ubuntu:  `systemctl --user` has no session bus → start/stop SKIP;
-#            the unit file artifact is still verified.
+#   ubuntu:  where `systemctl --user` has no session bus → start/stop
+#            SKIP, the unit file artifact is still verified; where a
+#            user bus IS live (ubuntu-latest) the real
+#            install→start→status→stop→uninstall lifecycle runs.
 #   macOS:   launchctl gui/<uid> domain usually exists on runners →
 #            full install→status→stop→uninstall runs; SKIP otherwise.
 #   windows: sc.exe create needs an elevated token → SKIP when denied;
@@ -58,6 +60,11 @@ cleanup() {
   # Uses the same scratch env the checks ran under, so paths resolve.
   if [ -x "$bin" ]; then
     HOME="$SCRATCH/home" XDG_CONFIG_HOME="$SCRATCH/xdg" \
+      LOCALMESH_AGENT_DIR="$SCRATCH/agent-home" \
+      "$bin" service uninstall >/dev/null 2>&1 || true
+    # If the service phase ran against a live user manager the unit
+    # landed in the real home — remove that one too.
+    HOME="${REAL_HOME:-$HOME}" XDG_CONFIG_HOME="${REAL_HOME:-$HOME}/.config" \
       LOCALMESH_AGENT_DIR="$SCRATCH/agent-home" \
       "$bin" service uninstall >/dev/null 2>&1 || true
   fi
@@ -105,6 +112,12 @@ bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s — %s\n' "$1" "$2" >&2; }
 
 # Point every agent-visible directory at the scratch: config via
 # LOCALMESH_AGENT_DIR, launchd plist/systemd unit via HOME/XDG.
+# REAL_HOME is captured first: when a systemd user manager is actually
+# alive it resolves units under ITS OWN home — the scratch redirect
+# would hide the artifact from it — so the Linux service phase then
+# installs into the real ~/.config instead (agent state stays in
+# LOCALMESH_AGENT_DIR scratch, and `service uninstall` removes it).
+REAL_HOME="$HOME"
 export LOCALMESH_AGENT_DIR="$SCRATCH/agent-home"
 export HOME="$SCRATCH/home"
 export XDG_CONFIG_HOME="$SCRATCH/xdg"
@@ -293,8 +306,25 @@ Darwin)
   fi
   ;;
 Linux)
-  unit="$SCRATCH/xdg/systemd/user/localmesh-agent.service"
-  run_capture "$bin" service install
+  # Probe FIRST: a live user manager resolves units under its own home,
+  # so the service phase then runs against the real ~/.config (agent
+  # state still isolated via LOCALMESH_AGENT_DIR); without a manager
+  # everything stays in the scratch XDG and lifecycle is skipped.
+  if have systemctl && systemctl --user list-units --type=service >/dev/null 2>&1; then
+    mgr_live=1
+    unit="$REAL_HOME/.config/systemd/user/localmesh-agent.service"
+  else
+    mgr_live=0
+    unit="$SCRATCH/xdg/systemd/user/localmesh-agent.service"
+  fi
+  svc_run() {
+    if [ "$mgr_live" -eq 1 ]; then
+      run_capture env HOME="$REAL_HOME" XDG_CONFIG_HOME="$REAL_HOME/.config" "$@"
+    else
+      run_capture "$@"
+    fi
+  }
+  svc_run "$bin" service install
   ins_out="$__out"; ins_code=$__code
   # The unit file is written before any systemctl call, so the artifact
   # is verifiable even where systemd has no user session.
@@ -309,25 +339,26 @@ Linux)
   else
     bad "service install" "no unit artifact produced (exit $ins_code): $ins_out"
   fi
-  if have systemctl && systemctl --user list-units --type=service >/dev/null 2>&1; then
-    # A real user manager exists (self-hosted runner / desktop) → the
-    # full lifecycle is expected to work; failures here are real bugs.
+  if [ "$mgr_live" -eq 1 ]; then
+    # A real user manager exists (self-hosted runner / desktop /
+    # ubuntu-latest's user bus) → the full lifecycle is expected to
+    # work; failures here are real bugs.
     if [ "$ins_code" -ne 0 ]; then
       bad "service install" "systemctl --user alive but install failed (exit $ins_code): $ins_out"
     fi
-    run_capture "$bin" service start
+    svc_run "$bin" service start
     if [ "$__code" -eq 0 ]; then
       pass "service start: systemctl --user start accepted"
     else
       bad "service start" "exit $__code: $__out"
     fi
-    run_capture "$bin" service status
+    svc_run "$bin" service status
     if printf '%s' "$__out" | grep -q '^status:'; then
       pass "service status: $(printf '%s' "$__out" | grep '^status:' | head -n1)"
     else
       bad "service status" "no status line: $__out"
     fi
-    run_capture "$bin" service stop
+    svc_run "$bin" service stop
     if [ "$__code" -eq 0 ]; then
       pass "service stop: unit stopped"
     else
@@ -343,7 +374,7 @@ Linux)
     fi
   fi
   # uninstall must remove the artifact even with no manager alive.
-  run_capture "$bin" service uninstall
+  svc_run "$bin" service uninstall
   if [ ! -f "$unit" ]; then
     pass "service uninstall: unit artifact removed"
   else

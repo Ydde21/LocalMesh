@@ -1450,15 +1450,15 @@ func TestSettleExhaustionRollsBack(t *testing.T) {
 	// binary — that terminal step is the deterministic completion
 	// signal (the stamp alone precedes the restore).
 	if runtime.GOOS == "windows" {
-		waitFor(t, 5*time.Second, "rollback helper spawn", func() bool {
-			return seams.spawned.Load() != nil
+		// osExitFn is the goroutine's terminal call — waiting on the
+		// spawn alone lets it outlive the test and hit the real
+		// os.Exit once cleanup restores the seams.
+		waitFor(t, 5*time.Second, "rollback exit after helper spawn", func() bool {
+			return seams.exits.Load() == 0
 		})
 		req := seams.spawned.Load()
 		if req == nil || !req.Rollback || req.Target != target {
 			t.Fatalf("rollback spawn = %+v", req)
-		}
-		if seams.exits.Load() != 0 {
-			t.Fatalf("exit code = %d", seams.exits.Load())
 		}
 	} else {
 		waitFor(t, 5*time.Second, "rollback re-exec", func() bool {
