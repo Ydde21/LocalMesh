@@ -238,7 +238,13 @@ export function sessionCookieValue(req: Request): string | undefined {
   if (!header) return undefined;
   for (const part of header.split(";")) {
     const [k, ...v] = part.trim().split("=");
-    if (k === SESSION_COOKIE) return decodeURIComponent(v.join("="));
+    if (k === SESSION_COOKIE) {
+      try {
+        return decodeURIComponent(v.join("="));
+      } catch {
+        return undefined; // malformed cookie — treat as absent, not a 500
+      }
+    }
   }
   return undefined;
 }

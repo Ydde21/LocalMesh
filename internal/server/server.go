@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/localmesh/localmesh/internal/contracts"
 	"github.com/localmesh/localmesh/internal/creds"
@@ -371,9 +372,11 @@ func (s *Server) Start(ctx context.Context) error {
 	// /readyz verifies the dependencies the server actually needs —
 	// Postgres. Unlike /healthz it fails when the pool is dead, so
 	// orchestrators can distinguish "process up" from "serving".
+	// The probe result is cached ~1s: anonymous readiness traffic can't
+	// drive one Postgres query per request (trust-review T-6), while
+	// the answer still flips well inside router fall-hysteresis.
+	probe := &readyProbe{ttl: time.Second}
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		pctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-		defer cancel()
 		// Readiness = Postgres reachable AND the lock row still names
 		// this owner+epoch. A fenced-but-draining instance flips to 503
 		// the moment a successor stamps its takeover, so health-checking
@@ -382,8 +385,12 @@ func (s *Server) Start(ctx context.Context) error {
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
-		held, err := s.st.OwnershipHeld(pctx, s.owner.InstanceID().String(), s.owner.Epoch())
-		if err != nil || !held {
+		if !probe.Check(r.Context(), func(ctx context.Context) bool {
+			pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			held, err := s.st.OwnershipHeld(pctx, s.owner.InstanceID().String(), s.owner.Epoch())
+			return err == nil && held
+		}) {
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
@@ -603,6 +610,30 @@ func (s *Server) handleNodeConnect(w http.ResponseWriter, r *http.Request) {
 	s.hub.HandleConnection(r.Context(), c, node)
 }
 
+// readyProbe caches an unauthenticated dependency check for ttl so a
+// burst of readiness GETs coalesces into one Postgres query instead of
+// draining the pool (trust-review T-6). Concurrent callers serialize
+// on the mutex — a burst shares the single fresh result.
+type readyProbe struct {
+	mu    sync.Mutex
+	at    time.Time
+	ok    bool
+	valid bool
+	ttl   time.Duration
+}
+
+func (p *readyProbe) Check(ctx context.Context, f func(context.Context) bool) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.valid && time.Since(p.at) < p.ttl {
+		return p.ok
+	}
+	p.ok = f(ctx)
+	p.at = time.Now()
+	p.valid = true
+	return p.ok
+}
+
 // bootstrapAdminKey ensures at least one admin API key exists. With
 // LOCALMESH_ADMIN_KEY set, that key is installed. Otherwise a fresh key
 // is generated and printed to the log once.
@@ -625,6 +656,16 @@ func (s *Server) bootstrapAdminKey(ctx context.Context) error {
 		plaintext = creds.Generate(creds.PrefixAPIKey, 32)
 	}
 	if _, err := s.st.CreateAPIKey(ctx, "bootstrap-admin", plaintext[:12], creds.Hash(plaintext), auth.RoleAdmin); err != nil {
+		// The env key was installed before and then revoked — the
+		// hasAdmin check skips revoked rows so we retried the insert
+		// and hit the key_hash unique index. Surfacing as a boot
+		// failure would crash-loop a revoked-key deployment; the
+		// honest outcome is to keep the revocation and continue.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && s.cfg.AdminKey != "" {
+			s.log.Warn("LOCALMESH_ADMIN_KEY already installed but revoked — keeping revocation; unset it or rotate the key")
+			return nil
+		}
 		return err
 	}
 	if s.cfg.AdminKey == "" {

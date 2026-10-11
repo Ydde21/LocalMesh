@@ -124,8 +124,17 @@ func Enroll(ctx context.Context, opts EnrollOptions) (*EnrollResult, error) {
 			return nil, ctx.Err()
 		case <-time.After(opts.PollEvery):
 		}
-		u := fmt.Sprintf("%s/api/v1/enroll/%s?secret=%s", base, url.QueryEscape(er.RequestID), url.QueryEscape(er.PollSecret))
-		resp, err := hc.Get(u)
+		// Poll secret travels in a header, not the URL — query strings
+		// end up in intermediary access logs. The server accepts the
+		// header (handlers.go) and keeps the ?secret= fallback for
+		// older agents.
+		u := fmt.Sprintf("%s/api/v1/enroll/%s", base, url.PathEscape(er.RequestID))
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("X-Poll-Secret", er.PollSecret)
+		resp, err := hc.Do(req)
 		if err != nil {
 			logf("poll error: %v (retrying)", err)
 			continue

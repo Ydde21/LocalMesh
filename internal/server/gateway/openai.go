@@ -267,7 +267,7 @@ func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 	g.finishWorkload(r.Context(), wl, status, errString(lastErr), nil, nil, nil, nil)
 	writeErr(w, http.StatusServiceUnavailable, "dispatch_failed",
-		fmt.Sprintf("could not dispatch request: %v", lastErr))
+		"could not dispatch the request to any node")
 }
 
 var errFirstToken = errors.New("stream failed before first token")
@@ -366,7 +366,8 @@ func (g *Gateway) streamOrCollect(
 		if headersSent {
 			// Shouldn't happen (headers only sent after first token) but
 			// guard anyway: the stream is committed, emit the error.
-			sendStreamError(w, streamErr)
+			et, em := clientErr(streamErr)
+			sendStreamError(w, et, em)
 			g.finishWorkload(r.Context(), wl, statusFor(streamErr), streamErr.Error(), nil, nil, nil, &total)
 			return false
 		}
@@ -376,7 +377,8 @@ func (g *Gateway) streamOrCollect(
 	if req.Stream {
 		if headersSent {
 			if streamErr != nil {
-				sendStreamError(w, streamErr)
+				et, em := clientErr(streamErr)
+				sendStreamError(w, et, em)
 			} else {
 				sendChunk("", &finish, nil)
 				if req.StreamOpts != nil && req.StreamOpts.IncludeUsage && usage != nil {
@@ -398,7 +400,8 @@ func (g *Gateway) streamOrCollect(
 	// Buffered response.
 	if streamErr != nil {
 		g.finishWorkload(r.Context(), wl, statusFor(streamErr), streamErr.Error(), nil, nil, &ttft, &total)
-		writeErr(w, http.StatusBadGateway, "upstream_error", streamErr.Error())
+		et, em := clientErr(streamErr)
+		writeErr(w, http.StatusBadGateway, et, em)
 		return false
 	}
 	resp := map[string]any{
@@ -453,11 +456,27 @@ func sendUsageChunk(w http.ResponseWriter, id, model string, created int64, u *c
 	fmt.Fprintf(w, "data: %s\n\n", b)
 }
 
-func sendStreamError(w http.ResponseWriter, err error) {
+// clientErr classifies an upstream node/engine failure for the
+// inference client. The verbatim node error is persisted on the
+// workload row (the operator surface); clients get the failure class,
+// not node internals (trust-review T-5).
+func clientErr(err error) (typ, msg string) {
+	if errors.Is(err, context.Canceled) {
+		return "request_cancelled", "request cancelled"
+	}
+	s := strings.ToLower(err.Error())
+	if strings.Contains(s, "not found") || strings.Contains(s, "no such model") ||
+		strings.Contains(s, "does not exist") {
+		return "model_unavailable", "the requested model is not available on any node"
+	}
+	return "upstream_error", "the upstream node failed to complete the request"
+}
+
+func sendStreamError(w http.ResponseWriter, typ, msg string) {
 	payload := map[string]any{
 		"error": map[string]string{
-			"message": err.Error(),
-			"type":    "upstream_error",
+			"message": msg,
+			"type":    typ,
 		},
 	}
 	b, _ := json.Marshal(payload)
