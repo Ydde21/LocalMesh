@@ -79,7 +79,7 @@ step "smoke"
 bash scripts/smoke-agent.sh "$bin"
 
 if [ "$is_windows" -eq 1 ]; then
-  step "validate scripts/install-agent.ps1 (parse only)"
+  step "validate scripts/install-agent.ps1"
   ps="pwsh"
   have pwsh || ps="powershell"
   if have "$ps"; then
@@ -87,8 +87,10 @@ if [ "$is_windows" -eq 1 ]; then
     # a pure syntax gate for the Windows installer.
     "$ps" -NoProfile -NonInteractive -Command \
       'try { $null = [scriptblock]::Create((Get-Content -Raw -LiteralPath "scripts/install-agent.ps1")); Write-Host "install-agent.ps1: syntax OK" } catch { Write-Error "install-agent.ps1 parse failed: $_"; exit 1 }'
+    step "install-agent.ps1 integrity-verification tests"
+    "$ps" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/test-install-agent.ps1
   else
-    echo "note: no powershell on PATH — skipping .ps1 syntax check"
+    echo "note: no powershell on PATH — skipping .ps1 syntax + behavior checks"
   fi
 else
   step "syntax-check POSIX scripts"

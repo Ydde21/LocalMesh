@@ -66,7 +66,11 @@ if ($env:LOCALMESH_AGENT_BIN -and (Test-Path $env:LOCALMESH_AGENT_BIN)) {
 } else {
   # Artifacts are named localmesh-agent-<ver>-windows-amd64.exe; the
   # manifest resolves "latest" and provides the published checksum.
-  if ($Version -eq "latest") {
+  # LOCALMESH_DOWNLOAD_BASE overrides the release base URL — mirrors and
+  # the CI test harness use it; production installs leave it unset.
+  if ($env:LOCALMESH_DOWNLOAD_BASE) {
+    $base = $env:LOCALMESH_DOWNLOAD_BASE
+  } elseif ($Version -eq "latest") {
     $base = "https://github.com/$Repo/releases/latest/download"
   } else {
     $base = "https://github.com/$Repo/releases/download/$Version"
@@ -87,12 +91,17 @@ if ($env:LOCALMESH_AGENT_BIN -and (Test-Path $env:LOCALMESH_AGENT_BIN)) {
     throw "download failed — check that $artifact exists in release ${Version}: $_"
   }
 
-  # Verify checksum against the release manifest (never trust transport alone).
+  # Integrity verification (always — fail closed). The artifact must
+  # match the release manifest checksum AND/OR a signature-verified
+  # SHA256SUMS entry; at least one positive verification is required —
+  # never trust transport alone (docs/releases.md).
+  $verified = $false
   $want = ($mf.artifacts | Where-Object { $_.file -eq $artifact }).sha256
   if ($want) {
     $got = Get-Sha256 $bin
     if ($got -ne $want) { throw "checksum mismatch for $artifact ($got != $want) — aborting" }
     Write-Host "  checksum verified against release manifest"
+    $verified = $true
   }
 
   # Signature verification when a release pubkey + minisign are available —
@@ -110,12 +119,17 @@ if ($env:LOCALMESH_AGENT_BIN -and (Test-Path $env:LOCALMESH_AGENT_BIN)) {
     & minisign -V -x $sigPath -m $sumsPath -P $pub 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "release signature verification failed — refusing to install" }
     $binSum = Get-Sha256 $bin
-    if (-not (Select-String -Path $sumsPath -Pattern "$binSum" -SimpleMatch -Quiet)) {
+    if (Select-String -Path $sumsPath -Pattern "$binSum" -SimpleMatch -Quiet) {
+      $verified = $true
+      Write-Host "  release signature verified"
+    } else {
       Write-Host "  note: artifact not in signed SHA256SUMS (manifest checksum already verified)"
     }
-    Write-Host "  release signature verified"
   } else {
-    Write-Host "  note: LOCALMESH_RELEASE_PUBKEY unset or minisign missing — checksum verified only"
+    Write-Host "  note: LOCALMESH_RELEASE_PUBKEY unset or minisign missing — signature verification unavailable"
+  }
+  if (-not $verified) {
+    throw "integrity verification unavailable — could not match $artifact against the release manifest or a signed SHA256SUMS (set LOCALMESH_RELEASE_PUBKEY + install minisign to verify via signature)"
   }
 }
 
