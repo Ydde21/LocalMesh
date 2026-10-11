@@ -266,6 +266,22 @@ func (e *env) maintenance(t *testing.T, nodeID string) (string, string) {
 	return n.Maintenance, n.MaintenanceReason
 }
 
+// waitMaintenanceCleared polls until the node leaves 'updating'.
+// finishUpdate commits the terminal phase and releases the maintenance
+// marker as separate store calls — a one-shot read taken the instant
+// waitPhase sees the phase can land inside that gap under CPU load, so
+// the real predicate ("marker released") is polled, not peeked once.
+func (e *env) waitMaintenanceCleared(t *testing.T, nodeID string) {
+	t.Helper()
+	var st string
+	waitFor(t, 8*time.Second, func() bool {
+		st, _ = e.maintenance(t, nodeID)
+		return st != store.MaintUpdating
+	}, func() string {
+		return "node " + nodeID + " updating marker released (still: " + st + ")"
+	})
+}
+
 func waitFor(t *testing.T, d time.Duration, f func() bool, msg func() string) {
 	t.Helper()
 	deadline := time.Now().Add(d)
@@ -467,6 +483,7 @@ func TestSingleLifecycle(t *testing.T) {
 	if got := e.waitRolloutState(t, r.ID, store.RolloutSucceeded); got != store.RolloutSucceeded {
 		t.Fatalf("rollout = %s", got)
 	}
+	e.waitMaintenanceCleared(t, n)
 	st, _ = e.maintenance(t, n)
 	if st != store.MaintNone {
 		t.Fatalf("maintenance = %q after success, want cleared", st)
@@ -492,6 +509,7 @@ func TestDrainTimeout(t *testing.T) {
 	if !strings.Contains(e.getUpdate(t, u.ID).Error, "drain timeout") {
 		t.Fatalf("error = %q", e.getUpdate(t, u.ID).Error)
 	}
+	e.waitMaintenanceCleared(t, n)
 	st, _ := e.maintenance(t, n)
 	if st != store.MaintNone {
 		t.Fatalf("maintenance = %q after drain-timeout failure", st)
@@ -516,7 +534,12 @@ func (e *env) driveDispatchedWait(nodeID string, rel *store.Release, t *testing.
 
 // TestDrainThenDispatch: drain completing before the timeout dispatches.
 func TestDrainThenDispatch(t *testing.T) {
-	e := newEnv(t, fastCfg(), true)
+	// Long drain budget: the test asserts the drain-completes path, not
+	// the timeout — fastCfg's 300ms clock could legitimately fire first
+	// when waitPhase polls late under load.
+	cfg := fastCfg()
+	cfg.DrainTimeout = time.Minute
+	e := newEnv(t, cfg, true)
 	rel := e.release(t, "0.7.0")
 	n := e.node(t, "n1", "0.6.0", true, false)
 
@@ -542,6 +565,7 @@ func TestDisconnectPreInstall(t *testing.T) {
 	if got := e.waitRolloutState(t, r.ID, store.RolloutFailed); got != store.RolloutFailed {
 		t.Fatalf("rollout = %s", got)
 	}
+	e.waitMaintenanceCleared(t, n)
 	st, _ := e.maintenance(t, n)
 	if st != store.MaintNone {
 		t.Fatalf("maintenance = %q after interrupt", st)
@@ -611,7 +635,12 @@ func TestCancelPending(t *testing.T) {
 
 // TestCancelDrainingClearsMaintenance: cancel mid-drain releases the node.
 func TestCancelDrainingClearsMaintenance(t *testing.T) {
-	e := newEnv(t, fastCfg(), true)
+	// Long drain budget: the test exercises cancel-from-draining, not
+	// the drain timeout — a 300ms clock could race CancelUpdate itself
+	// under load (a late waitPhase poll leaves <300ms of budget).
+	cfg := fastCfg()
+	cfg.DrainTimeout = time.Minute
+	e := newEnv(t, cfg, true)
 	rel := e.release(t, "0.7.0")
 	n := e.node(t, "n1", "0.6.0", true, false)
 
@@ -856,8 +885,13 @@ func TestCanaryGate(t *testing.T) {
 }
 
 // finishOK walks an update through agent frames to a verified success.
+// It waits for 'dispatched' first: 'draining' also counts as in-flight,
+// and feeding install frames then would skip the upgrade frame entirely
+// (the store accepts install phases from any live row) — the test would
+// pass without ever exercising dispatch.
 func (e *env) finishOK(t *testing.T, nodeID, updateID, toVersion string) {
 	t.Helper()
+	e.waitPhase(t, updateID, store.UpdDispatched)
 	e.feed(nodeID, updateID, store.UpdInstalling, store.UpdRestarting)
 	e.disp.set(nodeID, false, false, toVersion)
 	e.m.OnNodeDisconnected(nodeID)
@@ -1079,6 +1113,9 @@ func TestCanaryUnapprovedRestartStaysParked(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	canary := e.waitInFlight(t, r.ID, 1)[0]
+	// 'draining' counts as in-flight — wait for the actual dispatch so
+	// finishOK's frames can't skip the sent frame under -race timing.
+	e.waitPhase(t, canary.ID, store.UpdDispatched)
 	e.finishOK(t, canary.NodeID, canary.ID, "0.7.0")
 	e.waitRolloutState(t, r.ID, store.RolloutAwaitingApproval)
 
@@ -1592,7 +1629,12 @@ func TestRegisterKeyDuplicate(t *testing.T) {
 // TestMaintenanceGuard: admin maintenance writes are refused while a
 // live update owns the marker; resume works after the update ends.
 func TestMaintenanceGuard(t *testing.T) {
-	e := newEnv(t, fastCfg(), true)
+	// Long drain budget: the update must stay live across the guard
+	// asserts — fastCfg's 300ms DrainTimeout can fire between waitPhase
+	// and SetNodeMaintenance under -race, turning ErrActiveUpdate nil.
+	cfg := fastCfg()
+	cfg.DrainTimeout = time.Minute
+	e := newEnv(t, cfg, true)
 	rel := e.release(t, "0.7.0")
 	n := e.node(t, "n1", "0.6.0", true, false)
 

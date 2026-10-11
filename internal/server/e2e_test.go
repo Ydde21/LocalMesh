@@ -216,6 +216,42 @@ func (e *testEnv) waitNodeOnline(t *testing.T, want int) []map[string]any {
 	return nil
 }
 
+// nodeHasModel reports whether a /api/v1/nodes entry advertises a model.
+func nodeHasModel(n map[string]any, name string) bool {
+	models, _ := n["models"].([]any)
+	for _, m := range models {
+		if mm, _ := m.(map[string]any); mm["name"] == name {
+			return true
+		}
+	}
+	return false
+}
+
+// waitNodeModel polls until some online node advertises `model` and
+// returns that node's view. This is the RIGHT readiness gate for tests
+// that assert on reported inventory or schedule a model: "online" flips
+// at WS registration (hub.register), while engines/models only enter
+// the store when the agent's capability report is processed — under
+// load that gap (engine probe → WS frame → UpdateNodeReport commit)
+// stretches to seconds, so waiting on bare `online` and reading
+// `models` races the first report.
+func (e *testEnv) waitNodeModel(t *testing.T, model string) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	var last []map[string]any
+	for time.Now().Before(deadline) {
+		last = e.adminList(t, "/api/v1/nodes")
+		for _, n := range last {
+			if n["online"] == true && nodeHasModel(n, model) {
+				return n
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	t.Fatalf("no online node ever reported model %q; nodes=%v", model, last)
+	return nil
+}
+
 // chat sends a /v1/chat/completions request (streaming or not) and
 // returns the assembled assistant text + finish + usage.
 func (e *testEnv) chat(t *testing.T, model, prompt string, stream bool) (string, int) {
@@ -300,18 +336,10 @@ func TestE2EJoinAndInference(t *testing.T) {
 	defer agCancel()
 	go ag.Run(agCtx)
 
-	nodes := e.waitNodeOnline(t, 1)
-	node := nodes[0]
-	models, _ := node["models"].([]any)
-	foundModel := false
-	for _, m := range models {
-		if m.(map[string]any)["name"] == "llama3.1:8b" {
-			foundModel = true
-		}
-	}
-	if !foundModel {
-		t.Fatalf("model not reported; node=%v", node)
-	}
+	// Gate on the capability report's model inventory, not bare
+	// "online" — registration precedes the first report reaching the
+	// node store, and under load the gap outlives a zero-wait poll.
+	e.waitNodeModel(t, "llama3.1:8b")
 
 	// /v1/models lists it.
 	code, ml, _ := e.adminReq(t, "GET", "/v1/models", nil)

@@ -424,6 +424,12 @@ func (d *chaosUpDisp) sentCount() int {
 	return len(d.sent)
 }
 
+func (d *chaosUpDisp) abortCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.aborts)
+}
+
 // ---------------------------------------------------------------------------
 // misc
 // ---------------------------------------------------------------------------
@@ -447,6 +453,48 @@ func chaosWait(t *testing.T, d time.Duration, cond func() bool, what string) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("timed out (%s) waiting for %s", d, what)
+}
+
+// chaosWaitDiag is chaosWait with a state dump on expiry — a flake
+// report must carry the rows/gates that mattered, not a bare deadline.
+func chaosWaitDiag(t *testing.T, d time.Duration, cond func() bool, what string, diag func() string) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("timed out (%s) waiting for %s\n%s", d, what, diag())
+}
+
+// updateWaitDiag renders the state the updateplane gates on at the
+// moment a wait expires: the update row (phase, drain-clock age,
+// error), the node's maintenance marker, and the scripted dispatcher's
+// view (online/drained/version/frames). Every value is read fresh so a
+// postmortem shows whether the stall was claim, drain, or dispatch.
+func updateWaitDiag(st *store.DB, updateID, nodeID string, disp *chaosUpDisp) func() string {
+	return func() string {
+		var b strings.Builder
+		if u, err := st.GetAgentUpdate(context.Background(), updateID); err == nil {
+			fmt.Fprintf(&b, "update %s: phase=%q updated_at %s ago err=%q finished=%v\n",
+				u.ID, u.Phase, time.Since(u.UpdatedAt).Round(10*time.Millisecond), u.Error,
+				u.FinishedAt != nil)
+		} else {
+			fmt.Fprintf(&b, "update %s: unreadable (%v)\n", updateID, err)
+		}
+		if n, err := st.GetNode(context.Background(), nodeID); err == nil {
+			fmt.Fprintf(&b, "node %s: maintenance=%q reason=%q\n",
+				nodeID, n.Maintenance, n.MaintenanceReason)
+		}
+		if disp != nil {
+			fmt.Fprintf(&b, "disp: online=%v drained=%v version=%q sent=%d aborts=%d\n",
+				disp.Online(nodeID), disp.NodeDrained(nodeID),
+				disp.AgentVersion(nodeID), disp.sentCount(), disp.abortCount())
+		}
+		return b.String()
+	}
 }
 
 // readyzCode polls the DB-aware readiness probe.
@@ -511,6 +559,25 @@ func updatePhase(t *testing.T, st *store.DB, id string) string {
 		t.Fatalf("get update %s: %v", id, err)
 	}
 	return u.Phase
+}
+
+// updatePhaseQuiet is updatePhase without the Fatal — for diagnostics
+// and polls where a transient read error must not kill the test.
+func updatePhaseQuiet(st *store.DB, id string) string {
+	u, err := st.GetAgentUpdate(context.Background(), id)
+	if err != nil {
+		return "<unreadable>"
+	}
+	return u.Phase
+}
+
+// maintQuiet is nodeMaintenance without the Fatal — same purpose.
+func maintQuiet(st *store.DB, nodeID string) string {
+	n, err := st.GetNode(context.Background(), nodeID)
+	if err != nil {
+		return "<unreadable>"
+	}
+	return n.Maintenance
 }
 
 // nodeMaintenance reads a node's maintenance pair.

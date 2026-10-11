@@ -44,6 +44,17 @@ type Agent struct {
 	bootReport   *contracts.UpgradeState // boot-time verdict queued for the first session
 	updTarget    string                  // test seam: binary target override for updates
 	updStageHook func()                  // test seam: fires between staging and the pre-install abort check
+
+	// Reported-inventory tracking: the heartbeat re-reports capabilities
+	// whenever the live engine signature diverges from what the LAST
+	// SENT report carried — a tick-to-tick comparison alone misses a
+	// report that raced an engine (re)start (down at report time, up
+	// before the first heartbeat, no tick-boundary drift) or a report
+	// whose model list failed transiently. capDirty marks reports that
+	// went out incomplete; lastCapSig records the signature shipped.
+	capMu      sync.Mutex
+	lastCapSig string
+	capDirty   bool
 }
 
 func New(cfg *Config, log *slog.Logger) *Agent {
@@ -293,7 +304,6 @@ func (a *Agent) handshake(ctx context.Context, c *wsjson.Conn) (time.Duration, e
 func (a *Agent) heartbeatLoop(ctx context.Context, c *wsjson.Conn, every time.Duration, done <-chan struct{}) {
 	t := time.NewTicker(every)
 	defer t.Stop()
-	var lastEngines string
 	for {
 		select {
 		case <-ctx.Done():
@@ -330,12 +340,20 @@ func (a *Agent) heartbeatLoop(ctx context.Context, c *wsjson.Conn, every time.Du
 			// Engine health changes (Ollama restart/crash) must reach the
 			// scheduler quickly — Detect is one cheap /api/version call,
 			// and a full capability report only ships on actual change.
+			// The comparison is against the signature the last SENT
+			// report carried, not the previous tick's probe: an engine
+			// that was down at report time and healthy by the first
+			// heartbeat drifts from the reported signature, which a
+			// tick-to-tick diff would never see. capDirty catches a
+			// report whose model list failed transiently.
 			sig := a.engineSignature(ctx)
-			if lastEngines != "" && sig != lastEngines {
+			a.capMu.Lock()
+			stale := a.capDirty || sig != a.lastCapSig
+			a.capMu.Unlock()
+			if stale {
 				a.log.Info("engine state changed, re-reporting capabilities")
 				a.reportCapabilities(ctx, c)
 			}
-			lastEngines = sig
 		}
 	}
 }
@@ -362,12 +380,39 @@ func (a *Agent) engineSignature(ctx context.Context) string {
 	return sb.String()
 }
 
+// reportedEngineSig encodes a report's engine list identically to
+// engineSignature's live-probe encoding, so a stored signature can be
+// compared against fresh probes. An entry that Detect never answered
+// (reported as bare Healthy:false) encodes "down", matching the live
+// probe's error arm.
+func reportedEngineSig(infos []contracts.EngineInfo) string {
+	var sb strings.Builder
+	for _, i := range infos {
+		sb.WriteString(i.Type)
+		sb.WriteByte(':')
+		if !i.Healthy && i.Version == "" && i.Address == "" {
+			sb.WriteString("down;")
+			continue
+		}
+		sb.WriteString(i.Version)
+		sb.WriteByte('=')
+		sb.WriteString(strconv.FormatBool(i.Healthy))
+		sb.WriteByte(';')
+	}
+	return sb.String()
+}
+
 // reportCapabilities pushes hardware + engine + model inventory and
 // reports whether the frame was written — the post-restart update
 // check requires the inventory to have reached the server before it
-// calls the session healthy.
+// calls the session healthy. On a successful write it records the
+// signature the heartbeat loop monitors; a report that went out with
+// an engine detected but its model list unreadable is marked dirty so
+// the next heartbeat re-reports instead of leaving an empty inventory
+// advertised for the whole session.
 func (a *Agent) reportCapabilities(ctx context.Context, c *wsjson.Conn) bool {
 	rep := contracts.CapabilityReport{Hardware: a.hw}
+	complete := true
 	for _, e := range a.engines {
 		ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
 		info, err := e.Detect(ctx2)
@@ -385,17 +430,27 @@ func (a *Agent) reportCapabilities(ctx context.Context, c *wsjson.Conn) bool {
 		cancel3()
 		if err != nil {
 			a.log.Warn("list models", "engine", e.Type(), "err", err)
+			complete = false
 		}
 		rep.Models = append(rep.Models, models...)
 	}
 	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	if err := c.Write(wctx, contracts.Envelope{
+	werr := c.Write(wctx, contracts.Envelope{
 		ID:      uuid.NewString(),
 		Type:    contracts.MsgCapability,
 		Payload: contracts.MarshalPayload(rep),
-	}); err != nil {
-		a.log.Warn("capability report failed", "err", err)
+	})
+	cancel()
+	a.capMu.Lock()
+	if werr != nil {
+		a.capDirty = true // the server's view is stale — retry next heartbeat
+	} else {
+		a.lastCapSig = reportedEngineSig(rep.Engines)
+		a.capDirty = !complete
+	}
+	a.capMu.Unlock()
+	if werr != nil {
+		a.log.Warn("capability report failed", "err", werr)
 		return false
 	}
 	a.log.Info("capability report sent",
