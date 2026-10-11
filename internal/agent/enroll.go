@@ -37,6 +37,11 @@ type EnrollResult struct {
 	Config *Config
 }
 
+// approvalReminderEvery is how often the approval wait re-prints a
+// "still waiting" line so a long join does not look hung. Declared as a
+// var so tests can shrink it — production value never changes.
+var approvalReminderEvery = time.Minute
+
 // Enroll performs the join handshake: exchange the enrollment token for a
 // pending request, wait for admin approval, and return the node config.
 // The node credential is generated locally — its plaintext never leaves
@@ -47,6 +52,9 @@ func Enroll(ctx context.Context, opts EnrollOptions) (*EnrollResult, error) {
 	}
 	if opts.Token == "" {
 		return nil, errors.New("--token is required")
+	}
+	if !strings.HasPrefix(opts.Token, creds.PrefixEnrollment+"_") {
+		return nil, fmt.Errorf("--token is not an enrollment token (they start with %s_) — check for truncation, or mint a fresh one in the dashboard (Settings → Device enrollment)", creds.PrefixEnrollment)
 	}
 	if !strings.HasPrefix(opts.Server, "http") {
 		opts.Server = "https://" + opts.Server
@@ -113,15 +121,23 @@ func Enroll(ctx context.Context, opts EnrollOptions) (*EnrollResult, error) {
 		return nil, errors.New("malformed enroll response")
 	}
 	logf("enrollment submitted — waiting for administrator approval (request %s)", er.RequestID)
+	logf("  approve it in the dashboard (Settings → Device enrollment, or Devices → Add device)")
+	logf("  or via the admin API: curl -sk -X POST \"%s/api/v1/enrollments/%s/approve\" -H \"Authorization: Bearer <admin-key>\"", base, er.RequestID)
 
-	deadline := time.Now().Add(opts.Wait)
+	started := time.Now()
+	deadline := started.Add(opts.Wait)
+	nextReminder := started.Add(approvalReminderEvery)
 	for {
 		if time.Now().After(deadline) {
-			return nil, errors.New("timed out waiting for approval")
+			return nil, fmt.Errorf("timed out waiting for approval after %s — request %s stays pending server-side; re-run join (mint a fresh enrollment token if the old one is exhausted) and approve the new request promptly", opts.Wait, er.RequestID)
+		}
+		if time.Now().After(nextReminder) {
+			logf("still waiting for administrator approval (request %s, %s elapsed)", er.RequestID, time.Since(started).Round(time.Second))
+			nextReminder = time.Now().Add(approvalReminderEvery)
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, fmt.Errorf("join interrupted — request %s stays pending server-side; approve or deny it in the dashboard, then re-run join: %w", er.RequestID, ctx.Err())
 		case <-time.After(opts.PollEvery):
 		}
 		// Poll secret travels in a header, not the URL — query strings
@@ -141,6 +157,9 @@ func Enroll(ctx context.Context, opts EnrollOptions) (*EnrollResult, error) {
 		}
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("enrollment request %s no longer exists on the server — re-run join to submit a new one", er.RequestID)
+		}
 		if resp.StatusCode != http.StatusOK {
 			continue
 		}

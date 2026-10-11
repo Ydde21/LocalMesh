@@ -2,7 +2,7 @@
 //
 // Usage:
 //
-//	localmesh-agent join --server https://host:8443 --token lme_... [--name ...] [--ca-fingerprint sha256:...] [--update-pubkey keyfile]
+//	localmesh-agent join --server https://host:8443 --token lme_... [--name ...] [--ca-fingerprint sha256:...] [--update-pubkey keyfile] [-force]
 //	localmesh-agent join -discover --token lme_... [-discover-instance name] [--ca-fingerprint sha256:...]
 //	localmesh-agent discover [-timeout 5s] [-json]
 //	localmesh-agent run [--config path]
@@ -99,6 +99,7 @@ func cmdJoin(log *slog.Logger) {
 	ollama := fs.String("ollama-url", "", "Ollama endpoint (default http://127.0.0.1:11434)")
 	updatePubkey := fs.String("update-pubkey", "", "release signing public key file (minisign .pub or PEM) — pins the trust anchor for server-dispatched upgrades; the control plane NEVER sends key material")
 	foreground := fs.Bool("run", true, "start serving workloads after approval")
+	force := fs.Bool("force", false, "re-enroll and replace existing node credentials (requires new admin approval)")
 	discover := fs.Bool("discover", false, "find the control plane via mDNS instead of --server")
 	discInstance := fs.String("discover-instance", "", "cluster name to pick when several are discovered")
 	discTimeout := fs.Duration("discover-timeout", 5*time.Second, "mDNS browse window for -discover")
@@ -122,6 +123,16 @@ func cmdJoin(log *slog.Logger) {
 		if err != nil {
 			fatal(err)
 		}
+	}
+
+	// Re-running join mints a fresh node credential and silently
+	// replaces the persisted one on approval — the old node goes
+	// offline forever while a new pending request queues for the
+	// admin. Refuse on an enrolled config unless the operator asks.
+	if existing, err := agent.LoadConfig(path); err == nil && existing.NodeID != "" && !*force {
+		fmt.Fprintf(os.Stderr, "error: already enrolled as node %s (server %s, config %s)\nre-running join replaces those credentials and requires new admin approval — re-run with -force to proceed, or delete %s\n",
+			existing.NodeID, existing.ServerURL, path, path)
+		os.Exit(1)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -324,19 +335,27 @@ func cmdService() {
 }
 
 func cmdStatus() {
-	path, _ := agent.DefaultPath()
-	cfg, err := agent.LoadConfig(path)
+	path, err := agent.DefaultPath()
 	if err != nil {
-		fmt.Println("not enrolled (no config)")
-		return
+		fatal(err)
 	}
-	fmt.Printf("server:  %s\nnode id: %s\nname:    %s\nconfig:  %s\n",
-		cfg.ServerURL, cfg.NodeID, cfg.Name, path)
-	if s := agent.PendingUpdateSummary(path); s != "" {
-		fmt.Printf("update:  %s\n", s)
-	}
-	if s := agent.UpdateHistorySummary(path); s != "" {
-		fmt.Printf("update:  %s\n", s)
+	cfg, err := agent.LoadConfig(path)
+	switch {
+	case err == nil:
+		fmt.Printf("server:  %s\nnode id: %s\nname:    %s\nconfig:  %s\n",
+			cfg.ServerURL, cfg.NodeID, cfg.Name, path)
+		if s := agent.PendingUpdateSummary(path); s != "" {
+			fmt.Printf("update:  %s\n", s)
+		}
+		if s := agent.UpdateHistorySummary(path); s != "" {
+			fmt.Printf("update:  %s\n", s)
+		}
+	case os.IsNotExist(err):
+		fmt.Printf("not enrolled — no config at %s (run 'localmesh-agent join' to enroll this machine)\n", path)
+	default:
+		// A config that exists but won't parse is a broken
+		// enrollment, not a fresh machine — say so.
+		fatal(err)
 	}
 }
 
