@@ -37,6 +37,11 @@ export interface Metrics {
   gpu_util_measured?: boolean;
   vram_used_measured?: boolean;
   loaded_measured?: boolean;
+  // v0.10+ disk telemetry on the heartbeat payload — absent on older
+  // agents. disk_measured=false → the byte fields are unknown, not 0.
+  disk_free_bytes?: number;
+  disk_total_bytes?: number;
+  disk_measured?: boolean;
 }
 
 export interface EngineInfo {
@@ -495,6 +500,28 @@ export interface ControlPlaneStatus {
     heartbeat_age_seconds?: number;
   } | null;
   events?: ControlPlaneEvent[] | null;
+}
+
+// GET /api/v1/control-plane/peers — one row per control-plane process
+// with a presence heartbeat (migration 0015). `fresh` is computed
+// against the 15s staleness window server-side.
+export interface ControlPlanePeer {
+  instance_id: string;
+  role: "active" | "standby" | string;
+  hostname?: string;
+  started_at: string;
+  heartbeat_at: string;
+  heartbeat_age_seconds: number;
+  fresh: boolean;
+}
+
+// GET /api/v1/nodes/{id}/disk — the nullable disk-telemetry triple.
+// All three null until the agent reports a real measurement.
+export interface NodeDisk {
+  node_id: string;
+  disk_free_bytes: number | null;
+  disk_total_bytes: number | null;
+  disk_measured_at: string | null;
 }
 
 // Node summary inside the diagnostics bundle — same fields the hub

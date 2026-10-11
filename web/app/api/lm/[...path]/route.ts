@@ -96,12 +96,28 @@ async function proxy(req: Request, ctx: { params: Promise<{ path: string[] }> })
     body = await req.arrayBuffer();
   }
 
-  const res = await undiciFetch(target, {
-    method: req.method,
-    headers,
-    body,
-    dispatcher: getDispatcher(),
-  });
+  let res;
+  try {
+    res = await undiciFetch(target, {
+      method: req.method,
+      headers,
+      body,
+      dispatcher: getDispatcher(),
+    });
+  } catch (e) {
+    // Upstream unreachable/TLS failure — surface a typed JSON error so
+    // the dashboard's error mapper can render actionable guidance
+    // instead of a bare Next 500.
+    return Response.json(
+      {
+        error: {
+          message: `control plane unreachable: ${e instanceof Error ? e.message : "fetch failed"}`,
+          type: "upstream_error",
+        },
+      },
+      { status: 502 }
+    );
+  }
 
   const out = new Response(res.body as unknown as BodyInit, {
     status: res.status,
