@@ -56,10 +56,12 @@ cleanup() {
     [ -n "$p" ] && kill "$p" >/dev/null 2>&1 || true
   done
   [ -n "$pg_name" ] && docker rm -f "$pg_name" >/dev/null 2>&1 || true
-  if [ "${E2E_KEPT:-0}" != "1" ]; then rm -rf "$tmp"; else echo "kept $tmp"; fi
+  # Log tails BEFORE the rm — the previous order deleted the evidence
+  # first, which is why every failure showed empty log tails.
   echo "--- server log (tail) ---"; tail -n 15 "$tmp/server.log" 2>/dev/null || true
   echo "--- standby log (tail) ---"; tail -n 15 "$tmp/standby.log" 2>/dev/null || true
   echo "--- agent log (tail) ---"; tail -n 15 "$tmp/agent.log" 2>/dev/null || true
+  if [ "${E2E_KEPT:-0}" != "1" ]; then rm -rf "$tmp"; else echo "kept $tmp"; fi
 }
 trap cleanup EXIT
 

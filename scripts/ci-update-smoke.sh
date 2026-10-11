@@ -64,7 +64,8 @@ cleanup() {
   # stale. Kill by the unique tmp binary path instead.
   pkill -f "$tmp/localmesh-agent" >/dev/null 2>&1 || true
   [ -n "$pg_name" ] && docker rm -f "$pg_name" >/dev/null 2>&1 || true
-  if [ "${E2E_KEPT:-0}" != "1" ]; then rm -rf "$tmp"; else echo "kept $tmp"; fi
+  # Log tails BEFORE the rm — the previous order deleted the evidence
+  # first, which is why every failure showed empty log tails.
   # An EMPTY log is itself diagnostic: a Go binary that crashed after
   # startup always writes something — empty means exec failed or the
   # process was signalled before init. Say so, don't just print nothing.
@@ -76,6 +77,7 @@ cleanup() {
   echo "--- server-restart log (tail) ---"; tail -n 10 "$tmp/server-restart.log" 2>/dev/null || true
   echo "--- agent log (tail) ---";  tail -n 25 "$tmp/agent.log"  2>/dev/null || true
   echo "--- agent2 log (tail) ---"; tail -n 15 "$tmp/agent2.log" 2>/dev/null || true
+  if [ "${E2E_KEPT:-0}" != "1" ]; then rm -rf "$tmp"; else echo "kept $tmp"; fi
 }
 trap cleanup EXIT
 
