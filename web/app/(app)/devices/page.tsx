@@ -8,14 +8,14 @@ import {
   useNodeEvents, useVersion, useReleases, useAgentUpdates, api,
 } from "@/lib/api";
 import { fmtBytes, fmtAgo, fmtMs, fmtUptime, fmtVersion, agentVersion, osLabel, versionGt } from "@/lib/format";
-import { Panel, Meter, Empty, LoadingRows, ErrorState } from "@/components/ui";
+import { Panel, Meter, Empty, LoadingRows, ErrorState, ErrorNote } from "@/components/ui";
 import { NodeBadge, StatusBadge } from "@/components/status";
 import { ConfirmDialog } from "@/components/confirm";
 import { UpdatePhaseStepper } from "@/components/update-phase";
 import type { Node, Release } from "@/lib/types";
 import {
   X, Cpu, HardDrive, Zap, RefreshCw, Plus, Copy, Check, Wifi, WifiOff,
-  Package, Wrench, ArrowUpCircle,
+  Package, Wrench, ArrowUpCircle, Database,
 } from "lucide-react";
 import { useSWRConfig } from "swr";
 
@@ -309,6 +309,20 @@ function NodeRow({ node, selected }: { node: Node; selected: boolean }) {
         <div className="text-[11px] text-[var(--color-text-faint)]">
           {(node.models ?? []).length} models{loadedCount > 0 ? ` · ${loadedCount} loaded` : ""}
         </div>
+        {/* Agent-reported disk (v0.10+; absent on older agents). */}
+        {node.disk_free_bytes != null && (
+          <div
+            className="mono text-[10.5px] text-[var(--color-text-faint)]"
+            title={
+              node.disk_measured_at
+                ? `disk measured ${fmtAgo(node.disk_measured_at)}`
+                : undefined
+            }
+          >
+            {fmtBytes(node.disk_free_bytes)} disk free
+            {node.disk_total_bytes != null && ` / ${fmtBytes(node.disk_total_bytes)}`}
+          </div>
+        )}
       </div>
     </Link>
   );
@@ -389,11 +403,7 @@ function DeviceDrawer({ id }: { id: string }) {
         </div>
 
         <div className="space-y-5 px-5 py-5">
-          {err && (
-            <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
-              {err}
-            </div>
-          )}
+          {err && <ErrorNote error={err} />}
 
           {/* Hardware */}
           <section>
@@ -401,6 +411,23 @@ function DeviceDrawer({ id }: { id: string }) {
             <div className="space-y-2">
               <KV icon={Cpu} label="CPU" value={`${node.hardware.cpu_model} (${node.hardware.cpu_cores} cores)`} />
               <KV icon={HardDrive} label="Memory" value={fmtBytes(node.hardware.memory_bytes)} />
+              {/* Agent-reported disk (v0.10+) — free/total plus when it
+                  was sampled, so stale reads are honest. */}
+              {node.disk_free_bytes != null && (
+                <KV
+                  icon={Database}
+                  label="Disk"
+                  value={`${fmtBytes(node.disk_free_bytes)} free${
+                    node.disk_total_bytes != null
+                      ? ` of ${fmtBytes(node.disk_total_bytes)}`
+                      : ""
+                  }${
+                    node.disk_measured_at
+                      ? ` · ${fmtAgo(node.disk_measured_at)}`
+                      : ""
+                  }`}
+                />
+              )}
               <KV
                 icon={Package}
                 label="Agent"
@@ -1169,9 +1196,7 @@ function AddDeviceDialog({ onClose }: { onClose: () => void }) {
                   </div>
                 ))
               )}
-              {actErr && (
-                <div className="text-[12px] text-[var(--color-danger)]">{actErr}</div>
-              )}
+              {actErr && <ErrorNote error={actErr} />}
             </div>
           </section>
         </div>

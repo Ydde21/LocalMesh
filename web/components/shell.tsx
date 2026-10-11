@@ -10,6 +10,7 @@ import {
   Boxes,
   Rocket,
   Activity,
+  FlaskConical,
   Settings,
   Hexagon,
   LogOut,
@@ -26,6 +27,7 @@ const NAV = [
   { href: "/models", label: "Models", icon: Boxes },
   { href: "/releases", label: "Releases", icon: Rocket },
   { href: "/workloads", label: "Workloads", icon: Activity },
+  { href: "/playground", label: "Playground", icon: FlaskConical },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 

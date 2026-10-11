@@ -1,9 +1,11 @@
 "use client";
 
 import { ReactNode } from "react";
+import Link from "next/link";
 import { clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, ArrowRight } from "lucide-react";
+import { guidanceFor } from "@/lib/errors";
 
 export function cn(...args: Parameters<typeof clsx>) {
   return twMerge(clsx(...args));
@@ -123,7 +125,8 @@ export function LoadingRows({ rows = 4 }: { rows?: number }) {
 }
 
 // Fetch-failure state with a retry affordance — pass SWR's mutate() so a
-// click revalidates instead of reloading the page.
+// click revalidates instead of reloading the page. The mapped guidance
+// keeps even an opaque error actionable (never a bare "couldn't load").
 export function ErrorState({
   error,
   onRetry,
@@ -132,16 +135,80 @@ export function ErrorState({
   onRetry?: () => void;
 }) {
   const msg = error instanceof Error ? error.message : String(error ?? "request failed");
+  const g = guidanceFor(msg, "load");
   return (
     <div className="flex flex-col items-center justify-center gap-3 py-10 text-center">
       <div className="text-[12.5px] text-[var(--color-danger)]">
         Couldn&apos;t load — {msg}
+      </div>
+      <div className="max-w-[380px] text-[11.5px] leading-relaxed text-[var(--color-text-faint)]">
+        {g.detail}
+        {g.action && (
+          <>
+            {" "}
+            <Link
+              href={g.action.href}
+              className="text-[var(--color-accent)] hover:underline"
+            >
+              {g.action.label}
+            </Link>
+          </>
+        )}
       </div>
       {onRetry && (
         <button className="btn btn-sm" onClick={onRetry}>
           <RefreshCw size={12} /> Retry
         </button>
       )}
+    </div>
+  );
+}
+
+// Actionable error box for operation/request failures (not data loads —
+// those use ErrorState). Shows the raw error verbatim, then maps it via
+// lib/errors to a named failure class plus a concrete next step and a
+// link to where the fix lives. Unknown errors still get generic
+// guidance — never a bare "something went wrong".
+export function ErrorNote({
+  error,
+  title,
+  className,
+}: {
+  error: unknown;
+  /** Optional override for the mapped headline (e.g. "No capacity"). */
+  title?: string;
+  className?: string;
+}) {
+  const raw = error instanceof Error ? error.message : String(error ?? "request failed");
+  const g = guidanceFor(raw);
+  return (
+    <div
+      className={cn(
+        "rounded-md border border-[var(--color-danger)]/30 bg-[var(--color-danger-soft)] px-3 py-2",
+        className
+      )}
+    >
+      <div className="text-[12px] font-medium text-[var(--color-danger)]">
+        {title ?? g.title}
+      </div>
+      <div className="mono mt-1 break-words text-[11.5px] text-[var(--color-danger)]/80">
+        {raw}
+      </div>
+      <div className="mt-1.5 text-[11.5px] leading-relaxed text-[var(--color-text-dim)]">
+        {g.detail}
+        {g.action && (
+          <>
+            {" "}
+            <Link
+              href={g.action.href}
+              className="inline-flex items-center gap-0.5 text-[var(--color-accent)] hover:underline"
+            >
+              {g.action.label}
+              <ArrowRight size={10} />
+            </Link>
+          </>
+        )}
+      </div>
     </div>
   );
 }

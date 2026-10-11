@@ -94,6 +94,12 @@ export interface Node {
   maintenance?: "" | "draining" | "maintenance" | "updating";
   maintenance_reason?: string;
   maintenance_since?: string;
+  // v0.10+ agent-reported disk capacity — all three optional together,
+  // absent on older servers/agents. `disk_measured_at` is when the agent
+  // sampled it; render "as of" only, never as live.
+  disk_free_bytes?: number;
+  disk_total_bytes?: number;
+  disk_measured_at?: string;
 }
 
 export interface Overview {
@@ -480,6 +486,13 @@ export interface ControlPlaneStatus {
     epoch: number;
     started_at: string;
     heartbeat_age_seconds: number;
+  } | null;
+  // v0.10+ standby presence — the whole object is absent on older
+  // servers (absence = unknown, not "no standby").
+  standby?: {
+    present: boolean;
+    instance_id?: string;
+    heartbeat_age_seconds?: number;
   } | null;
   events?: ControlPlaneEvent[] | null;
 }

@@ -5,7 +5,7 @@ import {
   useModels, useModelOps, useNodes, usePlacement, api, MODEL_OPS_KEY,
 } from "@/lib/api";
 import { fmtBytes, fmtAgo, fmtDur, fmtIn } from "@/lib/format";
-import { Panel, Empty, Meter, ErrorState } from "@/components/ui";
+import { Panel, Empty, Meter, ErrorState, ErrorNote } from "@/components/ui";
 import { StatusBadge } from "@/components/status";
 import { ConfirmDialog } from "@/components/confirm";
 import { useSWRConfig } from "swr";
@@ -205,7 +205,9 @@ export default function ModelsPage() {
             </>
           )}
           {opErr && (
-            <div className="px-4 py-2.5 text-[11.5px] text-[var(--color-danger)]">{opErr}</div>
+            <div className="px-4 py-2.5">
+              <ErrorNote error={opErr} />
+            </div>
           )}
         </Panel>
       )}
@@ -436,7 +438,9 @@ export default function ModelsPage() {
             />
           ))}
           {opErr && activeOps.length === 0 && queuedOps.length === 0 && (
-            <div className="px-4 py-2.5 text-[11.5px] text-[var(--color-danger)]">{opErr}</div>
+            <div className="px-4 py-2.5">
+              <ErrorNote error={opErr} />
+            </div>
           )}
         </Panel>
       )}
@@ -593,11 +597,7 @@ function InstallDialog({
           )}
         </div>
 
-        {err && (
-          <div className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
-            {err}
-          </div>
-        )}
+        {err && <ErrorNote error={err} className="mt-3" />}
 
         <div className="mt-4 flex justify-end gap-2">
           <button className="btn btn-sm" onClick={onClose} disabled={busy}>

@@ -63,6 +63,13 @@ export function OnboardingChecklist() {
   const hasApproved = nodeList.some(
     (n) => n.status === "approved" || n.status === "revoked" // revoked ⇒ was approved once
   );
+  // A healthy engine on any approved node — models on a node imply the
+  // engine worked at report time, so count them too.
+  const hasEngine = nodeList.some(
+    (n) =>
+      n.status === "approved" &&
+      ((n.engines ?? []).some((e) => e.healthy) || (n.models ?? []).length > 0)
+  );
   const hasModels =
     (ov?.models_distinct ?? 0) > 0 ||
     (ops ?? []).some((o) => o.status === "succeeded" || o.status === "completed");
@@ -86,6 +93,12 @@ export function OnboardingChecklist() {
       action: { href: "/settings", label: "Pending approvals →" },
     },
     {
+      title: "Inference engine detected (e.g. Ollama)",
+      done: hasEngine,
+      action: { href: "/devices", label: "Check node →" },
+      hint: "install & start Ollama on the node",
+    },
+    {
       title: "Pull a model",
       done: hasModels,
       action: { href: "/models", label: "Models →" },
@@ -93,7 +106,8 @@ export function OnboardingChecklist() {
     {
       title: "Send your first inference",
       done: (anyWl ?? []).length > 0,
-      hint: "point any OpenAI client at the gateway",
+      action: { href: "/playground", label: "Playground →" },
+      hint: "or point any OpenAI client at the gateway",
     },
   ];
 
