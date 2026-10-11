@@ -70,13 +70,18 @@ The key is also printed once in `docker compose logs server`
 `.env` before first boot installs a known key instead of generating
 one; it is applied only while no admin key exists.
 
-The dashboard requires sign-in — the password above is generated on
-first boot, or set `LOCALMESH_DASHBOARD_PASSWORD` in `.env`.
+The dashboard is at **http://localhost:3000** (`LOCALMESH_WEB_PORT` to
+change it). It requires sign-in — the password above is generated on
+first boot, or set `LOCALMESH_DASHBOARD_PASSWORD` in `.env`. A
+fresh cluster shows a **Get started** checklist on the Overview page
+that tracks each step below live and links to the relevant page.
 
 ## 2. Create an enrollment token
 
 Dashboard: **Settings → Device enrollment → Create token**
-(label optional, set max uses and TTL).
+(label optional, set max uses — tokens expire after 24h). Or use the
+guided flow at **Devices → Add device**, which mints the token and
+builds the join command for you (steps 2–4 in one dialog).
 
 API:
 
@@ -126,45 +131,49 @@ openssl x509 -in ca.pem -outform DER | openssl dgst -sha256
 # (must match out-of-band — this is what proves you're joining YOUR cluster)
 
 localmesh-agent join \
-  -server https://<control-plane>:8443 \
-  -token lme_... \
-  -ca-fingerprint sha256:<hex-from-above>
+  --server https://<control-plane>:8443 \
+  --token lme_... \
+  --ca-fingerprint sha256:<hex-from-above>
 ```
 
-Without `-ca-fingerprint` the agent prints the fingerprint and trusts
+The **Devices → Add device** dialog generates this exact command with
+the token and CA fingerprint already filled in when the server reports
+them — copy it rather than assembling flags by hand.
+
+Without `--ca-fingerprint` the agent prints the fingerprint and trusts
 it (TOFU) — acceptable on a trusted LAN, pin it when in doubt. The
-name/IP in `-server` must appear in the server's `LOCALMESH_HOSTNAMES`
+name/IP in `--server` must appear in the server's `LOCALMESH_HOSTNAMES`
 SAN list or TLS verification fails (see
 [docs/troubleshooting.md](troubleshooting.md)).
 
-On the same LAN, `join -discover` finds the control plane itself —
-no `-server` needed:
+On the same LAN, `join --discover` finds the control plane itself —
+no `--server` needed (`--token` is still required):
 
 ```bash
-localmesh-agent join -discover -token lme_...
+localmesh-agent join --discover --token lme_...
 ```
 
 The agent browses mDNS for `_localmesh._tcp` advertisements, prints each
 discovered cluster with its CA fingerprint, and asks you to pick one
-when several answer (`-discover-instance <name>` selects directly,
-`-discover-timeout` sets the browse window). Discovery only locates the
+when several answer (`--discover-instance <name>` selects directly,
+`--discover-timeout` sets the browse window). Discovery only locates the
 endpoint — trust is still established by CA fingerprint verification and
 admin approval. mDNS is single-subnet multicast; across routed networks
-or VPNs keep using `-server`. In Docker's NAT'd networking the container
+or VPNs keep using `--server`. In Docker's NAT'd networking the container
 advertises only inside the docker network — LAN discovery needs a Linux
 host with `network_mode: host` or a bare-metal install. Disable with
 `LOCALMESH_DISCOVERY=off`.
 
 Flags:
 
-- `-name <name>` — display name (default: hostname)
-- `-ca-fingerprint sha256:<fp>` — pin the cluster CA; skip the TOFU warning
-- `-update-pubkey <file>` — pin the release signing public key so this
+- `--name <name>` — display name (default: hostname)
+- `--ca-fingerprint sha256:<fp>` — pin the cluster CA; skip the TOFU warning
+- `--update-pubkey <file>` — pin the release signing public key so this
   agent can take managed upgrades later (see *Keeping agents current*)
-- `-ollama-url <url>` — non-default Ollama endpoint
-- `-config <path>` — alternate config path (default `~/.localmesh/agent.json`)
-- `-wait 30m` — how long to poll for approval
-- `-run=false` — enroll only, don't start serving (the installer uses
+- `--ollama-url <url>` — non-default Ollama endpoint
+- `--config <path>` — alternate config path (default `~/.localmesh/agent.json`)
+- `--wait 30m` — how long to poll for approval
+- `--run=false` — enroll only, don't start serving (the installer uses
   this before handing lifecycle to the OS service)
 
 `join` submits the enrollment and **waits for approval**. It then writes
@@ -174,7 +183,9 @@ service manager for persistence — examples below.
 
 ## 5. Approve the enrollment
 
-Dashboard: **Settings → Device enrollment → Pending requests → Approve**.
+Dashboard: **Settings → Device enrollment → Pending approval → Approve**.
+The same pending list with Approve/Deny is embedded as step 3 of the
+**Devices → Add device** dialog — either works.
 
 API:
 
@@ -206,11 +217,21 @@ curl --cacert ca.pem -X POST https://localhost:8443/v1/chat/completions \
 curl --cacert ca.pem https://localhost:8443/api/v1/workloads -H "Authorization: Bearer $ADMIN_KEY"
 ```
 
-Other checks: dashboard **Devices** shows the node with live CPU/RAM
-meters; `localmesh-agent status` on the device prints its config;
+Dashboard alternatives: **Devices** shows the node with live CPU/RAM
+meters (click a node for hardware, engines, models, and disk), and the
+**Playground** page sends a real request through the gateway — its model
+picker only lists models a schedulable node can actually serve. Every
+request lands on the **Workloads** page with its routing decision.
+`localmesh-agent status` on the device prints its config;
 `localmesh-agent doctor` runs the full self-diagnostic (below).
 
 ## Install a model without touching the device
+
+Dashboard: **Models → Install model** — enter the model reference and
+pick target nodes (empty selection = all online approved nodes). The
+operations panel tracks queued → running → succeeded live.
+
+API:
 
 ```bash
 curl --cacert ca.pem -X POST https://localhost:8443/api/v1/models/pull \
@@ -250,11 +271,11 @@ Two paths, same signature verification:
 
 - **Managed (v0.7+)** — the control plane dispatches a registered signed
   release to the node; the agent verifies it against a release public
-  key pinned in its own config (`join -update-pubkey` above, or
+  key pinned in its own config (`join --update-pubkey` above, or
   `localmesh-agent update-key <file>` on an enrolled device), swaps the
   binary, and rolls back automatically on a failed health check. Runbook:
   [docs/updates-orchestration.md](updates-orchestration.md).
-- **Manual** — `localmesh-agent update -release <dir|URL> -pubkey
+- **Manual** — `localmesh-agent update --release <dir|URL> --pubkey
   <keyfile>` run on the device, or the file-copy runbook in
   [docs/agent-updates.md](agent-updates.md). The only path for pre-v0.7
   agents and unsigned dev builds.
@@ -265,7 +286,7 @@ protocol gate refuses an agent newer than its server.
 ## Diagnosing connectivity
 
 ```bash
-localmesh-agent doctor          # add -ca-file ca.pem to pin a different CA
+localmesh-agent doctor          # add --ca-file ca.pem to pin a different CA
 ```
 
 Prints one `PASS`/`WARN`/`FAIL` line per check and exits non-zero on any
@@ -297,7 +318,8 @@ physical fleet runbook in [docs/fleet-validation.md](fleet-validation.md).
 
 ## Revoking a device
 
-Dashboard: **Devices → <node> → Revoke**. The agent's credential stops
-authenticating immediately; reconnects are refused. `Reinstate` restores
-a revoked node (same credential). `Delete` removes the record entirely —
-the device must re-enroll.
+Dashboard: **Devices → click the node → Revoke access** (in the drawer's
+Danger zone). The agent's credential stops authenticating immediately;
+reconnects are refused. **Reinstate** restores a revoked node (same
+credential). **Remove node** deletes the record entirely — the device
+must re-enroll.

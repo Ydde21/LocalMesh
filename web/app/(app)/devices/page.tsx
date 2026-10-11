@@ -1134,7 +1134,9 @@ function AddDeviceDialog({ onClose }: { onClose: () => void }) {
                   <div className="text-[11.5px] leading-relaxed text-[var(--color-text-dim)]">
                     LAN discovery is on{disco.cluster_name ? ` (“${disco.cluster_name}”)` : ""} —
                     devices on this network can instead run{" "}
-                    <code className="mono text-[var(--color-text)]">localmesh-agent join --discover</code>
+                    <code className="mono text-[var(--color-text)]">
+                      {`localmesh-agent join --discover --token ${token || "<token>"}`}
+                    </code>
                     {disco.ca_fingerprint && (
                       <>
                         {" "}and verify CA fingerprint{" "}

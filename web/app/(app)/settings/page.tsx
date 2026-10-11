@@ -5,8 +5,8 @@ import {
   useEnrollTokens, useEnrollments, useAPIKeys, useSettings, useAudit,
   useDiagnostics, useOverview, api,
 } from "@/lib/api";
-import { fmtAgo, fmtMs, fmtUptime, fmtVersion } from "@/lib/format";
-import { Panel, Copyable } from "@/components/ui";
+import { fmtAgo, fmtIn, fmtMs, fmtUptime, fmtVersion } from "@/lib/format";
+import { Panel, Copyable, ErrorNote } from "@/components/ui";
 import { ConfirmDialog } from "@/components/confirm";
 import { ApiSnippets } from "@/components/api-snippets";
 import { useSWRConfig } from "swr";
@@ -63,6 +63,7 @@ function EnrollmentSection() {
   const [maxUses, setMaxUses] = useState("1");
   const [newToken, setNewToken] = useState("");
   const [err, setErr] = useState("");
+  const [actErr, setActErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [revokingTok, setRevokingTok] = useState<EnrollmentToken | null>(null);
   const [tokBusy, setTokBusy] = useState(false);
@@ -99,9 +100,14 @@ function EnrollmentSection() {
   };
 
   const act = async (path: string) => {
-    await api("POST", path);
-    mutPending();
-    mutTokens();
+    setActErr("");
+    try {
+      await api("POST", path);
+      mutPending();
+      mutTokens();
+    } catch (e) {
+      setActErr(e instanceof Error ? e.message : String(e));
+    }
   };
 
   return (
@@ -156,6 +162,7 @@ function EnrollmentSection() {
               </div>
             ))}
           </div>
+          {actErr && <ErrorNote error={actErr} className="mt-2.5" />}
         </div>
       )}
 
@@ -166,13 +173,15 @@ function EnrollmentSection() {
           <div className="space-y-1.5">
             {(tokens ?? []).map((t) => (
               <div key={t.id} className="flex items-center gap-3 rounded-md bg-white/[0.03] px-3.5 py-2">
-                <Copyable text={t.prefix + "…"} />
+                <Copyable text={t.prefix + "…"} copy={t.prefix} />
                 <span className="text-[12px] text-[var(--color-text-dim)]">{t.label || "—"}</span>
                 <span className="mono text-[11px] text-[var(--color-text-faint)]">
                   {t.uses}/{t.max_uses} uses
                 </span>
                 <span className="text-[10.5px] text-[var(--color-text-faint)]">
-                  expires {fmtAgo(t.expires_at).replace(" ago", "")}
+                  {new Date(t.expires_at) < new Date()
+                    ? `expired ${fmtAgo(t.expires_at)}`
+                    : `expires in ${fmtIn(t.expires_at)}`}
                 </span>
                 {t.revoked_at && <span className="badge badge-danger">revoked</span>}
                 {!t.revoked_at && new Date(t.expires_at) < new Date() && (
@@ -218,6 +227,7 @@ function APIKeysSection() {
   const [role, setRole] = useState("inference");
   const [newKey, setNewKey] = useState("");
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
   const [revoking, setRevoking] = useState<APIKey | null>(null);
   const [revErr, setRevErr] = useState("");
 
@@ -239,11 +249,14 @@ function APIKeysSection() {
   const create = async () => {
     if (!name.trim()) return;
     setBusy(true);
+    setErr("");
     try {
       const res = await api<{ key: string }>("POST", "/api-keys", { name: name.trim(), role });
       setNewKey(res.key);
       setName("");
       mutate();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -265,6 +278,13 @@ function APIKeysSection() {
           <Plus size={13} /> Create key
         </button>
       </div>
+      <p className="mt-2 text-[11px] leading-relaxed text-[var(--color-text-faint)]">
+        <span className="mono">inference</span> — OpenAI gateway calls only (/v1/chat/completions,
+        /v1/models); hand this to apps.
+        {" "}<span className="mono">readonly</span> — read-only admin API (GETs).
+        {" "}<span className="mono">admin</span> — full control plane access.
+      </p>
+      {err && <ErrorNote error={err} className="mt-3 max-w-[560px]" />}
 
       {newKey && (
         <div className="mt-3 rounded-md border border-[var(--color-online)]/30 bg-[var(--color-online-soft)] px-3.5 py-3">
@@ -286,7 +306,7 @@ function APIKeysSection() {
       <div className="mt-4 space-y-1.5">
         {(keys ?? []).map((k) => (
           <div key={k.id} className="flex items-center gap-3 rounded-md bg-white/[0.03] px-3.5 py-2">
-            <Copyable text={k.prefix + "…"} />
+            <Copyable text={k.prefix + "…"} copy={k.prefix} />
             <span className="text-[12.5px] font-medium">{k.name}</span>
             <span className="badge badge-neutral">{k.role}</span>
             {k.revoked_at && <span className="badge badge-danger">revoked</span>}

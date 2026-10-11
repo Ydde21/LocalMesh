@@ -34,7 +34,7 @@ function WorkloadsInner() {
             Inference requests and routing decisions
           </p>
         </div>
-        <div className="flex gap-1.5">
+        <div className="flex flex-wrap justify-end gap-1.5">
           {["", "running", "queued", "completed", "failed", "cancelled"].map((f) => (
             <button
               key={f || "all"}
@@ -80,7 +80,16 @@ function WorkloadsInner() {
                   style={{ borderColor: "var(--color-border)" }}
                   onClick={() => router.push(`/workloads?id=${w.id}`)}
                 >
-                  <Td><span className="mono text-[12.5px] font-medium">{w.model}</span>
+                  <Td>
+                    {/* The row click is mouse-only; the model name is a real
+                        link so the detail opens by keyboard too. */}
+                    <Link
+                      href={`/workloads?id=${w.id}`}
+                      className="mono text-[12.5px] font-medium hover:underline"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {w.model}
+                    </Link>
                     {w.streaming && <span className="ml-2 badge badge-neutral !py-0">stream</span>}
                   </Td>
                   <Td><span className="text-[12px]">{w.node_name || "—"}</span></Td>

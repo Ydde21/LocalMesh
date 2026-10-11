@@ -139,15 +139,24 @@ export default function PlaygroundPage() {
   const nodeName = wl?.node_name ?? "";
 
   // Fallback when the events feed missed it (dropped connection): one
-  // list fetch after the stream settles, still prefix-matched.
+  // list fetch after the stream settles, still prefix-matched. The row
+  // can lag the stream end — the backend finalizes asynchronously — so
+  // a non-terminal row gets one retry before we take it on faith.
+  const fetchWorkloadRow = async (prefix: string) => {
+    const rows = (await fetch("/api/lm/workloads?limit=25", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : []))
+      .catch(() => [])) as Workload[];
+    return rows.find((x) => typeof x.id === "string" && x.id.startsWith(prefix));
+  };
   const resolveWorkload = async () => {
     const prefix = wlPrefixRef.current;
     if (!prefix) return;
     try {
-      const rows = (await fetch("/api/lm/workloads?limit=25", { cache: "no-store" })
-        .then((r) => (r.ok ? r.json() : []))
-        .catch(() => [])) as Workload[];
-      const w = rows.find((x) => typeof x.id === "string" && x.id.startsWith(prefix));
+      let w = await fetchWorkloadRow(prefix);
+      if (w && (w.status === "queued" || w.status === "running")) {
+        await new Promise((r) => setTimeout(r, 1500));
+        w = (await fetchWorkloadRow(prefix)) ?? w;
+      }
       if (w) setFallbackWl(w);
     } catch {
       /* attribution is best-effort */
@@ -308,17 +317,25 @@ export default function PlaygroundPage() {
       : null;
   void tick; // ticker state — value itself is only a re-render trigger
 
+  // The workload row is authoritative once it reaches a terminal state.
+  // A stream that was cut off can still end with reader `done` — a lost
+  // error chunk, a proxy drop, a node gone mid-decode — so "done" only
+  // stands while the row agrees. A finished row reporting failed/
+  // cancelled makes the verdict honest instead of a fake "completed".
+  const wlFailed = phase === "done" && wl?.status === "failed";
+  const wlCancelled = phase === "done" && wl?.status === "cancelled";
+
   const phaseStatus =
-    phase === "sending"
-      ? "queued"
-      : phase === "streaming"
-        ? "running"
-        : phase === "done"
-          ? "completed"
-          : phase === "error"
-            ? "failed"
-            : phase === "cancelled"
-              ? "cancelled"
+    wlFailed || phase === "error"
+      ? "failed"
+      : wlCancelled || phase === "cancelled"
+        ? "cancelled"
+        : phase === "sending"
+          ? "queued"
+          : phase === "streaming"
+            ? "running"
+            : phase === "done"
+              ? "completed"
               : "";
 
   return (
@@ -364,6 +381,7 @@ export default function PlaygroundPage() {
             <>
               <select
                 className="input mono w-full"
+                aria-label="Model"
                 value={model}
                 onChange={(e) => {
                   setModel(e.target.value);
@@ -417,6 +435,7 @@ export default function PlaygroundPage() {
               <div className="label mb-1.5">Route</div>
               <select
                 className="input w-full"
+                aria-label="Route — pin to a node or let the scheduler pick"
                 value={pinValid ? preferNode : ""}
                 onChange={(e) => setPreferNode(e.target.value)}
                 disabled={busy}
@@ -434,6 +453,7 @@ export default function PlaygroundPage() {
           <div className="label mb-1.5 mt-4">Prompt</div>
           <textarea
             className="input min-h-[130px] w-full resize-y"
+            aria-label="Prompt"
             placeholder="Ask the cluster something…"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
@@ -454,6 +474,7 @@ export default function PlaygroundPage() {
                 className="input mono w-full"
                 type="number"
                 min={1}
+                aria-label="Max tokens"
                 placeholder="engine default"
                 value={maxTokens}
                 onChange={(e) => setMaxTokens(e.target.value)}
@@ -468,6 +489,7 @@ export default function PlaygroundPage() {
                 min={0}
                 max={2}
                 step={0.1}
+                aria-label="Temperature"
                 placeholder="engine default"
                 value={temperature}
                 onChange={(e) => setTemperature(e.target.value)}
@@ -565,6 +587,22 @@ export default function PlaygroundPage() {
               </div>
             )}
             {phase === "error" && <ErrorNote error={errText} className="mt-2" />}
+            {wlFailed && (
+              <ErrorNote
+                error={
+                  wl?.error ||
+                  "the response stream ended before the workload finished"
+                }
+                title="Interrupted — the stream was cut short"
+                className="mt-2"
+              />
+            )}
+            {wlCancelled && (
+              <div className="mt-2 rounded-md border border-[var(--color-border)] bg-white/[0.03] px-3 py-2 text-[12px] text-[var(--color-text-dim)]">
+                Cancelled — the control plane marked this workload{" "}
+                <span className="mono">cancelled</span> (client disconnect).
+              </div>
+            )}
             {phase === "cancelled" && (
               <div className="mt-2 rounded-md border border-[var(--color-border)] bg-white/[0.03] px-3 py-2 text-[12px] text-[var(--color-text-dim)]">
                 Cancelled — the request was aborted client-side; the server marks this
