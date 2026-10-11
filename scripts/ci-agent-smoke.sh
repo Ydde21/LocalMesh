@@ -152,6 +152,12 @@ fail_lines() { # count FAIL check lines in captured output
 # Ports are deliberately dead: 127.0.0.1:9 (discard) for the control
 # plane and 127.0.0.1:1 for the engine — deterministic failures, fast.
 CFG="$AGENT_DIR_POSIX/agent.json"
+# status echoes the config path as the BINARY sees it — native form on
+# windows (backslashes), POSIX elsewhere. grep -F keeps it literal.
+CFG_NATIVE="$CFG"
+if [ "$is_windows" -eq 1 ] && have cygpath; then
+  CFG_NATIVE="$(cygpath -w "$CFG")"
+fi
 DEAD_SERVER="http://127.0.0.1:9"
 DEAD_ENGINE="http://127.0.0.1:1"
 write_cfg() {
@@ -173,7 +179,7 @@ if [ "$st_code" -eq 0 ] \
   && printf '%s' "$st_out" | grep -q "server:  $DEAD_SERVER" \
   && printf '%s' "$st_out" | grep -q "node id: ci-smoke-node" \
   && printf '%s' "$st_out" | grep -q "name:    ci-smoke" \
-  && printf '%s' "$st_out" | grep -q "config:  $CFG"; then
+  && printf '%s' "$st_out" | grep -qF "config:  $CFG_NATIVE"; then
   pass "config round-trip: status reads persisted agent.json"
 else
   bad "config round-trip" "status (exit $st_code) did not echo the written config: $st_out"
