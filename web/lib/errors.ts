@@ -75,7 +75,10 @@ const RULES: Rule[] = [
   // --- TLS / connectivity (agent → control plane) -------------------------
   {
     any: ["certificate", "x509", "tls:"],
-    none: ["certificate has not"],
+    // "control plane unreachable: …" is the BFF proxy's own 502 — the
+    // failing hop is dashboard→control-plane, not agent→control-plane,
+    // so agent-side guidance would misattribute it.
+    none: ["certificate has not", "control plane unreachable"],
     guidance: {
       title: "TLS verification failed",
       detail:
@@ -91,7 +94,7 @@ const RULES: Rule[] = [
       "i/o timeout",
       "tls handshake timeout",
     ],
-    none: ["engine unreachable", "ollama"],
+    none: ["engine unreachable", "ollama", "control plane unreachable"],
     guidance: {
       title: "Can't reach the control plane",
       detail:
@@ -208,6 +211,7 @@ const RULES: Rule[] = [
   // carries both a status phrase and a real reason.
   {
     any: [
+      "control plane unreachable", // the BFF proxy's own 502 prefix
       "fetch failed",
       "failed to fetch",
       "networkerror",

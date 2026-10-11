@@ -289,13 +289,15 @@ export default function ModelsPage() {
                       <Td><span className="mono text-[12px]">{fmtBytes(m.size_bytes)}</span></Td>
                       <Td>
                         {m.digest ? (
-                          <code
+                          <button
+                            type="button"
                             className="mono cursor-pointer text-[10.5px] text-[var(--color-text-faint)] transition-colors hover:text-[var(--color-text-dim)]"
                             title={`${m.digest} — click to copy`}
+                            aria-label={`Copy digest ${m.digest}`}
                             onClick={() => navigator.clipboard.writeText(m.digest!)}
                           >
                             {m.digest.replace(/^sha256:/, "").slice(0, 12)}
-                          </code>
+                          </button>
                         ) : (
                           <span className="text-[11px] text-[var(--color-text-faint)]">—</span>
                         )}

@@ -93,14 +93,16 @@ export function Empty({
   );
 }
 
-export function Copyable({ text, mono = true }: { text: string; mono?: boolean }) {
-  // A real <button> — click-to-copy must be keyboard-operable.
+export function Copyable({ text, copy, mono = true }: { text: string; copy?: string; mono?: boolean }) {
+  // A real <button> — click-to-copy must be keyboard-operable. `copy`
+  // overrides what lands on the clipboard for displays that truncate
+  // (e.g. show "lme_abc…" but copy the clean prefix, not the ellipsis).
   return (
     <button
       type="button"
       className={`${mono ? "mono" : ""} cursor-pointer rounded bg-white/[0.06] px-1.5 py-0.5 text-[11px] text-[var(--color-text-dim)] transition-colors hover:bg-white/[0.1]`}
       title="Click to copy"
-      onClick={() => navigator.clipboard.writeText(text)}
+      onClick={() => navigator.clipboard.writeText(copy ?? text)}
     >
       {text}
     </button>
