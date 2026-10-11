@@ -98,15 +98,18 @@ curl --cacert ca.pem -X POST https://localhost:8443/api/v1/enrollment-tokens \
 ### macOS / Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/localmesh/localmesh/main/scripts/install-agent.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Ydde21/LocalMesh/main/scripts/install-agent.sh | \
+  LOCALMESH_REPO=Ydde21/LocalMesh sh
 ```
 
 The installer detects OS/arch, resolves the release manifest, verifies
 the artifact's SHA-256 (and the minisign signature when
 `LOCALMESH_RELEASE_PUBKEY` + `minisign` are present), then installs to
-`/usr/local/bin` (or `~/.local/bin` without root). Or build from source
-(`make build` → `bin/localmesh-agent`), or download a release binary
-yourself (see `docs/releases.md`).
+`/usr/local/bin` (or `~/.local/bin` without root). `LOCALMESH_REPO`
+names the GitHub `owner/repo` release binaries come from — set it when
+installing from a fork or mirror. Or build from source (`make build` →
+`bin/localmesh-agent`), or download a release binary yourself (see
+`docs/releases.md`).
 
 ### Windows (PowerShell)
 
@@ -169,7 +172,9 @@ Flags:
 - `--name <name>` — display name (default: hostname)
 - `--ca-fingerprint sha256:<fp>` — pin the cluster CA; skip the TOFU warning
 - `--update-pubkey <file>` — pin the release signing public key so this
-  agent can take managed upgrades later (see *Keeping agents current*)
+  agent can take managed upgrades later — the production key for
+  LocalMesh releases is committed at `keys/localmesh-release.pub`
+  (key id `0538AA36C3BC9FD3`; see *Keeping agents current*)
 - `--ollama-url <url>` — non-default Ollama endpoint
 - `--config <path>` — alternate config path (default `~/.localmesh/agent.json`)
 - `--wait 30m` — how long to poll for approval
@@ -273,7 +278,11 @@ Two paths, same signature verification:
   release to the node; the agent verifies it against a release public
   key pinned in its own config (`join --update-pubkey` above, or
   `localmesh-agent update-key <file>` on an enrolled device), swaps the
-  binary, and rolls back automatically on a failed health check. Runbook:
+  binary, and rolls back automatically on a failed health check. The
+  production key for official LocalMesh releases ships in the repo at
+  `keys/localmesh-release.pub` (key id `0538AA36C3BC9FD3`) — copy it to
+  the device and run `localmesh-agent update-key localmesh-release.pub`,
+  or pass it to `join` with `--update-pubkey`. Runbook:
   [docs/updates-orchestration.md](updates-orchestration.md).
 - **Manual** — `localmesh-agent update --release <dir|URL> --pubkey
   <keyfile>` run on the device, or the file-copy runbook in

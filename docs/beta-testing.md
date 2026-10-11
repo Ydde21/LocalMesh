@@ -8,17 +8,17 @@ physical machines, on different OSes and networks?*
 The full beta assumes ≥2 devices and ~an hour. Only have **one**
 device? Your hardware datapoint still counts — run
 `scripts/hw-validate.sh` and file a
-[Hardware compatibility report](https://github.com/localmesh/localmesh/issues/new?template=hardware-compat.md);
+[Hardware compatibility report](https://github.com/Ydde21/LocalMesh/issues/new?template=hardware-compat.md);
 it lands as a row in [docs/hardware-matrix.md](hardware-matrix.md).
 You bring the hardware; we ship the validation kit:
 
 | Piece | Where | What it does |
 |---|---|---|
 | `scripts/beta-validate.sh` | this repo | the fleet driver — runs the scriptable legs automatically, prompts you through the operator legs, and writes a **redacted evidence bundle** |
-| [Beta validation report](https://github.com/localmesh/localmesh/issues/new?template=beta-validation.md) | GitHub issue template | the structured form multi-device results land in |
+| [Beta validation report](https://github.com/Ydde21/LocalMesh/issues/new?template=beta-validation.md) | GitHub issue template | the structured form multi-device results land in |
 | [docs/fleet-validation.md](fleet-validation.md) | this repo | the deep-dive runbook if you want to exercise every leg by hand (curl-level) instead of at smoke depth |
 | `scripts/hw-validate.sh` | this repo | the **single-device** validator — one command, stricter redaction (hashed hostname, /24 IPs, basename paths), emits a paste-ready matrix row |
-| [Hardware compatibility report](https://github.com/localmesh/localmesh/issues/new?template=hardware-compat.md) | GitHub issue template | the structured form single-device results land in |
+| [Hardware compatibility report](https://github.com/Ydde21/LocalMesh/issues/new?template=hardware-compat.md) | GitHub issue template | the structured form single-device results land in |
 | [docs/hardware-matrix.md](hardware-matrix.md) | this repo | the living compatibility matrix every device-level report feeds |
 | `scripts/fleet-check.sh` / `scripts/fleet-report.sh` | this repo | the lower-level probes the drivers build on |
 
@@ -94,7 +94,8 @@ full matrix):
 
 ```bash
 # macOS / Linux — installer (verifies SHA-256 before installing):
-curl -fsSL https://raw.githubusercontent.com/localmesh/localmesh/main/scripts/install-agent.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Ydde21/LocalMesh/main/scripts/install-agent.sh | \
+  LOCALMESH_REPO=Ydde21/LocalMesh sh
 
 # Windows — PowerShell installer:
 powershell -ExecutionPolicy Bypass -File install-agent.ps1
@@ -192,7 +193,7 @@ is the honesty standard your verdict is measured against.
 
 ## 5. File the report
 
-Open a [Beta validation report](https://github.com/localmesh/localmesh/issues/new?template=beta-validation.md)
+Open a [Beta validation report](https://github.com/Ydde21/LocalMesh/issues/new?template=beta-validation.md)
 issue and:
 
 1. Fill the environment table — **one row per device** (OS, arch, CPU,
@@ -225,14 +226,14 @@ The evidence bundle is **redacted by construction** — the same contract
 ## Where to file what
 
 - **Multi-device validation results** (worked / partially worked / failed):
-  [Beta validation report](https://github.com/localmesh/localmesh/issues/new?template=beta-validation.md)
+  [Beta validation report](https://github.com/Ydde21/LocalMesh/issues/new?template=beta-validation.md)
   template — the checklist + bundle format above.
 - **Single-device compatibility datapoint**:
-  [Hardware compatibility report](https://github.com/localmesh/localmesh/issues/new?template=hardware-compat.md)
+  [Hardware compatibility report](https://github.com/Ydde21/LocalMesh/issues/new?template=hardware-compat.md)
   template — attach the `hw-validate.sh` bundle; lands as a row in
   [docs/hardware-matrix.md](hardware-matrix.md).
 - **A concrete bug** found during the run:
-  [bug report](https://github.com/localmesh/localmesh/issues/new?template=bug_report.md)
+  [bug report](https://github.com/Ydde21/LocalMesh/issues/new?template=bug_report.md)
   template — repro steps + `localmesh-agent doctor`/`report` output.
 - **Security issues**: never a public issue — see
   [SECURITY.md](../SECURITY.md) (GitHub Security Advisories).

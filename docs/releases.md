@@ -124,14 +124,15 @@ mirror you downloaded the binaries from:
 ```bash
 # from a trusted clone/tag:
 git show v0.10.0:keys/localmesh-release.pub > localmesh-release.pub
-# (until the production key is committed, keys/localmesh-dev.pub
-# verifies DEV-signed RC builds only — it is not a trust anchor)
+# (keys/localmesh-dev.pub verifies DEV-signed RC builds only —
+# it is not a trust anchor)
 ```
 
 Cross-check the key's identity against the fingerprint published in
 the release notes: the manifest's `signer.key_id` must equal it, and
-the verifier prints it (for minisign keys it is the hex keynum, e.g.
-`7E7C3A36C493E4C1`).
+the verifier prints it (for minisign keys it is the le64 hex keynum
+`minisign` prints — `0538AA36C3BC9FD3` on the production key;
+`7E7C3A36C493E4C1` is the dev key id seen on dev-signed rc manifests).
 
 ### Step 2 — download the release files
 
@@ -140,7 +141,7 @@ You need at minimum `SHA256SUMS`, `SHA256SUMS.minisig`,
 artifact(s) you will install, in one directory:
 
 ```bash
-base=https://releases.example.com/v0.10.0
+base=https://github.com/Ydde21/LocalMesh/releases/download/v0.10.0
 for f in SHA256SUMS SHA256SUMS.minisig release-manifest.json \
          release-manifest.json.minisig localmesh-agent-0.10.0-linux-amd64; do
   curl -fsSL "$base/$f" -o "dist/$f"
@@ -195,7 +196,7 @@ banner) when `signer.dev` is set — a WARN is allowed to exit 0, so
 ```bash
 # dry-run: fetch metadata, verify signature + checksums + protocol,
 # print the plan — touches nothing else
-localmesh-agent update -release https://releases.example.com/v0.6.0 \
+localmesh-agent update -release https://github.com/Ydde21/LocalMesh/releases/download/v0.10.0 \
   -pubkey ~/localmesh-release.pub
 
 # apply: stage <bin>.new, verify, swap, keep <bin>.bak

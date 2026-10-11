@@ -18,9 +18,13 @@ plane registers it (`release_keys` row); `verify-release.sh` wants it
 via `--pubkey`. **The secret half is the crown jewel** — whoever holds
 it can ship code to every agent that pins its public key.
 
-v0.9 and earlier were signed with a throwaway dev key. The first
-maintainer-signed release establishes the production `key_id` that
-fleet pinning anchors on — treat that first key ceremony accordingly.
+v0.9 and earlier — and the `0.10.0-rcN` candidates — were signed with
+a throwaway dev key (`7E7C3A36C493E4C1`). `v0.10.0` is the first
+maintainer-signed release: it established the production `key_id`
+**`0538AA36C3BC9FD3`** (le64 hex — the string `minisign` prints) that
+fleet pinning anchors on, with the public half committed at
+`keys/localmesh-release.pub`. The first-use ceremony below is the
+record of that activation — and the template for rotation.
 
 ## Generating keys
 
@@ -84,8 +88,9 @@ echo test > /tmp/t && minisign -S -s ~/.localmesh/keys/localmesh-release.sec -m 
   && minisign -V -p ~/.localmesh/keys/localmesh-release.pub -m /tmp/t && rm /tmp/t*
 ```
 
-The key id the public key resolves to (e.g. `7E7C3A36C493E4C1`-style
-hex for minisign, `sha256:…` for PEM) is the **fingerprint** — write it
+The key id the public key resolves to (le64 hex for minisign — e.g.
+`7E7C3A36C493E4C1` on the dev key, `0538AA36C3BC9FD3` on the production
+key; `sha256:…` for PEM) is the **fingerprint** — write it
 down separately from the keys; the activation ceremony and the release
 notes publish it. Passphrase practice: store it in a password manager
 immediately, never in shell history, a dotfile, or a CI variable that
@@ -159,6 +164,13 @@ Resolution order and guards:
 `preflight` → `keygen` → `check` — with the same guards (no clobber,
 self sign/verify proof, dev keys can't stand in). The manual steps
 remain authoritative:
+
+> **Status: performed for `v0.10.0`** — the production key (id
+> `0538AA36C3BC9FD3`) is generated, committed at
+> `keys/localmesh-release.pub`, announced in the 0.10.0 release notes,
+> and is the signer of record for published releases. The steps below
+> remain the runbook for key rotation and for operators standing up
+> their own signing identity.
 
 The first maintainer-signed release is when the production `key_id`
 becomes a fleet trust anchor — do these steps in order, once:

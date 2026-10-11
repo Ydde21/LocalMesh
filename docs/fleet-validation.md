@@ -175,7 +175,8 @@ On device 1:
 
 ```bash
 # Option A — installer script:
-curl -fsSL https://raw.githubusercontent.com/localmesh/localmesh/main/scripts/install-agent.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Ydde21/LocalMesh/main/scripts/install-agent.sh | \
+  LOCALMESH_REPO=Ydde21/LocalMesh sh
 
 # Option B — release binary matching this machine (versioned name):
 chmod +x localmesh-agent-<ver>-darwin-arm64
@@ -208,7 +209,8 @@ saw; compare it against the server log before approving.
 ## 5. Join device 2 (Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/localmesh/localmesh/main/scripts/install-agent.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Ydde21/LocalMesh/main/scripts/install-agent.sh | \
+  LOCALMESH_REPO=Ydde21/LocalMesh sh
 # or: sudo install -m755 localmesh-agent-<ver>-linux-amd64 /usr/local/bin/localmesh-agent
 
 localmesh-agent join \

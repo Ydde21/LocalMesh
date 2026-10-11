@@ -229,11 +229,12 @@ to trust*. The trust rules:
 
 **Chain of trust, end to end.** The maintainer generates the release
 key offline and publishes only the public half — committed as
-`keys/localmesh-release.pub` (commit/tag authenticity is the
-distribution channel) with its fingerprint announced in the release
-notes. `release.sh` signs `SHA256SUMS` + `release-manifest.json`; the
-manifest lists every artifact's sha256, so *signature → sums → artifact*
-is a complete chain from the maintainer key to the binary. The last hop
+`keys/localmesh-release.pub` (production key id `0538AA36C3BC9FD3`;
+commit/tag authenticity is the distribution channel) with its
+fingerprint announced in the release notes. `release.sh` signs
+`SHA256SUMS` + `release-manifest.json`; the manifest lists every
+artifact's sha256, so *signature → sums → artifact* is a complete
+chain from the maintainer key to the binary. The last hop
 is agent-local: a dispatched `agent_upgrade` frame names only a signer
 `key_id` and a release source; the agent (`internal/agent/upgrade.go`,
 `internal/agent/update`) then

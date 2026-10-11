@@ -122,10 +122,10 @@ make build && ./bin/localmesh-agent join \
   -server https://<control-plane>:8443 \
   -token <enrollment-token>
 
-# or the installer (macOS/Linux; install-agent.ps1 on Windows):
-# downloads the latest PUBLISHED release — until 0.10.0 is
-# maintainer-signed and published, build from source as above
-curl -fsSL https://raw.githubusercontent.com/localmesh/localmesh/main/scripts/install-agent.sh | \
+# or the installer (macOS/Linux; install-agent.ps1 on Windows) —
+# downloads + checksum-verifies the latest published release:
+curl -fsSL https://raw.githubusercontent.com/Ydde21/LocalMesh/main/scripts/install-agent.sh | \
+  LOCALMESH_REPO=Ydde21/LocalMesh \
   sh -s -- --server https://<control-plane>:8443 --token <enrollment-token>
 ```
 
@@ -336,15 +336,20 @@ make verify                       # full regression gate (fmt+vet+tests+race+web
 
 ## Release status
 
-v0.10 is at **release candidate**: `0.10.0-rc1` exists built and signed
-with a *dev* key (manifest marks `signer.dev: true`) — it is for
-validation, not fleet trust. The first trusted published release
-(`0.10.0`) is gated on maintainer signing with the production release
-key; agents only ever install updates signed by the operator-pinned
-key, so a dev-signed build can never silently ship to a fleet.
-Draft notes: [docs/release-notes-0.10.md](docs/release-notes-0.10.md).
-Process: [docs/releases.md](docs/releases.md) +
-[docs/release-signing.md](docs/release-signing.md).
+**v0.10.0 is published** — the first maintainer-signed release:
+[`v0.10.0`](https://github.com/Ydde21/LocalMesh/releases/tag/v0.10.0)
+(tag → commit `769bc3f`). Releases are signed with the production
+release key, id `0538AA36C3BC9FD3` (le64 hex — the string `minisign`
+prints); the public half is committed at
+[`keys/localmesh-release.pub`](keys/localmesh-release.pub). Verify a
+download with `scripts/verify-release.sh` before installing — runbook:
+[docs/releases.md](docs/releases.md). Dev-signed `0.10.0-rcN`
+candidates (`signer.dev: true`, dev key `7E7C3A36C493E4C1`) were
+validation builds only — never pin that key on a fleet. Agents only
+ever install updates signed by the operator-pinned key, so a
+dev-signed build can never silently ship to a fleet.
+Notes: [docs/release-notes-0.10.md](docs/release-notes-0.10.md).
+Signing: [docs/release-signing.md](docs/release-signing.md).
 
 ## License
 

@@ -62,7 +62,7 @@ appears when a real run produces evidence.
    sanitized by construction (hostnames hashed, creds/IPs/paths
    scrubbed, prompts/completions never recorded).
 2. Open a
-   [Hardware compatibility report](https://github.com/localmesh/localmesh/issues/new?template=hardware-compat.md)
+   [Hardware compatibility report](https://github.com/Ydde21/LocalMesh/issues/new?template=hardware-compat.md)
    issue and attach both files. The issue template collects the
    operator-only fields the script can't see (service lifecycle,
    restart persistence, physical-network description).
