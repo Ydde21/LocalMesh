@@ -16,3 +16,11 @@ exclude:
   - "**/dist/**"
   - "**/bin/**"
   - "**/data/**"
+  # Build litter, not source: untracked binaries a developer produced
+  # in-tree (e.g. `go build -o localmesh-agent.exe`) carry whatever
+  # toolchain built them — cataloging them fails the gate on artifacts
+  # that are never part of the source distribution.
+  - "**/*.exe"
+  - "**/*.dll"
+  - "**/*.so"
+  - "**/*.dylib"

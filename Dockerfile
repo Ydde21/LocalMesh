@@ -14,7 +14,11 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/localmesh-server .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/localmesh-router ./cmd/localmesh-router
 
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates && adduser -D -u 10001 localmesh \
+# apk upgrade pulls the current patched libcrypto3/libssl3/zlib — the
+# base tag lags alpine security fixes (release-scan: CVE-2026-84782
+# et al, reachable via the https healthcheck).
+RUN apk upgrade --no-cache && apk add --no-cache ca-certificates \
+    && adduser -D -u 10001 localmesh \
     && mkdir -p /data && chown localmesh:localmesh /data
 COPY --from=build /out/localmesh-server /usr/local/bin/localmesh-server
 COPY --from=build /out/localmesh-router /usr/local/bin/localmesh-router
