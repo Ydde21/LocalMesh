@@ -67,6 +67,12 @@ type Metrics struct {
 	ActiveRequests       int      `json:"active_requests"` // in-flight inference on this node
 	LoadedModels         []string `json:"loaded_models,omitempty"`
 	UptimeSeconds        int64    `json:"uptime_seconds"`
+	// Disk bytes on the filesystem holding the agent state dir (where
+	// update staging lands). DiskMeasured=false → fields are unknown,
+	// never 0.
+	DiskFreeBytes  uint64 `json:"disk_free_bytes,omitempty"`
+	DiskTotalBytes uint64 `json:"disk_total_bytes,omitempty"`
+	DiskMeasured   bool   `json:"disk_measured,omitempty"`
 	// Measured flags: when false, the corresponding field is UNKNOWN —
 	// the platform could not produce a real measurement this cycle.
 	// Consumers must not interpret an unmeasured value as 0/idle/free.

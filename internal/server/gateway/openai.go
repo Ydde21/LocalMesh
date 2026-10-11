@@ -493,6 +493,8 @@ func (g *Gateway) finishWorkload(ctx context.Context, wl *store.Workload, status
 	}
 	wl.Status = status
 	wl.Error = errStr
+	wl.TTFTms = ttft
+	wl.TotalMS = total
 	g.ev.Publish("workload.finished", wl)
 }
 

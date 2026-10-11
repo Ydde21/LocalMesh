@@ -2,8 +2,12 @@ package hardware
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
+
+	"github.com/shirou/gopsutil/v4/disk"
 
 	"github.com/localmesh/localmesh/internal/contracts"
 )
@@ -20,8 +24,9 @@ var commandContext = exec.CommandContext
 // Metrics samples live utilization. It is cheap enough to run every few
 // seconds. Each *_measured flag is set only when the platform produced a
 // real measurement this cycle; unmeasured fields stay zero and must not
-// be read as idle/free.
-func Metrics(ctx context.Context, active int, loaded []string) contracts.Metrics {
+// be read as idle/free. diskDir picks the filesystem the disk fields
+// describe — pass the agent state dir; "" walks up from the cwd.
+func Metrics(ctx context.Context, active int, loaded []string, diskDir string) contracts.Metrics {
 	m := contracts.Metrics{
 		ActiveRequests: active,
 		LoadedModels:   loaded,
@@ -35,7 +40,33 @@ func Metrics(ctx context.Context, active int, loaded []string) contracts.Metrics
 	m.MemoryUsedBytes, m.MemoryTotalBytes, m.MemoryAvailableBytes, availOK = sampleMemory(ctx)
 	m.MemAvailMeasured = availOK
 	m.GPUUtilPercent, m.GPUVRAMUsedBytes, m.GPUUtilMeasured, m.VRAMUsedMeasured = sampleGPU(ctx)
+	m.DiskFreeBytes, m.DiskTotalBytes, m.DiskMeasured = sampleDisk(diskDir)
 	return m
+}
+
+// sampleDisk reports free/total bytes on the filesystem holding dir,
+// walking to the nearest existing ancestor first (a pre-join state dir
+// may not exist yet). Fail-open: an unmeasurable filesystem just leaves
+// the measured flag false.
+func sampleDisk(dir string) (free, total uint64, ok bool) {
+	if dir == "" {
+		dir = "."
+	}
+	for {
+		if _, err := os.Stat(dir); err == nil {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return 0, 0, false
+		}
+		dir = parent
+	}
+	u, err := disk.Usage(dir)
+	if err != nil {
+		return 0, 0, false
+	}
+	return u.Free, u.Total, true
 }
 
 // sampleGPU returns aggregate GPU util% and used VRAM via nvidia-smi.

@@ -436,6 +436,12 @@ func (h *Hub) handleFrame(ctx context.Context, nc *conn, env contracts.Envelope)
 		if err := h.st.UpdateNodeMetrics(ctx, nc.node.ID, m); err != nil {
 			h.log.Debug("persist metrics", "err", err)
 		}
+		if m.DiskMeasured {
+			if err := h.st.UpdateNodeDisk(ctx, nc.node.ID,
+				int64(m.DiskFreeBytes), int64(m.DiskTotalBytes)); err != nil {
+				h.log.Debug("persist disk metrics", "err", err)
+			}
+		}
 		// Keep models[].loaded fresh between capability reports — the
 		// heartbeat's loaded_models is the engine's current truth.
 		if m.LoadedMeasured {

@@ -381,7 +381,7 @@ func buildConfigSection(rep *FleetReport, cfgPath string, cfg *Config, _ FleetRe
 // heartbeat reports — and free space on the agent state filesystem.
 func buildSystemSection(ctx context.Context, rep *FleetReport, cfgPath string) {
 	hw := hardware.Detect(ctx)
-	m := hardware.Metrics(ctx, 0, nil)
+	m := hardware.Metrics(ctx, 0, nil, filepath.Dir(cfgPath))
 	rep.System = ReportSystem{
 		Hostname:           hw.Hostname,
 		CPUModel:           hw.CPUModel,

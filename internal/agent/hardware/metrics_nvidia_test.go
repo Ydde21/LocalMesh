@@ -189,7 +189,7 @@ func TestMetricsGPUFlagPropagation(t *testing.T) {
 	// End-to-end through Metrics(): fake nvidia-smi output must surface
 	// as gpu_util_measured/vram_used_measured with real values.
 	stubCommandContext(t, "61, 2048\n", "", 0, false)
-	m := Metrics(t.Context(), 0, nil)
+	m := Metrics(t.Context(), 0, nil, t.TempDir())
 	if !m.GPUUtilMeasured || !m.VRAMUsedMeasured {
 		t.Fatalf("flags not propagated: %+v", m)
 	}
@@ -205,7 +205,7 @@ func TestMetricsGPUUnknownIsNotZero(t *testing.T) {
 	// nvidia-smi runs but reports N/A for both fields: the Metrics
 	// contract is flags=false — consumers must not read the zeros.
 	stubCommandContext(t, "N/A, N/A\n", "", 0, false)
-	m := Metrics(t.Context(), 0, nil)
+	m := Metrics(t.Context(), 0, nil, t.TempDir())
 	if m.GPUUtilMeasured || m.VRAMUsedMeasured {
 		t.Fatal("N/A fields must not be marked measured")
 	}

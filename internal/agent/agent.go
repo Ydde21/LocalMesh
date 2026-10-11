@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -327,7 +328,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context, c *wsjson.Conn, every time.Du
 				return
 			}
 			loaded, measured := a.loadedModels(ctx)
-			m := hardware.Metrics(ctx, int(a.active.Load()), loaded)
+			m := hardware.Metrics(ctx, int(a.active.Load()), loaded, filepath.Dir(a.cfgPath))
 			m.LoadedMeasured = measured
 			wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			c.Write(wctx, contracts.Envelope{

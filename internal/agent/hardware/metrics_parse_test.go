@@ -246,16 +246,16 @@ func TestParseVMStatPressure(t *testing.T) {
 }
 
 func TestMetricsFlagContract(t *testing.T) {
-	m := Metrics(t.Context(), 0, nil)
+	m := Metrics(t.Context(), 0, nil, t.TempDir())
 	if m.LoadedMeasured {
 		t.Fatal("nil loaded must not be marked measured")
 	}
-	m = Metrics(t.Context(), 1, []string{})
+	m = Metrics(t.Context(), 1, []string{}, t.TempDir())
 	if !m.LoadedMeasured {
 		// empty non-nil slice still counts as observed engine state
 		t.Fatal("non-nil loaded should mark measured")
 	}
-	m = Metrics(t.Context(), 1, []string{"llama3.1:8b"})
+	m = Metrics(t.Context(), 1, []string{"llama3.1:8b"}, t.TempDir())
 	if !m.LoadedMeasured {
 		t.Fatal("expected loaded_measured")
 	}

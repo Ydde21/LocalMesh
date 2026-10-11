@@ -92,7 +92,7 @@ func Doctor(ctx context.Context, cfgPath, caFile string, out io.Writer) int {
 	doctorDisk(cfgPath, emit)
 	doctorPendingUpdate(cfgPath, emit)
 	doctorUpdateHistory(cfgPath, emit)
-	doctorHardware(ctx, emit)
+	doctorHardware(ctx, cfgPath, emit)
 
 	if fails > 0 {
 		return 1
@@ -440,9 +440,9 @@ func doctorUpdateHistory(cfgPath string, emit func(string, string, string, ...an
 // doctorHardware reports the static snapshot plus which live metrics
 // this platform can actually measure — the same flags the heartbeat
 // emits — with memory total/available called out explicitly.
-func doctorHardware(ctx context.Context, emit func(string, string, string, ...any)) {
+func doctorHardware(ctx context.Context, cfgPath string, emit func(string, string, string, ...any)) {
 	hw := hardware.Detect(ctx)
-	m := hardware.Metrics(ctx, 0, nil)
+	m := hardware.Metrics(ctx, 0, nil, filepath.Dir(cfgPath))
 	gpuDesc := "none"
 	if len(hw.GPUs) > 0 {
 		gpuDesc = fmt.Sprintf("%d (%s)", len(hw.GPUs), hw.GPUs[0].Name)

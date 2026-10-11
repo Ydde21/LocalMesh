@@ -106,6 +106,8 @@ func (a *API) Register(mux *http.ServeMux, mwAdmin, mwRead func(http.Handler) ht
 	mux.Handle("GET /api/v1/nodes/{id}/events", mwRead(http.HandlerFunc(a.handleNodeEvents)))
 	mux.Handle("GET /api/v1/diagnostics", mwRead(http.HandlerFunc(a.handleDiagnostics)))
 	mux.Handle("GET /api/v1/control-plane", mwRead(http.HandlerFunc(a.handleControlPlane)))
+	mux.Handle("GET /api/v1/control-plane/peers", mwRead(http.HandlerFunc(a.handleControlPlanePeers)))
+	mux.Handle("GET /api/v1/nodes/{id}/disk", mwRead(http.HandlerFunc(a.handleNodeDisk)))
 	mux.Handle("PATCH /api/v1/nodes/{id}", mwAdmin(http.HandlerFunc(a.handleNodePatch)))
 	mux.Handle("DELETE /api/v1/nodes/{id}", mwAdmin(http.HandlerFunc(a.handleNodeDelete)))
 	mux.Handle("POST /api/v1/nodes/{id}/revoke", mwAdmin(http.HandlerFunc(a.handleNodeRevoke)))
@@ -407,8 +409,10 @@ func nodeJSON(v nodehub.View) map[string]any {
 		"max_concurrent": n.MaxConcurrent, "in_flight": v.InFlight,
 		"latency_ms":  v.LatencyMS,
 		"maintenance": n.Maintenance, "maintenance_reason": n.MaintenanceReason,
-		"agent_version": v.AgentVer,
-		"last_seen_at":  n.LastSeenAt, "created_at": n.CreatedAt,
+		"agent_version":   v.AgentVer,
+		"disk_free_bytes": n.DiskFreeBytes, "disk_total_bytes": n.DiskTotalBytes,
+		"disk_measured_at": n.DiskMeasuredAt,
+		"last_seen_at":     n.LastSeenAt, "created_at": n.CreatedAt,
 	}
 }
 

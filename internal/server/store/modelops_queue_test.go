@@ -398,7 +398,14 @@ func TestMigration0014ResolvesDuplicates(t *testing.T) {
 		}
 	}
 
-	n := mopNode(t, st, "n1")
+	// Direct insert: CreateNode's RETURNING spans the latest nodeCols,
+	// which include columns this partially-migrated schema lacks.
+	var n string
+	if err := st.Pool.QueryRow(ctx,
+		`INSERT INTO nodes (name, token_hash, hardware, max_concurrent)
+		 VALUES ('n1', 'hash-n1', '{}'::jsonb, 2) RETURNING id`).Scan(&n); err != nil {
+		t.Fatalf("create node: %v", err)
+	}
 	mkInterrupted := func(model string) *ModelOperation {
 		op, err := st.EnqueueModelOp(ctx, n, model, "pull", 0, 3)
 		if err != nil {
@@ -473,8 +480,8 @@ func TestMigration0014ResolvesDuplicates(t *testing.T) {
 		`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 14 {
-		t.Fatalf("schema_migrations at %d, want 14", applied)
+	if applied < 14 {
+		t.Fatalf("schema_migrations at %d, want >= 14", applied)
 	}
 	// And the constraint bites: no second covered row lands now.
 	if _, err := st.EnqueueModelOp(ctx, n, "dup-a:1", "pull", 0, 3); !errors.Is(err, ErrActiveModelOp) {

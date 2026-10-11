@@ -173,7 +173,10 @@ func (s *Server) Start(ctx context.Context) error {
 		}()
 		s.log.Info("standby control plane listening — waiting for ownership",
 			"addr", ln.Addr().String())
+		rep := store.NewPeerReporter(st, store.PeerRoleStandby, "", s.log)
+		rep.Start()
 		own, err = WaitForOwnership(ctx, s.cfg.DatabaseURL, s.log)
+		rep.Stop(context.Background()) // the standby row must not survive promotion
 		if err != nil {
 			shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			s.httpSrv.Shutdown(shCtx)
@@ -204,6 +207,14 @@ func (s *Server) Start(ctx context.Context) error {
 			"event": "acquired", "epoch": own.Epoch(), "instance": own.InstanceID().String()})
 	}
 	defer own.Release(context.Background())
+
+	// Presence heartbeat for the active role — keyed on the ownership
+	// instance id so the row correlates with control_plane_lock and
+	// ownership_events.
+	activeRep := store.NewPeerReporterWithID(st, own.InstanceID().String(),
+		store.PeerRoleActive, "", s.log)
+	activeRep.Start()
+	defer activeRep.Stop(context.Background())
 
 	s.hub = nodehub.New(st, s.ev, nodehub.DefaultConfig(), s.log)
 	s.sched = scheduler.New(s.hub, scheduler.DefaultConfig())
@@ -275,6 +286,33 @@ func (s *Server) Start(ctx context.Context) error {
 				g = append(g, metrics.Gauge{
 					Name: "agent_updates_live", Help: "Agent updates in flight, by phase.",
 					Value: float64(n), Labels: map[string]string{"phase": phase}})
+			}
+		}
+		// v0.10 gauges — one shared short deadline; each read fails soft.
+		gctx, gcancel := context.WithTimeout(context.Background(), 2*time.Second)
+		dbVal := 0.0
+		if s.st.Pool.Ping(gctx) == nil {
+			dbVal = 1
+		}
+		g = append(g, metrics.Gauge{
+			Name: "db_reachable", Help: "1 while the control plane can reach Postgres.", Value: dbVal})
+		if n, err := s.st.QueuedModelOpCount(gctx); err == nil {
+			g = append(g, metrics.Gauge{
+				Name: "model_ops_queue_depth", Help: "Model operations waiting in 'queued'.", Value: float64(n)})
+		}
+		for _, role := range []string{store.PeerRoleActive, store.PeerRoleStandby} {
+			if n, err := s.st.CountFreshPeers(gctx, role, store.PeerStaleAfter); err == nil {
+				g = append(g, metrics.Gauge{
+					Name: "control_plane_peers", Help: "Control-plane processes with a fresh presence heartbeat.",
+					Value: float64(n), Labels: map[string]string{"role": role}})
+			}
+		}
+		gcancel()
+		if s.ca != nil && len(s.ca.Server.Certificate) > 0 {
+			if days, ok := metrics.CertDaysRemaining(s.ca.Server.Certificate[0]); ok {
+				g = append(g, metrics.Gauge{
+					Name: "tls_cert_days_remaining", Help: "Days until the serving certificate leaf expires.",
+					Value: days})
 			}
 		}
 		return g
@@ -883,6 +921,9 @@ func (s *Server) controlPlaneStatus(ctx context.Context) (map[string]any, error)
 	}
 	if ev, err := s.st.ListOwnershipEvents(ctx, 50); err == nil {
 		out["events"] = ev
+	}
+	if sb, err := s.st.StandbyPresence(ctx); err == nil {
+		out["standby"] = sb
 	}
 	return out, nil
 }
