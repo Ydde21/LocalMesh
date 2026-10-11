@@ -1,6 +1,6 @@
 # LocalMesh 0.11.0 — release notes
 
-> **Status: PREPARED.** Notes for the upcoming `v0.11.0` stabilization
+> **Status: PUBLISHED.** The `v0.11.0` stabilization
 > release, cut from `main` after the full CI gate went green. Signed
 > with the production release key — key id **`0538AA36C3BC9FD3`** (the
 > le64 hex `minisign` prints); the public half is committed at
