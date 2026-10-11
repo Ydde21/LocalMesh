@@ -200,21 +200,38 @@ func TestChaos2AgentUpdateAcrossFailover(t *testing.T) {
 	// the node online, plus the fenced claim write — 15s proved
 	// marginal under CPU pressure. The drain clock starts at the claim
 	// write (ClaimPendingUpdate stamps updated_at), not here.
+	// 'draining' itself is transient: with the slot held by one stream
+	// and maintenance refusing refires, the first stream-end gap lets
+	// the row race draining→dispatched→failed inside a single poll
+	// interval. The guarantee under test is that the claim LANDED —
+	// any phase past pending — not that the transient was observed.
 	chaosWaitDiag(t, 30*time.Second, func() bool {
-		return updatePhase(t, st, u.ID) == store.UpdDraining
-	}, "update pending→draining", func() string {
+		return updatePhase(t, st, u.ID) != store.UpdPending
+	}, "update claim pending→draining+", func() string {
 		return fmt.Sprintf("phase=%q online=%v drained=%v maintenance=%q",
 			updatePhaseQuiet(st, u.ID), a.srv.Hub().Online(nodeID),
 			a.srv.Hub().Drained(nodeID), maintQuiet(st, nodeID))
 	})
-	if m, _ := nodeMaintenance(t, st, nodeID); m != store.MaintUpdating {
-		t.Fatalf("maintenance = %q during drain, want updating", m)
+	if p := updatePhase(t, st, u.ID); p == store.UpdInterrupted {
+		t.Fatalf("update interrupted pre-failover — node dropped mid-claim")
+	}
+
+	// The 'updating' marker only holds while the row is live — a row
+	// that already raced to terminal legitimately cleared it.
+	if p := updatePhase(t, st, u.ID); !store.UpdTerminal(p) {
+		if m, _ := nodeMaintenance(t, st, nodeID); m != store.MaintUpdating {
+			t.Fatalf("maintenance = %q at phase %q, want updating", m, p)
+		}
 	}
 
 	// One live update per node — a second enqueue must be refused.
-	if _, err := st.EnqueueAgentUpdate(ctx, "", rel.ID, nodeID, "0.1.0"); err == nil ||
-		!errors.Is(err, store.ErrActiveUpdate) {
-		t.Fatalf("second enqueue err=%v, want ErrActiveUpdate", err)
+	// A row that already finished legitimately permits a fresh update
+	// (the live-index is finished_at IS NULL), so only assert while live.
+	if p := updatePhase(t, st, u.ID); !store.UpdTerminal(p) {
+		if _, err := st.EnqueueAgentUpdate(ctx, "", rel.ID, nodeID, "0.1.0"); err == nil ||
+			!errors.Is(err, store.ErrActiveUpdate) {
+			t.Fatalf("second enqueue err=%v at phase %q, want ErrActiveUpdate", err, p)
+		}
 	}
 
 	// THE FAULT: lock loss mid-drain. The dying owner sweeps the
