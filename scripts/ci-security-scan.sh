@@ -155,7 +155,9 @@ fi
 grype_scan source "dir:/src" \
   --exclude '**/node_modules/**' --exclude '**/.next/**' --exclude '**/.git/**' \
   --exclude '**/dist/**' --exclude '**/bin/**' --exclude '**/data/**' \
-  --exclude '**/*.exe' --exclude '**/*.dll' --exclude '**/*.so' --exclude '**/*.dylib'
+  --exclude '**/*.exe' --exclude '**/*.dll' --exclude '**/*.so' --exclude '**/*.dylib' \
+  --exclude '**/localmesh-agent' --exclude '**/localmesh-server' \
+  --exclude '**/localmesh-router' --exclude '**/fakeollama'
 
 # --- policy evaluation -----------------------------------------------------------
 step "policy evaluation"

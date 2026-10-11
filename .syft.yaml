@@ -19,8 +19,15 @@ exclude:
   # Build litter, not source: untracked binaries a developer produced
   # in-tree (e.g. `go build -o localmesh-agent.exe`) carry whatever
   # toolchain built them — cataloging them fails the gate on artifacts
-  # that are never part of the source distribution.
+  # that are never part of the source distribution. The ./-anchored names
+  # cover extensionless POSIX binaries dropped at the repo root (e.g. a
+  # stray `go build -o localmesh-agent`), which the extension globs miss;
+  # **/ would wrongly prune cmd/localmesh-* source directories.
   - "**/*.exe"
   - "**/*.dll"
   - "**/*.so"
   - "**/*.dylib"
+  - "./localmesh-agent"
+  - "./localmesh-server"
+  - "./localmesh-router"
+  - "./fakeollama"
