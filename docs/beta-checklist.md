@@ -1,10 +1,13 @@
 # Public-beta readiness checklist
 
-The pre-tag audit for the v0.8 public beta. Each item names *how it is
+The pre-tag audit for the v0.10 public beta. Each item names *how it is
 verified* — a checked box means the verification ran, not just that the
 code exists. The honesty standard is the same one
 [docs/fleet-validation.md](fleet-validation.md) uses: simulated and
-CI-verified results are reported as exactly that.
+CI-verified results are reported as exactly that. External testers run
+the packaged form of this audit — [docs/beta-testing.md](beta-testing.md)
+plus `scripts/beta-validate.sh` and the *Beta validation report* issue
+template.
 
 ## 1. Clean-install quickstart
 
@@ -87,6 +90,10 @@ keep it accurate:
 
 Document, don't hide:
 
+- **A model must fit on one node.** LocalMesh distributes *independent*
+  inference workloads — whole requests routed to a single eligible
+  node. It does not shard models across devices and does not pool
+  VRAM; aggregate cluster RAM/VRAM is not a single allocatable pool.
 - **PostgreSQL is a single point of failure.** Standby promotion needs
   the DB — no lock, no leader. Database HA is out of scope (managed
   Postgres/Patroni recommended where it matters).
@@ -123,23 +130,48 @@ As of this beta tag:
       post-failover inference against a promoted standby
       (`scripts/ci-e2e-smoke.sh`), signed-rollout live smoke
       (`scripts/ci-update-smoke.sh`) — see [docs/ci.md](ci.md)
+- [x] Cross-platform runtime CI — `scripts/ci-agent-runtime.sh` executes
+      the real agent + fakeollama binaries on ubuntu/macos/windows hosted
+      runners (per-OS `-h` contracts, doctor, config round-trip, service
+      artifacts, `report -json` redaction gate). Not physical-fleet
+      validation — that item stays unchecked below.
+- [x] Real-Ollama HA acceptance — `scripts/ci-ollama-ha-smoke.sh` ran the
+      full failover demonstration against a real Ollama runtime and real
+      model (discovery, streaming + non-streaming inference, model pull
+      reconciled across a mid-flight SIGKILL, two promotions with real
+      inference after each). It skips gracefully when no Ollama is
+      present; `REQUIRE_REAL_OLLAMA=1` enforces the leg.
+- [x] Chaos suite — `make chaos-test` / `scripts/ci-chaos.sh`, 18
+      failure-injection tests against real Postgres and real agent
+      sockets (DB pause/restart/lock-loss, mid-stream cancel, SIGKILL
+      orphan, failover mid-pull/update/rollout) — `docs/chaos.md`.
 - [ ] **Physical multi-device fleet validation: not yet completed.**
-      The runbook is `docs/fleet-validation.md`; until it is run and
-      recorded there, cross-machine claims rest on CI + simulated
-      multi-node tests — say so, don't imply otherwise.
+      This is the external beta's central item. The runbook is
+      `docs/fleet-validation.md`; the tester kit is
+      `docs/beta-testing.md` + `scripts/beta-validate.sh` + the *Beta
+      validation report* issue template. Until physical runs are
+      recorded, cross-machine claims rest on CI + simulated multi-node
+      tests — say so, don't imply otherwise.
 - [ ] Real NVIDIA hardware — GPU telemetry is parser/exec-seam tested
-      only; no runner owns a GPU
-- [ ] Real Ollama vs `fakeollama` — wire paths are verified against the
-      double; engine quirks are covered by the real-Ollama legs noted
-      in `docs/ci.md` and the fleet runbook
+      only; no runner owns a GPU. A beta device with an NVIDIA card
+      closes this.
+- [ ] Real Ollama vs `fakeollama` — the wire paths run against the
+      double in CI; the real-Ollama legs above cover failover and
+      inference on the dev stack, but engine quirks across OSes/versions
+      remain beta-scope.
 
 ## 8. Tag-time mechanics
 
 - [ ] `bash scripts/ci-e2e-smoke.sh` green
 - [ ] `bash scripts/ci-update-smoke.sh` green
 - [ ] `bash scripts/ci-agent-smoke.sh` green on each OS
+- [ ] `bash scripts/ci-ha-smoke.sh` + `bash scripts/ci-ollama-ha-smoke.sh`
+      green (the v0.9 HA gate; the ollama leg must find a real engine or
+      run with `REQUIRE_REAL_OLLAMA=1` where one exists)
+- [ ] `make chaos-test` green (18 failure-injection tests)
 - [ ] `go vet ./... && go test ./...` green; `cd web && npm run lint &&
       npm run build` green
+- [ ] `bash -n` clean on `scripts/*.sh` incl. `scripts/beta-validate.sh`
 - [ ] `CHANGELOG.md` updated for the tag
 - [ ] `git tag vX.Y.Z && LOCALMESH_SIGNING_KEY=… ./scripts/release.sh`
       → `verify-release.sh` clean on the produced `dist/`
