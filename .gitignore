@@ -20,6 +20,7 @@ web/tsconfig.tsbuildinfo
 .env.local
 *.pem
 *.key
+*.sec
 data/
 
 # OS

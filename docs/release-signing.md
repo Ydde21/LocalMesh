@@ -99,11 +99,11 @@ only inside a secrets store — see CI below).
   files `0600`. `LOCALMESH_SIGNING_KEY` may point elsewhere (HSM-backed
   path, CI secret mount); the convention exists so *not* setting it
   still does the right thing.
-- **Never in the repo.** `*.key`/`*.pem`/`/dist/` are gitignored; a
-  `.sec` is not covered by those patterns — do not place keys under
-  the worktree at all. Only docs and public keys may ever be committed,
-  and a `.pub` goes into docs/install media only when it is THE
-  advertised release key.
+- **Never in the repo.** `*.key`/`*.pem`/`*.sec`/`/dist/` are
+  gitignored — but ignore rules are a backstop, not permission: do not
+  place keys under the worktree at all. Only docs and public keys may
+  ever be committed, and a `.pub` goes into docs/install media only
+  when it is THE advertised release key.
 - **Offline + encrypted at rest** for the production secret: an
   offline machine, an encrypted volume, or an HSM/KMS that exports a
   signing operation. Real minisign secrets are passphrase-encrypted —
