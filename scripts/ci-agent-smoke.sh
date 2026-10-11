@@ -60,12 +60,12 @@ cleanup() {
   # Uses the same scratch env the checks ran under, so paths resolve.
   if [ -x "$bin" ]; then
     HOME="$SCRATCH/home" XDG_CONFIG_HOME="$SCRATCH/xdg" \
-      LOCALMESH_AGENT_DIR="$SCRATCH/agent-home" \
+      LOCALMESH_AGENT_DIR="$LOCALMESH_AGENT_DIR" \
       "$bin" service uninstall >/dev/null 2>&1 || true
     # If the service phase ran against a live user manager the unit
     # landed in the real home — remove that one too.
     HOME="${REAL_HOME:-$HOME}" XDG_CONFIG_HOME="${REAL_HOME:-$HOME}/.config" \
-      LOCALMESH_AGENT_DIR="$SCRATCH/agent-home" \
+      LOCALMESH_AGENT_DIR="$LOCALMESH_AGENT_DIR" \
       "$bin" service uninstall >/dev/null 2>&1 || true
   fi
   rm -rf "$tmp"
@@ -123,6 +123,14 @@ export HOME="$SCRATCH/home"
 export XDG_CONFIG_HOME="$SCRATCH/xdg"
 export LOCALAPPDATA="$SCRATCH/appdata"  # inert today; keeps win scratch clean
 
+# Env var VALUES pass to the native binary verbatim — an msys path
+# like /tmp/... never resolves in a Windows process, so the agent must
+# see a native path while shell-side file ops keep the POSIX one.
+AGENT_DIR_POSIX="$LOCALMESH_AGENT_DIR"
+if [ "$is_windows" -eq 1 ] && have cygpath; then
+  export LOCALMESH_AGENT_DIR="$(cygpath -w "$SCRATCH/agent-home")"
+fi
+
 run_capture() { # -> __out, __code
   __out=""
   __code=0
@@ -143,7 +151,7 @@ fail_lines() { # count FAIL check lines in captured output
 # A join result marshalled to agent.json and read back by status/doctor.
 # Ports are deliberately dead: 127.0.0.1:9 (discard) for the control
 # plane and 127.0.0.1:1 for the engine — deterministic failures, fast.
-CFG="$LOCALMESH_AGENT_DIR/agent.json"
+CFG="$AGENT_DIR_POSIX/agent.json"
 DEAD_SERVER="http://127.0.0.1:9"
 DEAD_ENGINE="http://127.0.0.1:1"
 write_cfg() {
