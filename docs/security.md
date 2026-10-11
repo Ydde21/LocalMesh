@@ -227,6 +227,57 @@ to trust*. The trust rules:
   mirrors). A node credential can read release files for an approved
   release — nothing else.
 
+**Chain of trust, end to end.** The maintainer generates the release
+key offline and publishes only the public half — committed as
+`keys/localmesh-release.pub` (commit/tag authenticity is the
+distribution channel) with its fingerprint announced in the release
+notes. `release.sh` signs `SHA256SUMS` + `release-manifest.json`; the
+manifest lists every artifact's sha256, so *signature → sums → artifact*
+is a complete chain from the maintainer key to the binary. The last hop
+is agent-local: a dispatched `agent_upgrade` frame names only a signer
+`key_id` and a release source; the agent (`internal/agent/upgrade.go`,
+`internal/agent/update`) then
+
+1. loads the pinned pubkey from `agent.json` — absent or unparseable,
+   it refuses before fetching a byte;
+2. requires the dispatch's `key_id` to equal the pinned key's identity;
+3. fetches the manifest/sums/signatures over the whitelisted
+   control-plane proxy or an `https://` source;
+4. re-verifies both signatures against the *pinned* key, then the
+   artifact digest against the signed sums, the manifest↔sums digests,
+   platform match, and the protocol bound against the version the
+   server actually advertised in `hello_ack` — and requires the
+   dispatch's claimed version/protocol to equal the *signed* manifest's;
+5. checks a staged download's sha256 as it writes, records a
+   pending-update marker, swaps atomically (old binary kept as `.bak`),
+   and restarts;
+6. proves the new version after restart — the next `hello`'s reported
+   version must match the target, or the agent restores `.bak` and
+   reports `rolled_back`.
+
+Every hop verified by the hop before it: the wire can choose *which*
+signed release to install but contributes zero trust of its own.
+
+**Version ordering (downgrade policy).** There is deliberately no
+semver ordering on updates — *downgrades are ordinary signed releases*:
+`localmesh-agent update` applies any release that verifies (it only
+*warns* when the release's protocol is older than this build's), and a
+managed rollout likewise accepts any registered release regardless of
+direction. The only directional gate is protocol: a release whose
+`protocol_version` exceeds what the connected control plane speaks is
+refused, since the server would reject the new agent at hello.
+Rollback *is* the downgrade path (`.bak` restore on failed health
+check, or re-install an older signed release), and the update-history
+tripwire blocks re-installing a version that already failed
+post-restart on that node. What nothing currently stops: an
+administrator (or an attacker holding an `admin` API key) intentionally
+rolling the fleet back to an old but validly-signed release — there is
+no minimum-version floor or anti-rollback pin in
+`internal/agent/update` or `internal/server/updateplane`. That is a
+documented gap, not an oversight in verification: the signature still
+proves provenance, so the residual exposure is policy — an `admin`
+key can schedule a downgrade — not forgery.
+
 Same story as enrollment, restated: the server can *schedule* but never
 *sign* — trust enters the fleet from the operator's key on each device.
 

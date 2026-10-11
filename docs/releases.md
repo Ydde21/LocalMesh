@@ -103,20 +103,90 @@ the signed `SHA256SUMS` (so the notes can't drift), and complete
 verify/install/upgrade instructions. Review the highlights, then paste
 into the GitHub release or `dist/RELEASE-NOTES.md`.
 
-## Operator verification
+## Verifying a release (for users)
+
+Every release directory carries `release-manifest.json`,
+`release-manifest.json.minisig`, `SHA256SUMS`, `SHA256SUMS.minisig`,
+and the artifacts. Verifying means: **the signatures check out under a
+public key you already trust**, every artifact matches the signed sums,
+and the manifest does not mark itself dev-signed.
+
+### Step 1 — get the public key from a channel you trust
+
+The release public key ships in the repository, committed as
+`keys/localmesh-release.pub` (see `keys/README.md` for the trust
+model). Fetch it from a **tag/commit you trust** — the authenticity of
+the git history is what makes it the real key — never from the same
+mirror you downloaded the binaries from:
+
+```bash
+# from a trusted clone/tag:
+git show v0.10.0:keys/localmesh-release.pub > localmesh-release.pub
+# (until the production key is committed, keys/localmesh-dev.pub
+# verifies DEV-signed RC builds only — it is not a trust anchor)
+```
+
+Cross-check the key's identity against the fingerprint published in
+the release notes: the manifest's `signer.key_id` must equal it, and
+the verifier prints it (for minisign keys it is the hex keynum, e.g.
+`7E7C3A36C493E4C1`).
+
+### Step 2 — download the release files
+
+You need at minimum `SHA256SUMS`, `SHA256SUMS.minisig`,
+`release-manifest.json`, `release-manifest.json.minisig`, and the
+artifact(s) you will install, in one directory:
+
+```bash
+base=https://releases.example.com/v0.10.0
+for f in SHA256SUMS SHA256SUMS.minisig release-manifest.json \
+         release-manifest.json.minisig localmesh-agent-0.10.0-linux-amd64; do
+  curl -fsSL "$base/$f" -o "dist/$f"
+done
+```
+
+### Step 3 — verify
+
+**Native verifier** — no minisign/openssl install required
+(needs only a Go toolchain, run from a repo checkout):
 
 ```bash
 ./scripts/verify-release.sh dist --pubkey localmesh-release.pub
 ```
 
-Verifies the signature over `SHA256SUMS` and `release-manifest.json`
-against the supplied public key, checks every artifact against
-`SHA256SUMS`, validates the manifest schema, confirms the five agent
-platforms, warns when the manifest is marked `signer.dev`, and
-cross-checks with the real `minisign -V`/`openssl dgst` tools when they
-happen to be installed. Every FAIL line comes with a `→` remediation
-hint (re-download the artifact vs wrong pubkey vs repackaged release);
-any failure exits non-zero.
+It verifies the signature over `SHA256SUMS` and
+`release-manifest.json`, checks every artifact against `SHA256SUMS`,
+validates the manifest schema and the manifest↔sums digests, and
+confirms the five agent platforms. Every FAIL line comes with a `→`
+remediation hint (re-download the artifact vs wrong pubkey vs
+repackaged release); any failure exits non-zero. **Unsigned releases
+are refused outright** — `--allow-unsigned` exists for dev builds and
+checks checksums/schema only, it is never a trust decision.
+
+**minisign cross-check** — when `minisign` is installed,
+`verify-release.sh` runs `minisign -V` on both files automatically.
+Standalone, the equivalent is:
+
+```bash
+minisign -V -p localmesh-release.pub -m dist/SHA256SUMS
+minisign -V -p localmesh-release.pub -m dist/release-manifest.json
+shasum -a 256 -c dist/SHA256SUMS --ignore-missing   # or: sha256sum -c
+```
+
+### Step 4 — check the signer flag
+
+A production release must not be dev-signed:
+
+```bash
+grep -A3 '"signer"' dist/release-manifest.json
+#   "signer": { "algorithm": "minisign", "key_id": "…" }     → production
+#   "signer": { …, "dev": true }                           → DEV build — do
+#     not install on production nodes, never pin that key id
+```
+
+`verify-release.sh` prints the same thing as a `WARN` (and a closing
+banner) when `signer.dev` is set — a WARN is allowed to exit 0, so
+**read the WARN lines**, don't just check the exit code.
 
 ## Updating an agent (opt-in)
 
@@ -139,6 +209,14 @@ missing or bad, the artifact checksum doesn't match the *signed* sums
 file, no artifact exists for this platform, or the release's protocol
 version exceeds this build's (the control plane must be upgraded first;
 `-force` overrides when it already has been).
+
+There is no version ordering: installing an *older* signed release is a
+valid, supported downgrade — the tool only warns when the release's
+protocol is older than this build's. Rollback works the same way
+(re-install the older signed release, or restore `<binary>.bak`); the
+update-history tripwire blocks re-installing a version that already
+failed post-restart on the node. See the "Version ordering" paragraph
+in `docs/security.md` for the managed-rollout side.
 
 On Windows the running `.exe` can't be replaced: `update` reports the
 failure and asks you to `localmesh-agent service stop` first — it does
