@@ -37,9 +37,21 @@ export const SESSION_COOKIE = "lm_session";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 let cachedPassword: string | undefined;
+let warnedWeak = false;
 
 export function dashboardPassword(): string {
+  const noteWeak = (pw: string) => {
+    if (!warnedWeak && pw.length < 12) {
+      warnedWeak = true;
+      console.warn(
+        "[localmesh] dashboard password is shorter than 12 characters — " +
+          "the login rate limiter slows brute force, but a weak password " +
+          "is still the front door to an admin key"
+      );
+    }
+  };
   if (process.env.LOCALMESH_DASHBOARD_PASSWORD) {
+    noteWeak(process.env.LOCALMESH_DASHBOARD_PASSWORD);
     return process.env.LOCALMESH_DASHBOARD_PASSWORD;
   }
   if (cachedPassword) return cachedPassword;
@@ -47,7 +59,10 @@ export function dashboardPassword(): string {
   if (f) {
     try {
       cachedPassword = readFileSync(f, "utf8").trim();
-      if (cachedPassword) return cachedPassword;
+      if (cachedPassword) {
+        noteWeak(cachedPassword);
+        return cachedPassword;
+      }
     } catch {
       // file not written yet — fall through to ephemeral
     }
@@ -253,19 +268,53 @@ export function clearLoginFailures(ip: string): void {
   attempts.delete(ip);
 }
 
-// X-Forwarded-For is honored only when LOCALMESH_TRUST_PROXY is set —
-// same contract as the Go control plane (config.go TrustProxy). Without
-// it a client can rotate XFF per request and mint a fresh rate-limit
-// bucket each time, defeating the login failure cap.
-export function clientIP(req: Request): string {
-  const trustProxy =
+// LOCALMESH_TRUST_PROXY gates all client-supplied forwarding headers —
+// same contract as the Go control plane (config.go TrustProxy).
+export function trustProxy(): boolean {
+  return (
     process.env.LOCALMESH_TRUST_PROXY === "1" ||
-    process.env.LOCALMESH_TRUST_PROXY === "true";
-  if (trustProxy) {
+    process.env.LOCALMESH_TRUST_PROXY === "true"
+  );
+}
+
+// X-Forwarded-For is honored only when LOCALMESH_TRUST_PROXY is set.
+// When it is, the RIGHTMOST entry wins — the one our trusted proxy
+// appended — mirroring clientIP in internal/server/server.go. Taking
+// the leftmost (client-sent) entry would let an attacker rotate XFF
+// per request and mint a fresh rate-limit bucket each time, defeating
+// the login failure cap even in proxy deployments (v0.9 R-1 residual).
+// Without trust-proxy the bucket is the constant "local": route
+// handlers can't see the socket peer in Next.js, so all clients share
+// one 5-failures/min budget — deliberately strict (a sustained bad-
+// password flood locks everyone out rather than guessing unbounded).
+export function clientIP(req: Request): string {
+  if (trustProxy()) {
     const fwd = req.headers.get("x-forwarded-for");
-    if (fwd) return fwd.split(",")[0].trim();
+    if (fwd) {
+      const last = fwd.split(",").pop()?.trim();
+      if (last) return last;
+    }
   }
   return "local";
+}
+
+// cookieSecure reports whether the session cookie may carry the Secure
+// flag for this request. True when the request URL is https, or — only
+// under LOCALMESH_TRUST_PROXY — when a trusted reverse proxy terminated
+// TLS and said so via X-Forwarded-Proto. Without trust-proxy the
+// forwarded header is ignored: a client could otherwise spoof it and
+// a Secure cookie minted over a plain-http hop would silently never
+// be sent back, looking like an intermittent logout.
+export function cookieSecure(req: Request): boolean {
+  try {
+    if (new URL(req.url).protocol === "https:") return true;
+  } catch {
+    // fall through to the forwarded check
+  }
+  if (trustProxy()) {
+    return req.headers.get("x-forwarded-proto") === "https";
+  }
+  return false;
 }
 
 // Same-origin check for mutations (CSRF defense-in-depth on top of
