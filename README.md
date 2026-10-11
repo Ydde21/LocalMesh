@@ -336,10 +336,13 @@ make verify                       # full regression gate (fmt+vet+tests+race+web
 
 ## Release status
 
-**v0.11.0 is the current release** — the post-beta stabilization cut:
-inference-key confinement, the `min_agent_version`
-anti-rollback floor, Windows/Linux agent and installer fixes, and a
-fully green release gate. Notes:
+**v0.12.0 is the current release** — the beta-experience cut:
+fail-closed installer integrity verification (both POSIX and
+PowerShell), first-run enrollment/service/scheduler UX hardening,
+node24-native CI with Ubuntu 26.04 legs, and a fully green release
+gate. Notes: [docs/release-notes-0.12.md](docs/release-notes-0.12.md).
+
+`v0.11.0` — the post-beta stabilization cut:
 [docs/release-notes-0.11.md](docs/release-notes-0.11.md).
 
 `v0.10.0` — the first maintainer-signed release:

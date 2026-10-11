@@ -29,9 +29,9 @@ running server's.
 
 | Server | Agent | Result |
 |--------|-------|--------|
-| v0.10/v0.11 | v0.5–v0.11 | accepted (proto v1 both ways) |
-| v0.11  | older than `min_agent_protocol` | rejected at handshake — upgrade the agent |
-| v0.10  | v0.11 (proto still v1) | accepted — but run server-first order anyway so future floors/gates apply |
+| v0.10–v0.12 | v0.5–v0.12 | accepted (proto v1 both ways) |
+| v0.11+ | older than `min_agent_protocol` | rejected at handshake — upgrade the agent |
+| v0.10  | v0.11+ (proto still v1) | accepted — but run server-first order anyway so future floors/gates apply |
 | v0.9   | v0.10+ (if proto bumps) | rejected at handshake — upgrade the server first |
 
 ## Feature × minimum version
@@ -81,7 +81,7 @@ Release artifacts ship for five agent targets plus two server targets
 |---|---|---|
 | `localmesh-agent-*-linux-amd64` | yes | **CI-verified**: runs natively on ubuntu runners — doctor, hardware detect, join failure paths, config round-trip, systemd unit artifact |
 | `localmesh-agent-*-linux-arm64` | yes | CI cross-compile only — no arm64 runner leg; same code path as amd64 |
-| `localmesh-agent-*-windows-amd64` | yes | **CI-verified**: runs natively on windows runners — doctor/`Get-CimInstance`, config round-trip, service paths exercised under SCM where the runner is elevated (degradation verified where it isn't) |
+| `localmesh-agent-*-windows-amd64` | yes | **CI-verified**: runs natively on windows runners — doctor/`Get-CimInstance`, config round-trip, service paths exercised under SCM where the runner is elevated (degradation verified where it isn't); `install-agent.ps1` download/verify/install contract exercised against stubbed releases |
 | `localmesh-agent-*-darwin-arm64` | yes | **locally verified**: maintainers run the real launchd install→run→stop→uninstall cycle on Apple Silicon; CI runners cover build + non-service paths (the launchd cycle SKIPs without a gui domain) |
 | `localmesh-agent-*-darwin-amd64` | yes | locally verified (Intel Mac, same caveat as arm64) |
 | `localmesh-server-*-linux-{amd64,arm64}` | yes | linux/amd64 exercised end-to-end in CI (`agent-integration` against real Postgres); arm64 cross-compiled |

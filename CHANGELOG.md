@@ -4,6 +4,89 @@ Notable changes per release. Versions are stamped at release time by
 `scripts/release.sh` (git tag → `main.version`); this file follows the
 repo's `vX.Y` naming. Detail-level references live in `docs/`.
 
+## v0.12 — beta experience & installer integrity
+
+Reliability pass driven by the first-run user journey and installer
+audit: both agent installers now fail closed on unverifiable downloads,
+the enrollment/service paths guard against silent self-inflicted states,
+and CI is migration-proofed against the `ubuntu-latest` → Ubuntu 26.04
+label flip. No protocol change — v0.10+ interops freely (proto v1 both
+ways).
+
+### Security
+
+- **Both installers now fail closed on unverifiable downloads.**
+  `install-agent.sh` and `install-agent.ps1` require at least one
+  positive integrity verification — manifest checksum match or a
+  signature-verified `SHA256SUMS` entry — before installing anything.
+  Previously an explicit-version install could proceed on transport
+  alone when the manifest was unreachable (`.sh`), and a manifest
+  artifact lacking a `sha256` field skipped checksum verification
+  entirely (both). Unreachable manifest, absent artifact, missing
+  digest, or checksum mismatch all now refuse installation with an
+  actionable error.
+- **`install-agent.sh` silent-death fixed.** The manifest checksum
+  extraction ended in a bare `grep` inside a command substitution —
+  under `set -e` an absent artifact entry killed the script with no
+  output at all, bypassing the fail-closed check it fed.
+- **Windows installer got real behavioral tests.** New
+  `test-install-agent.ps1` suite (HttpListener-stubbed releases) runs on
+  `windows-latest` — covering manifest-down, absent artifact, checksum
+  mismatch, missing digest field, happy path, and the
+  `LOCALMESH_AGENT_BIN` local-binary path. New
+  `LOCALMESH_DOWNLOAD_BASE` env override supports mirrors (and the
+  harness).
+
+### First-run experience
+
+- **`join` refuses to clobber an existing enrollment** — re-running
+  silently minted fresh node credentials and stranded the old node.
+  It now refuses with an escape hatch (`-force` or delete the config).
+- **`service install` requires a loadable config** — installing a
+  service before enrolling registered a crash-looping unit (`run` →
+  instant exit → `Restart=always`).
+- **Approval waits are actionable** — `join` tells you how to approve
+  (dashboard + the real API route), re-reminds periodically, fails
+  fast if the request disappears, and explains that the request stays
+  pending on timeout/interrupt.
+- **`status` on a corrupt config reports it** instead of "not
+  enrolled"; non-`lme_` tokens are rejected instantly.
+- **Scheduler reports an empty fleet distinctly** — "no nodes
+  enrolled — run `localmesh-agent join` to add capacity" instead of a
+  bare "no eligible node" when nothing is connected.
+- **Dashboard first-run dead ends closed** — `/devices?add=1`
+  deep-link opens the guided enroll dialog (overview/onboarding route
+  there), minted tokens embed the real server URL in the join command,
+  the Models and Playground pages branch on the actual blocker
+  (no devices → enroll; no online engine node → Devices; no model →
+  Install), and the install dialog explains the `ollama serve` +
+  model-pull prerequisites.
+
+### Fixed
+
+- `install-agent.sh` unreachable `sudo cp` branch removed; copy
+  failures now report explicitly; `--help` no longer truncates.
+- `install-agent.ps1` `$LASTEXITCODE` checks after native calls (the
+  exit code does not propagate automatically before PS 7.4).
+- `ci-update-smoke.sh` now reports the child exit status with signal
+  annotation (137 → SIGKILL/runner-OOM hint) and flags empty logs —
+  the instant-exit flake signature is self-diagnosing on recurrence.
+
+### CI
+
+- **All GitHub Actions moved to node24-native majors** — `checkout@v7`,
+  `setup-go@v7`, `setup-node@v7`, `upload-artifact@v7`,
+  `download-artifact@v8`. Node.js-20 deprecation warnings eliminated.
+- **`ubuntu-26.04` pre-migration legs added and passing** — agent-smoke
+  per-push (CI + CI Runtime), agent-smoke + update-smoke on Release
+  Verify — so the systemd user-bus lifecycle and update surfaces prove
+  themselves on the incoming image before the `ubuntu-latest` label
+  flips.
+- **Hardware validation checklist** (`docs/hardware-validation-checklist.md`)
+  — the exact legs that count as verified for NVIDIA, multi-device LAN,
+  and Tailscale/Headscale, wired to the evidence-bundle scripts. Those
+  legs remain **unverified** until run on real hardware.
+
 ## v0.11 — stabilization
 
 Post-release hardening driven by the first real GitHub Actions runs,
