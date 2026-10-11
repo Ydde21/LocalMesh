@@ -65,6 +65,13 @@ cleanup() {
   pkill -f "$tmp/localmesh-agent" >/dev/null 2>&1 || true
   [ -n "$pg_name" ] && docker rm -f "$pg_name" >/dev/null 2>&1 || true
   if [ "${E2E_KEPT:-0}" != "1" ]; then rm -rf "$tmp"; else echo "kept $tmp"; fi
+  # An EMPTY log is itself diagnostic: a Go binary that crashed after
+  # startup always writes something — empty means exec failed or the
+  # process was signalled before init. Say so, don't just print nothing.
+  for f in server server-restart agent agent2; do
+    [ -f "$tmp/$f.log" ] && [ ! -s "$tmp/$f.log" ] && \
+      echo "NOTE: $f.log is EMPTY — process died before first write (exec failure or signal)" >&2
+  done
   echo "--- server log (tail) ---"; tail -n 20 "$tmp/server.log" 2>/dev/null || true
   echo "--- server-restart log (tail) ---"; tail -n 10 "$tmp/server-restart.log" 2>/dev/null || true
   echo "--- agent log (tail) ---";  tail -n 25 "$tmp/agent.log"  2>/dev/null || true
@@ -74,7 +81,15 @@ trap cleanup EXIT
 
 wait_pid_or_bad() {
   [ -n "$1" ] && kill -0 "$1" 2>/dev/null && return 0
-  bad "$2 exited unexpectedly — see log tail above"
+  local st
+  wait "$1" 2>/dev/null; st=$?
+  echo "NOTE: $2 exited with status $st" >&2
+  case "$st" in
+    137) echo "NOTE: status 137 = SIGKILL — likely runner OOM or an external kill; the process never got to log anything" >&2 ;;
+    139) echo "NOTE: status 139 = SIGSEGV — crash before logging was possible" >&2 ;;
+    127) echo "NOTE: status 127 = pid not a child of this shell or already reaped — status lost" >&2 ;;
+  esac
+  bad "$2 exited unexpectedly (status $st) — see log tails below"
 }
 
 NEWVER="0.7.9-smoke"
