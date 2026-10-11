@@ -80,11 +80,13 @@ services:
       LOCALMESH_HOSTNAMES: ${LOCALMESH_HOSTNAMES:?set hostnames in .env}
       LOCALMESH_CLUSTER_NAME: ${LOCALMESH_CLUSTER_NAME:-localmesh}
       LOCALMESH_DISCOVERY: ${LOCALMESH_DISCOVERY:-off}
-      LOCALMESH_CORS_ORIGINS: ""   # dashboard calls go through the BFF — no CORS needed
+      # Dashboard calls go through the BFF — no CORS needed; default empty.
+      LOCALMESH_CORS_ORIGINS: ${LOCALMESH_CORS_ORIGINS:-}
       LOCALMESH_LOG_LEVEL: ${LOCALMESH_LOG_LEVEL:-info}
-      # LOCALMESH_TRUST_PROXY — set to 1 ONLY behind a reverse proxy that
-      # overwrites X-Forwarded-For; otherwise clients can spoof their
-      # rate-limit identity. Off by default and correct for this layout.
+      # Set to 1 ONLY behind a reverse proxy that overwrites
+      # X-Forwarded-For; otherwise clients can spoof their rate-limit
+      # identity. Off by default and correct for this layout.
+      LOCALMESH_TRUST_PROXY: ${LOCALMESH_TRUST_PROXY:-}
       # LOCALMESH_DEV_INSECURE_HTTP — never set it here. It disables TLS.
     volumes:
       - localmesh-data:/data
