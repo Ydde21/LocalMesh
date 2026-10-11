@@ -14,7 +14,7 @@ param(
   [string]$Token,
   [string]$Name,
   [string]$Version = "latest",
-  [string]$Repo = "localmesh/localmesh",
+  [string]$Repo = "Ydde21/LocalMesh",
   [switch]$NoJoin,
   [switch]$Service,
   [switch]$Help

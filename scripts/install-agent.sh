@@ -15,7 +15,7 @@
 
 set -eu
 
-REPO="${LOCALMESH_REPO:-localmesh/localmesh}"
+REPO="${LOCALMESH_REPO:-Ydde21/LocalMesh}"
 VERSION="${LOCALMESH_VERSION:-latest}"
 DEST_SYSTEM="/usr/local/bin"
 DEST_USER="${HOME}/.local/bin"
