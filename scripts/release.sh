@@ -183,7 +183,10 @@ if command -v sha256sum >/dev/null 2>&1; then SUM="sha256sum"
 elif command -v shasum >/dev/null 2>&1; then SUM="shasum -a 256"
 else fail "need sha256sum or shasum"; fi
 
-(cd "$DIST" && ls localmesh-* 2>/dev/null | grep -v -E '\.(minisig|sig)$' | LC_ALL=C sort | xargs $SUM > SHA256SUMS)
+# Scope checksums to THIS release's artifacts — a reused dist dir can
+# hold stale binaries from other versions that must not enter a signed
+# SHA256SUMS (gen-manifest applies the same version scope).
+(cd "$DIST" && ls localmesh-agent-"$SEMVER"-* localmesh-server-"$SEMVER"-* 2>/dev/null | grep -v -E '\.(minisig|sig)$' | LC_ALL=C sort | xargs $SUM > SHA256SUMS)
 log "wrote $DIST/SHA256SUMS"
 
 # --- sign SHA256SUMS (then derive the key id for the manifest) --------

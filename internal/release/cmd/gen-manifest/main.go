@@ -70,10 +70,17 @@ func build(dist, version, signer, keyID string, dev bool, proto, minProto int, c
 		return nil, err
 	}
 	var arts []release.Artifact
+	agentPrefix, serverPrefix := release.AgentPrefix+version+"-", release.ServerPrefix+version+"-"
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || name == release.SumsFile || name == release.ManifestFile ||
 			strings.HasSuffix(name, release.MinisignSigExt) || strings.HasSuffix(name, release.OpenSSLSigExt) {
+			continue
+		}
+		// Catalog only THIS release's artifacts — a shared dist dir can
+		// hold stale binaries from other versions that must not enter
+		// a signed manifest.
+		if !strings.HasPrefix(name, agentPrefix) && !strings.HasPrefix(name, serverPrefix) {
 			continue
 		}
 		if _, _, _, ok := release.ParseArtifactName(name); !ok {
