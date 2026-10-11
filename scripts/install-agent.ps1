@@ -84,7 +84,7 @@ if ($env:LOCALMESH_AGENT_BIN -and (Test-Path $env:LOCALMESH_AGENT_BIN)) {
   try {
     Invoke-WebRequest -Uri "$base/$artifact" -OutFile $bin -UseBasicParsing
   } catch {
-    throw "download failed — check that $artifact exists in release $Version: $_"
+    throw "download failed — check that $artifact exists in release ${Version}: $_"
   }
 
   # Verify checksum against the release manifest (never trust transport alone).
