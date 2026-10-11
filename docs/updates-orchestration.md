@@ -67,6 +67,11 @@ resolves to or verification fails downstream. `GET
 retires one — a revoked key can no longer admit new releases (existing
 registered releases keep their recorded signer).
 
+For the official LocalMesh releases the maintainer's production pubkey
+is committed in this repo at `keys/localmesh-release.pub` (key id
+`0538AA36C3BC9FD3`, le64 hex) — registering that row is what lets a
+control plane admit published releases such as `v0.10.0`.
+
 ## 2. Pin the key on each agent — before you need it
 
 Every agent that will take managed upgrades needs the **public** key in
@@ -74,7 +79,8 @@ its own config. This is deliberately an on-device step — the control
 plane never ships key material:
 
 ```bash
-# on an already-enrolled node:
+# on an already-enrolled node (the production file ships in the repo
+# at keys/localmesh-release.pub — key id 0538AA36C3BC9FD3):
 localmesh-agent update-key /path/to/localmesh-release.pub
 
 # or at join time:

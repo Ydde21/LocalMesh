@@ -124,14 +124,15 @@ mirror you downloaded the binaries from:
 ```bash
 # from a trusted clone/tag:
 git show v0.10.0:keys/localmesh-release.pub > localmesh-release.pub
-# (until the production key is committed, keys/localmesh-dev.pub
-# verifies DEV-signed RC builds only — it is not a trust anchor)
+# (keys/localmesh-dev.pub verifies DEV-signed RC builds only —
+# it is not a trust anchor)
 ```
 
 Cross-check the key's identity against the fingerprint published in
 the release notes: the manifest's `signer.key_id` must equal it, and
-the verifier prints it (for minisign keys it is the hex keynum, e.g.
-`7E7C3A36C493E4C1`).
+the verifier prints it (for minisign keys it is the le64 hex keynum
+`minisign` prints — `0538AA36C3BC9FD3` on the production key;
+`7E7C3A36C493E4C1` is the dev key id seen on dev-signed rc manifests).
 
 ### Step 2 — download the release files
 

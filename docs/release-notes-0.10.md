@@ -1,14 +1,15 @@
-# LocalMesh 0.10.0 — DRAFT release notes
+# LocalMesh 0.10.0 — release notes
 
-> **Status: DRAFT — not yet a published release.**
-> Development-signed `0.10.0-rc1` and `0.10.0-rc2` candidates exist for
-> validation (their manifests record `signer.dev: true`;
-> `verify-release.sh` warns accordingly). A full `0.10.0` pipeline
-> dry-run also verified version stamping and platform coverage under
-> the dev key. Official `0.10.0` publication is gated on the maintainer
-> key ceremony (`scripts/release-ceremony.sh`, see
-> [release-signing.md](release-signing.md)) and the maintainer's
-> go-ahead — nothing below is final until that signature exists.
+> **Status: PUBLISHED.** This is the record of the shipped release:
+> [`v0.10.0`](https://github.com/Ydde21/LocalMesh/releases/tag/v0.10.0),
+> tagged on commit `769bc3f`, signed with the production release key —
+> key id **`0538AA36C3BC9FD3`** (the le64 hex `minisign` prints). The
+> public half is committed at
+> [`keys/localmesh-release.pub`](../keys/localmesh-release.pub); verify
+> a download against it with `scripts/verify-release.sh` — runbook in
+> [releases.md](releases.md). The dev-signed `0.10.0-rc1`/`-rc2`
+> candidates that preceded it (`signer.dev: true`, dev key id
+> `7E7C3A36C493E4C1`) were validation builds, never trust anchors.
 
 LocalMesh turns your own machines — laptops, workstations, servers —
 into one private, distributed AI cluster behind a single

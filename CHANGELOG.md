@@ -4,13 +4,17 @@ Notable changes per release. Versions are stamped at release time by
 `scripts/release.sh` (git tag → `main.version`); this file follows the
 repo's `vX.Y` naming. Detail-level references live in `docs/`.
 
-## v0.10 — public beta release candidate (in preparation)
+## v0.11 — in preparation
 
-Release-candidate hardening for the first maintainer-signed release.
-Dev-signed `0.10.0-rc1`/`-rc2` candidates exist for validation; trusted
-`0.10.0` publication is gated on maintainer signing — draft notes in
-`docs/release-notes-0.10.md`, identity model in
-`docs/release-signing.md`, ceremony tooling in
+Changes for the next release land here as they merge.
+
+## v0.10 — public beta
+
+Hardening for the first maintainer-signed release, shipped as
+`v0.10.0` (tag → commit `769bc3f`, production signing key id
+`0538AA36C3BC9FD3`). Dev-signed `0.10.0-rc1`/`-rc2` candidates
+preceded it for validation — notes in `docs/release-notes-0.10.md`,
+identity model in `docs/release-signing.md`, ceremony tooling in
 `scripts/release-ceremony.sh`.
 
 ### Added
