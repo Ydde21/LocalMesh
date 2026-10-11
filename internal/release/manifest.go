@@ -31,12 +31,20 @@ import (
 // speaking agentProto is inside this release's supported window when
 // MinProtocolVersion <= agentProto <= ProtocolVersion.
 type Manifest struct {
-	Version            string     `json:"version"`              // semver without leading v, e.g. "0.6.0"
-	ProtocolVersion    int        `json:"protocol_version"`     // wire protocol the artifacts speak
-	MinProtocolVersion int        `json:"min_protocol_version"` // oldest agent proto still accepted
-	CreatedAt          time.Time  `json:"created_at"`
-	Signer             Signer     `json:"signer"`
-	Artifacts          []Artifact `json:"artifacts"`
+	Version            string `json:"version"`              // semver without leading v, e.g. "0.6.0"
+	ProtocolVersion    int    `json:"protocol_version"`     // wire protocol the artifacts speak
+	MinProtocolVersion int    `json:"min_protocol_version"` // oldest agent proto still accepted
+	// MinAgentVersion is the anti-rollback floor declared by this
+	// release: once it is installed or targeted, the fleet may not
+	// roll back to an agent older than this version. Optional —
+	// absent means the release ratchets no floor. Set it (via
+	// gen-manifest -min-agent-version / LOCALMESH_MIN_AGENT_VERSION)
+	// when a release closes an agent-side vulnerability or a wire
+	// behaviour older builds must not resume.
+	MinAgentVersion string     `json:"min_agent_version,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	Signer          Signer     `json:"signer"`
+	Artifacts       []Artifact `json:"artifacts"`
 }
 
 // Signer identifies who signed the release. KeyID is the minisign
@@ -116,6 +124,20 @@ func (m *Manifest) Validate() error {
 	if m.MinProtocolVersion > m.ProtocolVersion {
 		return fmt.Errorf("manifest: min_protocol_version %d exceeds protocol_version %d — corrupt manifest",
 			m.MinProtocolVersion, m.ProtocolVersion)
+	}
+	if m.MinAgentVersion != "" {
+		// The floor is security-relevant: it must parse and can never
+		// exceed the release's own version (a release cannot demand
+		// the fleet already be newer than itself).
+		if _, err := parseVersion(m.MinAgentVersion); err != nil {
+			return fmt.Errorf("manifest: min_agent_version %q unparseable: %w", m.MinAgentVersion, err)
+		}
+		if c, err := CompareVersions(m.MinAgentVersion, m.Version); err != nil {
+			return fmt.Errorf("manifest: version %q unparseable: %w", m.Version, err)
+		} else if c > 0 {
+			return fmt.Errorf("manifest: min_agent_version %s exceeds version %s — a release cannot floor above itself",
+				m.MinAgentVersion, m.Version)
+		}
 	}
 	if m.CreatedAt.IsZero() {
 		return fmt.Errorf("manifest: missing created_at")

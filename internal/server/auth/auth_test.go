@@ -74,6 +74,9 @@ func TestRoleHierarchy(t *testing.T) {
 	if inf.Can(RoleAdmin) || !inf.Can(RoleInference) {
 		t.Fatal("inference role hierarchy wrong")
 	}
+	if inf.Can(RoleReadonly) {
+		t.Fatal("T-3: inference must not satisfy readonly")
+	}
 	node := Principal{Kind: "node", Role: ""}
 	if node.Can(RoleReadonly) {
 		t.Fatal("node principal must not satisfy API roles")

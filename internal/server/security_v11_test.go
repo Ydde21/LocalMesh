@@ -49,6 +49,10 @@ func TestSecurityV11InferenceKeyReadSurface(t *testing.T) {
 		"/api/v1/release-keys",
 		"/api/v1/releases",
 		"/api/v1/releases/any",
+		"/api/v1/rollouts",
+		"/api/v1/rollouts/any",
+		"/api/v1/agent-updates",
+		"/api/v1/agent-updates/any",
 		"/api/v1/metrics",
 	}
 	for _, p := range paths {

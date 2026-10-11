@@ -1722,3 +1722,94 @@ func TestCreateRolloutAdvanceRace(t *testing.T) {
 		}
 	}
 }
+
+// releaseFloor registers an approved release whose manifest declares a
+// min_agent_version anti-rollback floor.
+func (e *env) releaseFloor(t *testing.T, version, minAgent string) *store.Release {
+	t.Helper()
+	keyID := "TESTKEY-F-" + version
+	if _, err := e.st.AddReleaseKey(e.ctx, keyID, "minisign", "pub", ""); err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	r, err := e.st.RegisterRelease(e.ctx, &store.Release{
+		Version: version, Channel: "stable",
+		Manifest: []byte(`{"version":"` + version +
+			`","min_agent_version":"` + minAgent + `"}`),
+		ManifestSHA256: "m", SumsSHA256: "s",
+		Signatures: map[string]string{}, SignerKeyID: keyID,
+		ProtocolVersion: 1, MinAgentProtocol: 1,
+		Platforms: []string{"agent/linux/amd64"},
+	})
+	if err != nil {
+		t.Fatalf("register floor release: %v", err)
+	}
+	return r
+}
+
+// TestRolloutFloorBlocksRollback: once an approved release declares
+// min_agent_version, no rollout may target an older agent version —
+// the floor survives across releases because it is computed over every
+// approved manifest, not the target alone.
+func TestRolloutFloorBlocksRollback(t *testing.T) {
+	e := newEnv(t, fastCfg(), true)
+	n := e.node(t, "floor-node", "0.9.0", true, false)
+
+	fr := e.releaseFloor(t, "0.10.0", "0.9.5") // fleet floor: 0.9.5
+	old := e.release(t, "0.8.0")               // below floor
+
+	if _, err := e.m.CreateRollout(e.ctx, old.ID, StrategySingle, []string{n}, 0, 0, "test"); !errors.Is(err, ErrInvalidRollout) {
+		t.Fatalf("below-floor rollout: got %v, want ErrInvalidRollout", err)
+	}
+	// The floor-bearing release itself stays rollout-able.
+	if _, err := e.m.CreateRollout(e.ctx, fr.ID, StrategySingle, []string{n}, 0, 0, "test"); err != nil {
+		t.Fatalf("at-floor rollout: %v", err)
+	}
+}
+
+// TestRolloutFloorRevocationLifts: revoking the floor-bearing release
+// is the deliberate escape hatch — with it revoked, the floor drops and
+// the older release rolls out again.
+func TestRolloutFloorRevocationLifts(t *testing.T) {
+	e := newEnv(t, fastCfg(), true)
+	n := e.node(t, "floor-node2", "0.9.0", true, false)
+
+	fr := e.releaseFloor(t, "0.10.0", "0.9.5")
+	old := e.release(t, "0.8.0")
+
+	if _, err := e.m.CreateRollout(e.ctx, old.ID, StrategySingle, []string{n}, 0, 0, "test"); !errors.Is(err, ErrInvalidRollout) {
+		t.Fatalf("below-floor rollout must refuse while floor release is approved: %v", err)
+	}
+	if err := e.st.RevokeRelease(e.ctx, fr.ID); err != nil {
+		t.Fatalf("revoke floor release: %v", err)
+	}
+	if _, err := e.m.CreateRollout(e.ctx, old.ID, StrategySingle, []string{n}, 0, 0, "test"); err != nil {
+		t.Fatalf("rollback must be permitted once floor release is revoked: %v", err)
+	}
+}
+
+// TestRolloutFloorStrongestWins: multiple floor-bearing releases ratchet
+// to the strongest declared floor.
+func TestRolloutFloorStrongestWins(t *testing.T) {
+	e := newEnv(t, fastCfg(), true)
+	n := e.node(t, "floor-node3", "0.9.0", true, false)
+
+	e.releaseFloor(t, "0.10.0", "0.9.0")
+	e.releaseFloor(t, "0.10.1", "0.9.9") // stronger floor wins
+	mid := e.release(t, "0.9.5")         // above 0.9.0, below 0.9.9
+
+	if _, err := e.m.CreateRollout(e.ctx, mid.ID, StrategySingle, []string{n}, 0, 0, "test"); !errors.Is(err, ErrInvalidRollout) {
+		t.Fatalf("rollout below strongest floor: got %v, want ErrInvalidRollout", err)
+	}
+}
+
+// TestRolloutNoFloorUnchanged: with no floor declared anywhere, version
+// ordering imposes no new constraint — legacy behaviour preserved.
+func TestRolloutNoFloorUnchanged(t *testing.T) {
+	e := newEnv(t, fastCfg(), true)
+	n := e.node(t, "floor-node4", "0.9.0", true, false)
+
+	old := e.release(t, "0.8.0")
+	if _, err := e.m.CreateRollout(e.ctx, old.ID, StrategySingle, []string{n}, 0, 0, "test"); err != nil {
+		t.Fatalf("unfloored rollback must remain possible: %v", err)
+	}
+}

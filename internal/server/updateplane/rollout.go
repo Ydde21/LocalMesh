@@ -2,11 +2,13 @@ package updateplane
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 
 	"github.com/localmesh/localmesh/internal/contracts"
+	"github.com/localmesh/localmesh/internal/release"
 	"github.com/localmesh/localmesh/internal/server/store"
 )
 
@@ -63,6 +65,25 @@ func (m *Manager) CreateRollout(ctx context.Context, releaseID, strategy string,
 	}
 	if rel.Status != "approved" {
 		return nil, fmt.Errorf("%w: release %s is %s", ErrReleaseNotApproved, releaseID, rel.Status)
+	}
+	// Anti-rollback floor: the strongest min_agent_version declared by
+	// any approved release bounds what may be rolled out. Rolling back
+	// below it requires first revoking the release(s) that raised it —
+	// deliberate, audited, and impossible for a compromise that only
+	// controls rollout creation.
+	floor, err := m.fleetFloor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if floor != "" {
+		c, err := release.CompareVersions(rel.Version, floor)
+		if err != nil {
+			return nil, fmt.Errorf("%w: release %s version %q unparseable", ErrInvalidRollout, releaseID, rel.Version)
+		}
+		if c < 0 {
+			return nil, fmt.Errorf("%w: release %s (%s) is below the fleet minimum agent version %s — revoke the floor-bearing release to permit the rollback",
+				ErrInvalidRollout, releaseID, rel.Version, floor)
+		}
 	}
 	switch strategy {
 	case StrategySingle, StrategySelected, StrategySequential, StrategyCanary, StrategyParallel:
@@ -531,4 +552,38 @@ func (m *Manager) GetRollout(ctx context.Context, id string) (*store.Rollout, er
 // ListRollouts returns campaigns, newest first, with update counts.
 func (m *Manager) ListRollouts(ctx context.Context, limit int) ([]*store.Rollout, error) {
 	return m.st.ListRollouts(ctx, limit)
+}
+
+// fleetFloor returns the strongest min_agent_version declared by any
+// approved release, or "" when none declares a floor. Decode is
+// deliberately tolerant — stored manifest rows may predate the field or
+// (in tests) carry minimal JSON; an unparseable or absent floor simply
+// doesn't raise. A malicious manifest cannot sneak a floor past this:
+// register-release validation rejects unparseable floors before a row
+// can ever reach status approved.
+func (m *Manager) fleetFloor(ctx context.Context) (string, error) {
+	rels, err := m.st.ListReleases(ctx)
+	if err != nil {
+		return "", err
+	}
+	floor := ""
+	for _, r := range rels {
+		if r.Status != "approved" {
+			continue
+		}
+		var fm struct {
+			MinAgentVersion string `json:"min_agent_version"`
+		}
+		if len(r.Manifest) == 0 || json.Unmarshal(r.Manifest, &fm) != nil || fm.MinAgentVersion == "" {
+			continue
+		}
+		if floor == "" {
+			floor = fm.MinAgentVersion
+			continue
+		}
+		if c, err := release.CompareVersions(fm.MinAgentVersion, floor); err == nil && c > 0 {
+			floor = fm.MinAgentVersion
+		}
+	}
+	return floor, nil
 }

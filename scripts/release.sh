@@ -22,6 +22,9 @@
 #   LOCALMESH_RELEASE_KEY_ID   optional allowlist — when set, the derived
 #                              signer key id MUST equal it or the release
 #                              aborts before building
+#   LOCALMESH_MIN_AGENT_VERSION  optional anti-rollback floor written to
+#                              manifest.min_agent_version — once approved,
+#                              no rollout may target an older agent version
 #
 # DEV-KEY GUARD: a key marked dev-only is refused unless --dev is given.
 # Marks: (a) a localmesh .sec generated with `sign keygen -dev` (embedded
@@ -244,7 +247,8 @@ fi
 # --- manifest ---------------------------------------------------------
 go run ./internal/release/cmd/gen-manifest \
 	-dist "$DIST" -version "$SEMVER" -signer "$ALG" -signer-key-id "$KEYID" \
-	$( [ "$DEV" -eq 1 ] && printf -- '-dev' )
+	$( [ "$DEV" -eq 1 ] && printf -- '-dev' ) \
+	$( [ -n "${LOCALMESH_MIN_AGENT_VERSION:-}" ] && printf -- '-min-agent-version %s' "$LOCALMESH_MIN_AGENT_VERSION" )
 
 if [ "$UNSIGNED" -eq 0 ]; then
 	sign_file "$DIST/release-manifest.json"

@@ -29,6 +29,7 @@ func main() {
 	dev := flag.Bool("dev", false, "mark the signer as a dev identity (release.sh --dev)")
 	proto := flag.Int("protocol", contracts.ProtocolVersion, "wire protocol the artifacts speak")
 	minProto := flag.Int("min-protocol", contracts.MinAgentProtocolVersion, "oldest agent protocol still accepted")
+	minAgent := flag.String("min-agent-version", "", "anti-rollback floor: agents must not roll back below this version once this release is approved")
 	out := flag.String("out", "", "output path (default <dist>/release-manifest.json)")
 	flag.Parse()
 
@@ -42,7 +43,7 @@ func main() {
 			created = time.Unix(secs, 0).UTC()
 		}
 	}
-	m, err := build(*dist, *version, *signer, *keyID, *dev, *proto, *minProto, created)
+	m, err := build(*dist, *version, *signer, *keyID, *dev, *proto, *minProto, *minAgent, created)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gen-manifest:", err)
 		os.Exit(1)
@@ -64,7 +65,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "gen-manifest: wrote %s (%d artifacts)\n", outPath, len(m.Artifacts))
 }
 
-func build(dist, version, signer, keyID string, dev bool, proto, minProto int, created time.Time) (*release.Manifest, error) {
+func build(dist, version, signer, keyID string, dev bool, proto, minProto int, minAgent string, created time.Time) (*release.Manifest, error) {
 	entries, err := os.ReadDir(dist)
 	if err != nil {
 		return nil, err
@@ -108,6 +109,7 @@ func build(dist, version, signer, keyID string, dev bool, proto, minProto int, c
 		Version:            version,
 		ProtocolVersion:    proto,
 		MinProtocolVersion: minProto,
+		MinAgentVersion:    minAgent,
 		CreatedAt:          created,
 		Signer:             release.Signer{Algorithm: signer, KeyID: keyID, Dev: dev},
 		Artifacts:          arts,
