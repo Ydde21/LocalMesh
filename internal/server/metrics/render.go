@@ -35,12 +35,32 @@ func (c *Collector) Handler() http.Handler {
 }
 
 // render writes the full exposition: counters in declaration order,
-// series sorted by label encoding, then provider gauges sorted by name.
+// series sorted by label encoding, then histograms, then provider
+// gauges sorted by name.
 func (c *Collector) render(b *strings.Builder) {
 	for _, v := range c.vecs {
 		writeMeta(b, v.name, "counter", v.help)
 		for _, s := range v.snapshot() {
 			writeSample(b, v.name, s.labels, strconv.FormatUint(s.value, 10))
+		}
+	}
+
+	for _, v := range c.hvecs {
+		writeMeta(b, v.name, "histogram", v.help)
+		for _, s := range v.snapshot() {
+			// Prometheus histogram exposition: cumulative _bucket
+			// counts ordered by le, then _sum and _count.
+			var cum uint64
+			for i, bound := range v.buckets {
+				cum += s.counts[i]
+				ls := append(append([]label(nil), s.labels...), label{"le", formatFloat(bound)})
+				writeSample(b, v.name+"_bucket", ls, strconv.FormatUint(cum, 10))
+			}
+			cum += s.counts[len(v.buckets)]
+			ls := append(append([]label(nil), s.labels...), label{"le", "+Inf"})
+			writeSample(b, v.name+"_bucket", ls, strconv.FormatUint(cum, 10))
+			writeSample(b, v.name+"_sum", s.labels, formatFloat(s.sum))
+			writeSample(b, v.name+"_count", s.labels, strconv.FormatUint(s.total, 10))
 		}
 	}
 

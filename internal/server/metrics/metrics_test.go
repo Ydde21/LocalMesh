@@ -2,9 +2,14 @@ package metrics
 
 import (
 	"bufio"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -14,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/localmesh/localmesh/internal/contracts"
 	"github.com/localmesh/localmesh/internal/server/events"
 	"github.com/localmesh/localmesh/internal/server/store"
 )
@@ -166,7 +172,7 @@ func TestUpdateTerminalDedupe(t *testing.T) {
 
 var (
 	helpRe   = regexp.MustCompile(`^# HELP localmesh_[a-z0-9_]+ .*$`)
-	typeRe   = regexp.MustCompile(`^# TYPE localmesh_[a-z0-9_]+ (counter|gauge)$`)
+	typeRe   = regexp.MustCompile(`^# TYPE localmesh_[a-z0-9_]+ (counter|gauge|histogram)$`)
 	sampleRe = regexp.MustCompile(`^localmesh_[a-z0-9_]+(\{[a-z_]+="[^"]*"(,[a-z_]+="[^"]*")*\})? [0-9.eE+-]+$`)
 )
 
@@ -221,7 +227,12 @@ func TestExpositionFormat(t *testing.T) {
 			if i := strings.IndexAny(ln, "{ "); i >= 0 {
 				name = ln[:i]
 			}
-			if !seenType[name] {
+			// Histogram samples share their family's HELP/TYPE under
+			// _bucket/_sum/_count suffixes.
+			fam := strings.TrimSuffix(name, "_bucket")
+			fam = strings.TrimSuffix(fam, "_sum")
+			fam = strings.TrimSuffix(fam, "_count")
+			if !seenType[name] && !seenType[fam] {
 				t.Fatalf("sample without preceding TYPE: %q", ln)
 			}
 		}
@@ -254,13 +265,14 @@ func TestNoHighCardinalityLabels(t *testing.T) {
 			t.Fatalf("exposition leaks unbounded value %q", forbidden)
 		}
 	}
-	// Label names restricted to the bounded enum set.
+	// Label names restricted to the bounded enum set (le is the
+	// histogram bucket bound, role the control-plane peer role).
 	lblRe := regexp.MustCompile(`\{([^}]*)\}`)
 	for _, m := range lblRe.FindAllStringSubmatch(body, -1) {
 		for _, kv := range strings.Split(m[1], ",") {
 			k := strings.SplitN(kv, "=", 2)[0]
 			switch k {
-			case "event", "status", "phase", "state":
+			case "event", "status", "phase", "state", "le", "role":
 			default:
 				t.Fatalf("unexpected label name %q in %q", k, m[0])
 			}
@@ -405,5 +417,198 @@ func TestNilAndOddPayloads(t *testing.T) {
 	}
 	if got := counterVal(t, body, "localmesh_ownership_transitions_total", `{event="unknown"}`); got != 5 {
 		t.Fatalf("unknown ownership events = %v, want 5", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// v0.10 additions: outcome counters, reconnects, latency histograms
+// ---------------------------------------------------------------------------
+
+// TestOutcomeCounters: the normalized inference outcome counter, the
+// dedicated rollout-failure and update-rollback counters, and reconnect
+// detection.
+func TestOutcomeCounters(t *testing.T) {
+	c := New(testLog())
+
+	c.Observe("workload.finished", &store.Workload{ID: "w1", Status: "completed"})
+	c.Observe("workload.finished", &store.Workload{ID: "w2", Status: "failed"})
+	c.Observe("workload.finished", map[string]any{"status": "cancelled"})
+
+	c.Observe("rollout", &store.Rollout{ID: "r1", State: "running"})
+	c.Observe("rollout", &store.Rollout{ID: "r1", State: "failed"})
+	c.Observe("rollout", &store.Rollout{ID: "r1", State: "failed"}) // dup — deduped
+	c.Observe("rollout", &store.Rollout{ID: "r2", State: "succeeded"})
+
+	c.Observe("agent.update", &store.AgentUpdate{ID: "u1", Phase: "rolled_back"})
+	c.Observe("agent.update", &store.AgentUpdate{ID: "u1", Phase: "rolled_back"}) // dup
+	c.Observe("agent.update", &store.AgentUpdate{ID: "u2", Phase: "succeeded"})
+
+	c.Observe("node.connected", map[string]string{"id": "n1"})
+	c.Observe("node.connected", map[string]string{"id": "n2"})
+	c.Observe("node.connected", map[string]string{"id": "n1"}) // reconnect
+	c.Observe("node.connected", map[string]string{"id": "n1"}) // again
+	c.Observe("node.disconnected", map[string]string{"id": "n1"})
+
+	body := scrape(t, c)
+	checks := []struct {
+		name, labels string
+		want         float64
+	}{
+		{"localmesh_inference_requests_total", `{status="succeeded"}`, 1},
+		{"localmesh_inference_requests_total", `{status="failed"}`, 1},
+		{"localmesh_inference_requests_total", `{status="cancelled"}`, 1},
+		{"localmesh_rollouts_failed_total", "", 1},
+		{"localmesh_agent_updates_rolled_back_total", "", 1},
+		{"localmesh_node_reconnects_total", "", 2},
+		{"localmesh_node_connected_total", "", 4},
+	}
+	for _, ch := range checks {
+		if got := counterVal(t, body, ch.name, ch.labels); got != ch.want {
+			t.Errorf("%s%s = %v, want %v", ch.name, ch.labels, got, ch.want)
+		}
+	}
+	// The raw-vocabulary family still spells success "completed" — the
+	// normalized counter must not have stolen the series.
+	if got := counterVal(t, body, "localmesh_workloads_finished_total", `{status="completed"}`); got != 1 {
+		t.Errorf("workloads_finished completed = %v, want 1", got)
+	}
+	// And the succeeded rollout never became a "failure".
+	if got := counterVal(t, body, "localmesh_rollout_transitions_total", `{state="succeeded"}`); got != 1 {
+		t.Errorf("succeeded rollout transition missing")
+	}
+}
+
+// TestLatencyHistograms: queue wait comes from the started payload's
+// decision.queued_ms; ttft/total durations come off finished workload
+// rows — rendered as proper cumulative _bucket/_sum/_count.
+func TestLatencyHistograms(t *testing.T) {
+	c := New(testLog())
+
+	dec := &contracts.Decision{QueuedMS: 2500}
+	c.Observe("workload.started", &store.Workload{ID: "w1", Status: "running", Decision: dec})
+	c.Observe("workload.started", &store.Workload{ID: "w2", Status: "running",
+		Decision: &contracts.Decision{QueuedMS: 100}})
+	c.Observe("workload.started", &store.Workload{ID: "w3", Status: "running"}) // no decision — no sample
+
+	ttft, total := 800, 5200
+	c.Observe("workload.finished", &store.Workload{ID: "w1", Status: "completed",
+		TTFTms: &ttft, TotalMS: &total})
+	c.Observe("workload.finished", &store.Workload{ID: "w2", Status: "failed"}) // no timings
+
+	body := scrape(t, c)
+
+	// queue_seconds: 2 samples — 0.1s in the <=0.25 bucket, 2.5s in <=5.
+	q := func(le string) float64 {
+		return counterVal(t, body, "localmesh_inference_queue_seconds_bucket", `{le="`+le+`"}`)
+	}
+	if got := q("0.05"); got != 0 {
+		t.Errorf("queue le=0.05 = %v, want 0", got)
+	}
+	if got := q("0.25"); got != 1 {
+		t.Errorf("queue le=0.25 = %v, want 1", got)
+	}
+	if got := q("5"); got != 2 {
+		t.Errorf("queue le=5 = %v, want 2 (cumulative)", got)
+	}
+	if got := q("+Inf"); got != 2 {
+		t.Errorf("queue le=+Inf = %v, want 2", got)
+	}
+	if got := counterVal(t, body, "localmesh_inference_queue_seconds_count", ""); got != 2 {
+		t.Errorf("queue count = %v, want 2", got)
+	}
+	if got := counterVal(t, body, "localmesh_inference_queue_seconds_sum", ""); got != 2.6 {
+		t.Errorf("queue sum = %v, want 2.6", got)
+	}
+
+	// ttft 0.8s lands under le="1"; total 5.2s under le="15".
+	if got := counterVal(t, body, "localmesh_inference_ttft_seconds_bucket",
+		`{status="completed",le="+Inf"}`); got != 1 {
+		t.Errorf("ttft +Inf = %v, want 1", got)
+	}
+	if got := counterVal(t, body, "localmesh_inference_ttft_seconds_bucket",
+		`{status="completed",le="0.5"}`); got != 0 {
+		t.Errorf("ttft le=0.5 = %v, want 0", got)
+	}
+	if got := counterVal(t, body, "localmesh_inference_ttft_seconds_bucket",
+		`{status="completed",le="1"}`); got != 1 {
+		t.Errorf("ttft le=1 = %v, want 1", got)
+	}
+	if got := counterVal(t, body, "localmesh_inference_duration_seconds_bucket",
+		`{status="completed",le="15"}`); got != 1 {
+		t.Errorf("duration le=15 = %v, want 1", got)
+	}
+	// The failed workload with no timings contributes no series at all.
+	if strings.Contains(body, `localmesh_inference_ttft_seconds_bucket{status="failed",le="0.25"}`) {
+		t.Error("failed workload produced a ttft series with no measurement")
+	}
+	// TYPE line present exactly once for each family.
+	for _, fam := range []string{"localmesh_inference_queue_seconds", "localmesh_inference_ttft_seconds",
+		"localmesh_inference_duration_seconds"} {
+		if !strings.Contains(body, "# TYPE "+fam+" histogram") {
+			t.Errorf("missing TYPE line for %s", fam)
+		}
+	}
+}
+
+// TestModelOpDuration: the op-duration histogram spans first dispatch
+// → terminal, keyed by operation_id; 'interrupted' keeps the timer
+// across retries; a terminal with no observed start records nothing.
+func TestModelOpDuration(t *testing.T) {
+	c := New(testLog())
+
+	c.Observe("model.operation", map[string]any{"operation_id": "op-1", "status": "queued"})
+	c.Observe("model.operation", map[string]any{"operation_id": "op-1", "status": "dispatched"})
+	time.Sleep(30 * time.Millisecond)
+	c.Observe("model.operation", map[string]any{"operation_id": "op-1", "status": "running"})
+	c.Observe("model.operation", map[string]any{"operation_id": "op-1", "status": "interrupted"})
+	// Retry resumes: another dispatched — the timer still spans it.
+	c.Observe("model.operation", map[string]any{"operation_id": "op-1", "status": "dispatched"})
+	c.Observe("model.operation", map[string]any{"operation_id": "op-1", "status": "succeeded"})
+	c.Observe("model.operation", map[string]any{"operation_id": "op-1", "status": "succeeded"}) // dup terminal — no resample
+
+	// Terminal with no observed start (process restarted mid-op): must
+	// not fabricate a duration.
+	c.Observe("model.operation", map[string]any{"operation_id": "op-9", "status": "failed"})
+
+	body := scrape(t, c)
+	if got := counterVal(t, body, "localmesh_model_operation_duration_seconds_count",
+		`{status="succeeded"}`); got != 1 {
+		t.Fatalf("succeeded op duration count = %v, want 1", got)
+	}
+	if got := counterVal(t, body, "localmesh_model_operation_duration_seconds_bucket",
+		`{status="succeeded",le="5"}`); got != 1 {
+		t.Fatalf("succeeded duration le=5 = %v, want 1", got)
+	}
+	if got := counterVal(t, body, "localmesh_model_operation_duration_seconds_sum",
+		`{status="succeeded"}`); got < 0.03 {
+		t.Fatalf("succeeded duration sum = %v, want ≥0.03", got)
+	}
+	// The phantom op-9 produced no failed series.
+	if got := counterVal(t, body, "localmesh_model_operation_duration_seconds_count",
+		`{status="failed"}`); got != -1 {
+		t.Fatalf("failed count = %v, want no series", got)
+	}
+}
+
+func TestCertDaysRemaining(t *testing.T) {
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(30 * 24 * time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	days, ok := CertDaysRemaining(der)
+	if !ok {
+		t.Fatal("valid cert rejected")
+	}
+	if days < 29 || days > 30 {
+		t.Fatalf("days = %v, want ~30", days)
+	}
+	if _, ok := CertDaysRemaining([]byte("not a cert")); ok {
+		t.Fatal("garbage DER parsed as a cert")
 	}
 }

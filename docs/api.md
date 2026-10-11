@@ -113,7 +113,9 @@ Auth: `admin` for writes; `readonly`+ for `GET`s. Prefix `/api/v1`.
 | GET    | `/settings`         | all settings (scheduling config etc.) |
 | PUT    | `/settings/{key}`   | replace a setting — body is the raw JSON value; keys: `scheduling`, `privacy`, `cluster`, `modelops` |
 | GET    | `/discovery/status` | mDNS announce state: `{enabled, advertising, cluster_name, ca_fingerprint}` |
-| GET    | `/control-plane`    | single-active ownership view: `{role, epoch, started_at, heartbeat_at}` plus promotion history from `ownership_events` (`acquired`/`lost`/`promoted` transitions) — see `docs/ha-design.md` |
+| GET    | `/control-plane`    | single-active ownership view: `{role, standby_capable, promoted_from_standby, uptime_seconds, instance_id, epoch, owner, standby, events}` — `owner` is the live `control_plane_lock` row; `standby` (v0.10) reports waiting-standby presence `{present, count, instance_id?, hostname?, heartbeat_age_seconds?}` from `control_plane_peers` heartbeats; `events` is recent `ownership_events` history (`acquired`/`lost`/`promoted`/`refused`) — see `docs/ha-design.md` |
+| GET    | `/control-plane/peers` | **v0.10** — every control-plane process's presence row: `[{instance_id, role, hostname, started_at, heartbeat_at, heartbeat_age_seconds, fresh}]`, newest heartbeat first. `role` ∈ `active`\|`standby`; `fresh` is true while the heartbeat is <15s old (`store.PeerStaleAfter`). Stale rows (crashed peers) are returned too — presence semantics live in `fresh`, never in row existence. This is how a *waiting* standby — which serves no API of its own — becomes visible to the cluster |
+| GET    | `/metrics`          | Prometheus text exposition v0.0.4 (any key role can scrape; mint a `readonly` key for Prometheus). Metric inventory + semantics: `docs/observability.md` |
 
 Mutable `scheduling` keys include `queue_timeout_ms` (1–300000),
 `max_attempts` (1–10), `heartbeat_timeout_seconds` (10–600 — live-tunes
@@ -142,6 +144,7 @@ live-reloaded on PUT):
 | POST   | `/nodes/{id}/maintenance` | `{reason}` — drain the node: state `draining` → `maintenance`; no new work is scheduled (the scheduler reports it filtered with the maintenance reason) while in-flight requests finish |
 | POST   | `/nodes/{id}/resume`   | leave maintenance and return the node to scheduling eligibility |
 | GET    | `/nodes/{id}/events`   | connection history, newest first (`?limit=`, max 500). Rows: `{id, node_id, event, reason, agent_version, created_at}` where `event` is `connected`/`disconnected` and `reason` explains the drop (`replaced by new connection`, `control plane shutting down`, `connection closed by agent`, a revoke reason). |
+| GET    | `/nodes/{id}/disk`     | **v0.10** — disk telemetry for one node: `{node_id, disk_free_bytes, disk_total_bytes, disk_measured_at}`. All three telemetry fields are **nullable** — `null` means never measured (pre-v0.10 agents, or an agent-side probe failure), never "0 bytes free". `disk_measured_at` is stamped server-side on receipt, so it is also the reading's freshness |
 
 ### Diagnostics
 
@@ -337,9 +340,12 @@ traffic only to the active leader. See `docs/ha-deployment.md`.
 
 - `node.connected`, `node.disconnected`, `node.metrics`, `node.capability`,
   `node.approved`, `node.revoked`, `node.reinstated`, `node.deleted`,
-  `node.updated`
+  `node.updated`, `node.maintenance`
 - `workload.queued`, `workload.started`, `workload.finished`
 - `model.operation`
+- `agent.update`, `rollout`, `release`
+- `control-plane` (ownership transitions: `acquired`, `released`, `lost`,
+  `promoted`, `refused`)
 - `enrollment.requested`, `enrollment.denied`, `enrollment_token.created`
 - `api_key.created`, `api_key.revoked`
 - `settings.updated`

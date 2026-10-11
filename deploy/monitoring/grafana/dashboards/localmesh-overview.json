@@ -271,6 +271,176 @@
       },
       "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [{"refId": "A", "expr": "topk(10, sum by (event) (rate(localmesh_events_total[5m])))", "legendFormat": "{{event}}"}]
+    },
+    {
+      "id": 19,
+      "type": "row",
+      "title": "v0.10 — outcomes, latency & presence",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 44},
+      "panels": []
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Inference outcomes",
+      "description": "localmesh_inference_requests_total — terminal request outcomes in the normalized vocabulary (succeeded|failed|cancelled); 'completed' on workloads_finished_total maps to succeeded here.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 9, "x": 0, "y": 45},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {"drawStyle": "bars", "fillOpacity": 40, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (status) (increase(localmesh_inference_requests_total[15m]))", "legendFormat": "{{status}}"}]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Queue wait — p50 / p95",
+      "description": "localmesh_inference_queue_seconds — scheduling wait between acceptance and dispatch (decision.queued_ms). Requests that die in queue contribute no sample.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 9, "x": 9, "y": 45},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(localmesh_inference_queue_seconds_bucket[5m])))", "legendFormat": "p50"}, {"refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(localmesh_inference_queue_seconds_bucket[5m])))", "legendFormat": "p95"}]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Control-plane peers",
+      "description": "localmesh_control_plane_peers{role} — processes with a fresh presence heartbeat (v0.10 control_plane_peers). The waiting standby is visible here even though it serves no metrics itself. Empty until the integrator wires the peers gauge (observability.md).",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 45},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (role) (localmesh_control_plane_peers)", "legendFormat": "{{role}}"}]
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Request duration — p50 / p95",
+      "description": "localmesh_inference_duration_seconds — end-to-end seconds for finished workloads, by outcome. Failed requests record time-to-fail.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 9, "x": 0, "y": 53},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(localmesh_inference_duration_seconds_bucket[5m])))", "legendFormat": "p50"}, {"refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(localmesh_inference_duration_seconds_bucket[5m])))", "legendFormat": "p95"}]
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Time to first token — p50 / p95",
+      "description": "localmesh_inference_ttft_seconds — seconds to first streamed token, by outcome. Emitted once finished-workload payloads carry ttft_ms (integrator wiring — observability.md).",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 9, "x": 9, "y": 53},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(localmesh_inference_ttft_seconds_bucket[5m])))", "legendFormat": "p50"}, {"refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(localmesh_inference_ttft_seconds_bucket[5m])))", "legendFormat": "p95"}]
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Node reconnects (15m)",
+      "description": "localmesh_node_reconnects_total — connects for a node id already connected this process lifetime: the churn/flap signal. A process restart resets the seen-set.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 53},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {"drawStyle": "bars", "fillOpacity": 40, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum(increase(localmesh_node_reconnects_total[15m]))", "legendFormat": "reconnects"}]
+    },
+    {
+      "id": 26,
+      "type": "stat",
+      "title": "Database reachable",
+      "description": "localmesh_db_reachable — 1 while the control plane can ping Postgres (integrator gauge wiring — observability.md). 0 means the API is degraded even while it still serves.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 0, "y": 61},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"refId": "A", "expr": "min(localmesh_db_reachable)", "instant": true}]
+    },
+    {
+      "id": 27,
+      "type": "stat",
+      "title": "Model ops queue depth",
+      "description": "localmesh_model_ops_queue_depth — ops waiting in 'queued' (integrator gauge wiring — observability.md). Sustained growth = pulls outrunning node capacity.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 8, "y": 61},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": null}]}
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"refId": "A", "expr": "max(localmesh_model_ops_queue_depth)", "instant": true}]
+    },
+    {
+      "id": 28,
+      "type": "stat",
+      "title": "TLS cert days remaining",
+      "description": "localmesh_tls_cert_days_remaining — days until the serving certificate leaf expires (integrator gauge wiring — observability.md). Renew before agents can no longer verify.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 61},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 14}, {"color": "green", "value": 30}]}
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"refId": "A", "expr": "min(localmesh_tls_cert_days_remaining)", "instant": true}]
     }
   ]
 }
