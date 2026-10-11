@@ -20,6 +20,10 @@ results table at the end.
 > *Hardware compatibility report* issue template. Use it when you have
 > one machine to contribute; use the full protocol below when you have
 > two or more.
+>
+> **Closing a known gap?** [hardware-validation-checklist.md](hardware-validation-checklist.md)
+> lists the exact legs that count as verified for NVIDIA GPU,
+> multi-device LAN, and Tailscale/Headscale coverage.
 
 ## What counts as verified
 
