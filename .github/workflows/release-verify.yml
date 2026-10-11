@@ -336,9 +336,6 @@ jobs:
         run: |
           bash scripts/release.sh --unsigned -d dist-unsigned
           bash scripts/verify-release.sh dist-unsigned --allow-unsigned
-      - name: discard ephemeral key
-        if: always()
-        run: '[ -n "${DEVKEY_DIR:-}" ] && rm -rf "$DEVKEY_DIR" || true'
       - name: upload release dist artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -346,7 +343,11 @@ jobs:
           path: |
             dist/
             dist-unsigned/
+            ${{ env.DEVKEY_DIR }}/ci-dev.pub
           retention-days: 30
+      - name: discard ephemeral key
+        if: always()
+        run: '[ -n "${DEVKEY_DIR:-}" ] && rm -rf "$DEVKEY_DIR" || true'
 
   # The documented clean-machine install journey on a disposable compose
   # project — the heaviest job in the workflow (builds the server + web
@@ -403,6 +404,9 @@ jobs:
         # script's default dist/0.10.0-rc1 is the local-RC layout.
         env:
           ARTIFACT_INSTALL_DIST: dist
+          # The pubkey that signed the CI dist — shipped alongside the
+          # artifacts (the secret half is deleted in release-artifacts).
+          ARTIFACT_INSTALL_PUBKEY: ci-dev.pub
         run: bash scripts/ci-artifact-install.sh
 
   # ------------------------------------------------------------------

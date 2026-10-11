@@ -18,7 +18,17 @@ import (
 func serviceManaged() bool {
 	switch runtime.GOOS {
 	case "linux":
-		return os.Getenv("INVOCATION_ID") != ""
+		// INVOCATION_ID marks a unit-spawned process — but anything
+		// that is ITSELF a systemd service (CI runners, systemd-run
+		// wrappers) leaks it to every child without supervising us.
+		// Only our own unit puts localmesh-agent.service in
+		// /proc/self/cgroup; an unreadable cgroup file means we can't
+		// prove supervision → re-exec, the safe default.
+		if os.Getenv("INVOCATION_ID") == "" {
+			return false
+		}
+		b, err := os.ReadFile("/proc/self/cgroup")
+		return err == nil && inLocalMeshUnit(b)
 	case "darwin":
 		return strings.HasPrefix(os.Getenv("XPC_SERVICE_NAME"), "net.localmesh")
 	}

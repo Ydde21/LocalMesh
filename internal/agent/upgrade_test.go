@@ -1692,3 +1692,29 @@ func TestUpgradeFloorSurvivesCompromisedDispatch(t *testing.T) {
 		t.Fatal("op-rollback dispatch produced no failed state")
 	}
 }
+
+// TestInLocalMeshUnit: INVOCATION_ID leaks to children of ANY unit —
+// GitHub-hosted runners are themselves systemd services, so a bare
+// env check made the real agent exit expecting a supervisor that did
+// not exist (the ci-update-smoke 'restarting' wedge). Only our own
+// unit in the cgroup path proves supervision.
+func TestInLocalMeshUnit(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"v2 system unit", "0::/system.slice/localmesh-agent.service\n", true},
+		{"v2 user unit", "0::/user.slice/user-1000.slice/user@1000.service/app.slice/localmesh-agent.service\n", true},
+		{"v1 pids hierarchy", "12:pids:/system.slice/localmesh-agent.service\n1:name=systemd:/system.slice/localmesh-agent.service\n", true},
+		{"ci runner service", "0::/system.slice/actions.runner.ydde21-localmesh.abc.service\n", false},
+		{"login session scope", "0::/user.slice/user-1000.slice/session-3.scope\n", false},
+		{"systemd-run scope named alike", "0::/user.slice/localmesh-agent.scope\n", false},
+		{"empty cgroup", "", false},
+	}
+	for _, tc := range cases {
+		if got := inLocalMeshUnit([]byte(tc.in)); got != tc.want {
+			t.Errorf("%s: inLocalMeshUnit = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

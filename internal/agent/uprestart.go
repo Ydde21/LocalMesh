@@ -12,6 +12,7 @@ package agent
 // `run`). It has no network and parses nothing beyond flags.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -34,6 +35,15 @@ var (
 	spawnApplyFn     = spawnUpdateApply
 	serviceManagedFn = serviceManaged
 )
+
+// inLocalMeshUnit reports whether a /proc/self/cgroup dump places the
+// process inside the localmesh-agent systemd unit — the only proof a
+// supervisor will restart us. INVOCATION_ID alone can't provide it:
+// anything that is itself a unit (CI runners, systemd-run wrappers)
+// leaks it to every child without supervising them.
+func inLocalMeshUnit(cgroup []byte) bool {
+	return bytes.Contains(cgroup, []byte("localmesh-agent.service"))
+}
 
 // applyRequest describes one update-apply handoff — the parent builds
 // it and spawnUpdateApply turns it into argv.
