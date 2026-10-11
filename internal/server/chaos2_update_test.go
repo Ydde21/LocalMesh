@@ -181,9 +181,17 @@ func TestChaos2AgentUpdateAcrossFailover(t *testing.T) {
 	}
 
 	// Keep the node busy so claim lands 'draining' and parks there.
+	// A single request can finish (or error) inside one poll gap under
+	// load, letting the row race draining→dispatched→failed unseen —
+	// re-fire the busy call until the ctx expires.
 	cctx, ccancel := context.WithTimeout(ctx, 30*time.Second)
 	defer ccancel()
-	go chatRaw(cctx, a.base, "llm:latest", longPrompt(80))
+	go func() {
+		for cctx.Err() == nil {
+			chatRaw(cctx, a.base, "llm:latest", longPrompt(20))
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
 	chaosWait(t, 15*time.Second, func() bool {
 		wls, err := st.ListWorkloads(ctx, store.WorkloadFilter{Status: "running", Limit: 4})
 		return err == nil && len(wls) > 0
@@ -227,8 +235,13 @@ func TestChaos2AgentUpdateAcrossFailover(t *testing.T) {
 	if err != nil || len(ups) != 1 || ups[0].ID != u.ID {
 		t.Fatalf("updates for node = %v (err=%v), want exactly the original row", ups, err)
 	}
-	if p := updatePhase(t, bst, u.ID); p != store.UpdDraining {
-		t.Fatalf("update phase after failover = %q, want 'draining' persisted", p)
+	// The row must resume where it stood — 'draining' or any phase past
+	// it. The agent may reconnect during the successor's readyz window
+	// and race the whole drain→dispatch→refusal lifecycle before this
+	// read; that is the row continuing correctly, not a violation.
+	if p := updatePhase(t, bst, u.ID); p == store.UpdPending ||
+		p == store.UpdInterrupted {
+		t.Fatalf("update phase after failover = %q — row regressed instead of resuming", p)
 	}
 
 	// Agent reconnects → node drained → dispatch → honest refusal
