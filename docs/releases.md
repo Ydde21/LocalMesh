@@ -33,7 +33,9 @@ execution across the fleet. The design:
 
 `docs/release-signing.md` is the authoritative doc for generation,
 custody (`~/.localmesh/keys`, offline/HSM — never the repo), backup,
-rotation, and compromise. Short form:
+rotation, and compromise. `scripts/release-ceremony.sh` walks the
+first-use ceremony (`preflight` → `keygen` → `check`) with the same
+guards; the manual short form:
 
 ```bash
 # production identity — passphrase-encrypted real minisign key:

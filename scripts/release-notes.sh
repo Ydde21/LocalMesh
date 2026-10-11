@@ -55,7 +55,10 @@ SEMVER="${VERSION#v}"
 MAJMIN="$(echo "$SEMVER" | cut -d. -f1-2)"
 NOTES=""
 [ -f "$CHANGELOG" ] && NOTES=$(awk -v want="## v$MAJMIN" '
-	/^## / { if (found) exit; if ($0 == want) { found=1; next } }
+	/^## / {
+		if (found) exit
+		if ($0 == want || index($0, want " —") == 1 || index($0, want " -") == 1) { found=1; next }
+	}
 	found
 ' "$CHANGELOG")
 

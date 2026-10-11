@@ -155,6 +155,11 @@ Resolution order and guards:
 
 ## First-use ceremony (activating the production key)
 
+`scripts/release-ceremony.sh` walks this ceremony interactively —
+`preflight` → `keygen` → `check` — with the same guards (no clobber,
+self sign/verify proof, dev keys can't stand in). The manual steps
+remain authoritative:
+
 The first maintainer-signed release is when the production `key_id`
 becomes a fleet trust anchor — do these steps in order, once:
 

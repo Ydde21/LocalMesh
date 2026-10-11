@@ -1,13 +1,14 @@
 # LocalMesh 0.10.0 — DRAFT release notes
 
 > **Status: DRAFT — not yet a published release.**
-> A development-signed `0.10.0-rc1` exists for validation (its manifest
-> records `signer.dev: true`; `verify-release.sh` warns accordingly).
-> Official `0.10.0` publication is gated on maintainer signing with the
-> production release key and the maintainer's go-ahead — see
-> [release-signing.md](release-signing.md) and
-> [docs/beta-checklist.md](beta-checklist.md) §8. Nothing below is
-> final until that signature exists.
+> Development-signed `0.10.0-rc1` and `0.10.0-rc2` candidates exist for
+> validation (their manifests record `signer.dev: true`;
+> `verify-release.sh` warns accordingly). A full `0.10.0` pipeline
+> dry-run also verified version stamping and platform coverage under
+> the dev key. Official `0.10.0` publication is gated on the maintainer
+> key ceremony (`scripts/release-ceremony.sh`, see
+> [release-signing.md](release-signing.md)) and the maintainer's
+> go-ahead — nothing below is final until that signature exists.
 
 LocalMesh turns your own machines — laptops, workstations, servers —
 into one private, distributed AI cluster behind a single
@@ -94,6 +95,24 @@ release-candidate clean.
 - **`scripts/release-notes.sh`** renders notes skeletons (changelog
   section + sha256 table from the *signed* `SHA256SUMS` + verify/install
   runbook) so published notes can't drift from the artifacts.
+- **Container/SBOM security gate** — `scripts/ci-security-scan.sh`
+  builds CycloneDX SBOMs for the server, router, and web images plus
+  the source tree (pinned `syft`/`grype`), fails on fixable
+  Critical/High findings, fails closed on scanner errors, and keeps
+  reports under `dist/security/` — [security-scan.md](security-scan.md).
+- **Reproducible release builds** — two clean-checkout builds produce
+  byte-identical artifacts under a pinned `GOTOOLCHAIN`;
+  [reproducibility.md](reproducibility.md) records the proof and the
+  remaining documented nondeterminism inputs.
+- **Release-verification CI** — `.github/workflows/release-verify.yml`
+  orchestrates every release gate (tests, cross-compile, smokes,
+  security, reproducibility, artifact install) behind a final gate
+  that fails on skipped or unsuccessful required jobs —
+  [ci-release.md](ci-release.md).
+- **Maintainer ceremony tooling** — `scripts/release-ceremony.sh`
+  walks the production-key establishment: preflight → guarded keygen
+  (no clobber, self sign/verify proof) → wiring check (committed pubkey
+  byte-identical to custody, dev key can never be the release key).
 - `verify-release.sh` warns on `signer.dev` manifests, checks every
   artifact against the signed sums, validates the manifest schema, and
   cross-checks with real `minisign -V`/`openssl dgst` when installed.
@@ -250,14 +269,20 @@ from pre-v0.9 builds:
 - CI on every merge: build + vet + unit/e2e against real Postgres,
   per-OS agent smoke, real-binary enroll→infer→failover legs,
   signed-rollout live smoke — [ci.md](ci.md).
+- Release-candidate battery on the release commit: `make verify`
+  (fmt+vet+tests+race+web), 22/22 chaos tests, 70/70 stress rounds,
+  benchmarks — all green.
+- Live smokes on real binaries: HA failover through the stable router
+  endpoint, real-Ollama inference + honest mid-stream interruption
+  across two control-plane promotions, signed update rollouts with
+  durable canary approval, agent CLI/service lifecycle.
+- Clean-machine install e2e (`scripts/ci-clean-install.sh`): 12/12
+  stages on an isolated compose project.
 - Cross-platform runtime CI: real agent + fakeollama binaries on
   ubuntu/macos/windows runners.
-- Real-Ollama HA acceptance (`scripts/ci-ollama-ha-smoke.sh`) —
-  full failover demonstration against a real engine and real model.
-- Chaos suite: 22 failure-injection tests against real Postgres and
-  real agent sockets.
-- Security: v0.10 audit + 10-case regression suite + clean
-  `govulncheck`.
+- Security: v0.10 audit + expanded regression suite + clean
+  `govulncheck` (go1.27.2) + Grype/SBOM gate — zero fixable
+  Critical/High across all production images and the source tree.
 - **Not claimed**: physical multi-device fleet validation (the beta
   program's job — unchecked in [beta-checklist.md](beta-checklist.md)
   §7 until runs are recorded), real NVIDIA GPU telemetry.

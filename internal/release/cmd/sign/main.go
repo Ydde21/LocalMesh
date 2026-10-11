@@ -10,6 +10,7 @@
 //	sign keygen -sec KEY.sec -pub KEY.pub [-dev]
 //	sign pubkey -sec KEY.sec          # re-emit public key file
 //	sign -sec KEY.sec -m FILE         # writes FILE.minisig
+//	sign verify -pub KEY.pub -m FILE  # verify FILE against FILE.minisig
 package main
 
 import (
@@ -33,6 +34,8 @@ func main() {
 		err = cmdKeygen(os.Args[2:])
 	case "pubkey":
 		err = cmdPubkey(os.Args[2:])
+	case "verify":
+		err = cmdVerify(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -53,6 +56,7 @@ func usage() {
                                           release.sh refuses it without --dev
   sign pubkey -sec KEY.sec                print the public key file
   sign -sec KEY.sec -m FILE               write FILE.minisig
+  sign verify -pub KEY.pub -m FILE        verify FILE against FILE.minisig
 
 The .pub and .minisig files interoperate with real minisign ("Ed"
 signatures). The .sec file does NOT — it is unencrypted raw key
@@ -130,6 +134,35 @@ func cmdSign(args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "sign: wrote %s (key id %s)\n", *msg+release.MinisignSigExt, release.MinisignKeyID(keynum))
+	return nil
+}
+
+func cmdVerify(args []string) error {
+	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
+	pub := fs.String("pub", "", "public key path (minisign .pub)")
+	msg := fs.String("m", "", "file to verify (reads FILE.minisig)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *pub == "" || *msg == "" {
+		return fmt.Errorf("verify requires -pub and -m")
+	}
+	pubData, err := os.ReadFile(*pub)
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(*msg)
+	if err != nil {
+		return err
+	}
+	sig, err := os.ReadFile(*msg + release.MinisignSigExt)
+	if err != nil {
+		return err
+	}
+	if err := release.VerifyMinisign(pubData, data, sig); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "sign: %s signature verifies\n", *msg)
 	return nil
 }
 

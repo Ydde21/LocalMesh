@@ -7,10 +7,11 @@ repo's `vX.Y` naming. Detail-level references live in `docs/`.
 ## v0.10 — public beta release candidate (in preparation)
 
 Release-candidate hardening for the first maintainer-signed release.
-A dev-signed `0.10.0-rc1` exists for validation; trusted `0.10.0`
-publication is gated on maintainer signing — draft notes in
+Dev-signed `0.10.0-rc1`/`-rc2` candidates exist for validation; trusted
+`0.10.0` publication is gated on maintainer signing — draft notes in
 `docs/release-notes-0.10.md`, identity model in
-`docs/release-signing.md`.
+`docs/release-signing.md`, ceremony tooling in
+`scripts/release-ceremony.sh`.
 
 ### Added
 
@@ -40,6 +41,27 @@ publication is gated on maintainer signing — draft notes in
   a dev key can never sign silently. `scripts/release-notes.sh`
   renders notes from the signed sums; `verify-release.sh` warns on
   dev manifests. Docs: `docs/releases.md`, `docs/release-signing.md`.
+- **Container/SBOM security gate** — `scripts/ci-security-scan.sh`
+  builds CycloneDX SBOMs (pinned `syft`/`grype`) for the server,
+  router, and web images plus the source tree; fails on fixable
+  Critical/High, fails closed on scanner errors, reports under
+  `dist/security/`. Docs: `docs/security-scan.md`.
+- **Reproducible release builds** — two clean-checkout builds produce
+  byte-identical artifacts under pinned `GOTOOLCHAIN`; manifest
+  `created_at` follows `SOURCE_DATE_EPOCH`. Proof + residual
+  nondeterminism table: `docs/reproducibility.md`.
+- **Release-verification CI** — `.github/workflows/release-verify.yml`
+  orchestrates every gate (tests, cross-compile, smokes, security,
+  reproducibility, artifact install) behind a final gate that fails on
+  skipped/unsuccessful required jobs. Docs: `docs/ci-release.md`.
+- **Maintainer key ceremony** — `scripts/release-ceremony.sh` walks
+  `preflight` → `keygen` → `check`: guarded generation (no clobber,
+  self sign/verify proof, fingerprint derivation), committed-pubkey
+  byte comparison, dev-key exclusion.
+- **Hardware validation program** — `scripts/hw-validate.sh` emits a
+  sanitized per-device evidence bundle; `docs/hardware-matrix.md`
+  tracks OS/arch/GPU/RAM/inference results; GitHub issue template for
+  community compatibility reports.
 - **Install & clean-install verification** — `scripts/install-localmesh.sh`
   runs the documented install (`--ha` for the standby+router stack);
   `scripts/ci-clean-install.sh` proves it e2e on a disposable compose
@@ -65,6 +87,14 @@ publication is gated on maintainer signing — draft notes in
 - **v0.10 audit + regression suite** — `docs/security-audit-v10.md`
   re-classifies every v0.9 finding; `security_v10_test.go` adds 10
   pinned cases; `govulncheck` clean pre-RC.
+- **Trust-review residuals (T-1/T-2/T-4/T-5/T-6)** — a revoked env admin
+  key can no longer crash-loop the server, malformed session cookies
+  stop returning 500s, poll secrets move to headers, client-facing
+  upstream errors are classified, and `/readyz` probes are coalesced
+  behind a 1s cache. `docs/trust-review-v10.md`.
+- **Release-scope integrity** — signed `SHA256SUMS` and the release
+  manifest now catalog only the built version's artifacts; a reused
+  `dist/` can no longer smuggle stale binaries into a signed release.
 
 ### Fixed
 
