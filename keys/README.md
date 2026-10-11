@@ -35,7 +35,7 @@ trusts this repository:
 | file | key id | status |
 |------|--------|--------|
 | `localmesh-dev.pub` | `7E7C3A36C493E4C1` | **DEV ONLY** — see below |
-| `localmesh-release.pub` | *(none yet)* | **reserved** — the maintainer production key lands here at its first-use ceremony (docs/release-signing.md). Do not create or commit anything else under this name. |
+| `localmesh-release.pub` | `0538AA36C3BC9FD3` | **PRODUCTION** — committed at `b87a9d6` during the v0.10.0 first-use ceremony; signs v0.10.0 and later releases. |
 
 ### `localmesh-dev.pub` — development key, NOT a trust anchor
 
@@ -55,11 +55,10 @@ carries `signer.dev: true`, like `dist/0.10.0-rc1`.
   on every manifest it signs — that flag exists precisely so a dev
   signature can never masquerade as a production one.
 
-### `localmesh-release.pub` — reserved path
+### `localmesh-release.pub` — production key
 
-The production release key does not exist yet. When the maintainer
-generates it (per the first-use ceremony in
-[docs/release-signing.md](../docs/release-signing.md)), the public half
-is committed under exactly this name, and its fingerprint is published
-in that release's notes. Until then, any file named
-`localmesh-release.pub` is unauthorized — treat one as suspicious.
+The production release public key (key id `0538AA36C3BC9FD3`) was
+established at commit `b87a9d6` and signs the published `v0.10.0`
+release. Its fingerprint is published in that release's notes. The
+encrypted secret half lives at `~/.localmesh/keys/localmesh-release.sec`
+on the maintainer's machine and is never committed.
