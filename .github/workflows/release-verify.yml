@@ -41,6 +41,10 @@ on:
   push:
     # Tags are never path-filtered: a v* push always runs everything.
     tags: ['v*']
+  release:
+    # Publishing a GitHub release is itself a gate event — covers the
+    # case where a tag push raced workflow registration on a fresh repo.
+    types: [published]
   workflow_dispatch:
     inputs:
       ollama_live:
