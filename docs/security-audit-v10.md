@@ -19,8 +19,9 @@ presentation → revocation; TLS and insecure-path gating; secret-in-log/
 response/event sweeps; git history grep for committed secrets; targeted
 reads of every v0.9 finding location. `go vet ./internal/server/` clean;
 `go test -run 'Security|security' ./internal/server/` green (10 new v0.10
-regression tests, see below). Dependency scanning (govulncheck/grype)
-still not available on the audit host — unchanged gap, run in CI pre-tag.
+regression tests, see below). Dependency scanning: `govulncheck` clean
+pre-RC on go1.27.2 (see "Residual"); `grype` remains a CI-side pre-tag
+gate.
 
 ## Verified sound (with evidence)
 
@@ -284,7 +285,10 @@ secret from `?secret=` to `X-Poll-Secret`.
   `LOCALMESH_TRUST_PROXY=1` and per-client buckets return.
 - `LOCALMESH_ADMIN_KEY` is install-once; the bootstrap admin key is
   logged once. Both documented with rotation runbooks.
-- Dependency scanning still unrun on this host (no govulncheck/grype).
+- Dependency scanning: `govulncheck` run pre-RC (golang.org/x/vuln
+  latest) — 10 reachable stdlib findings under go1.27.1, all resolved
+  by building on go1.27.2 (CI floats on `1.27` patch releases).
+  `grype` (image/SBOM scan) remains a CI-side prerequisite.
 
 ## Verdict
 
