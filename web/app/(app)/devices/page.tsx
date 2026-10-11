@@ -29,9 +29,19 @@ export default function DevicesPage() {
 
 function DevicesInner() {
   const params = useSearchParams();
+  const router = useRouter();
   const selectedId = params.get("id");
   const { data: nodes, error: nodesErr, mutate: nodesMutate } = useNodes();
-  const [addOpen, setAddOpen] = useState(false);
+  // ?add=1 deep-links into the guided dialog — empty states elsewhere in
+  // the app point here so "add a device" lands on the real flow, not a
+  // page where the user must find the button again.
+  const addParam = params.get("add") === "1";
+  const [manualAdd, setManualAdd] = useState(false);
+  const addOpen = addParam || manualAdd;
+  const closeAdd = () => {
+    setManualAdd(false);
+    if (addParam) router.replace("/devices");
+  };
 
   return (
     <div className="mx-auto max-w-[1200px] px-6 py-6">
@@ -42,7 +52,7 @@ function DevicesInner() {
             Machines connected to your cluster
           </p>
         </div>
-        <button className="btn btn-primary btn-sm" onClick={() => setAddOpen(true)}>
+        <button className="btn btn-primary btn-sm" onClick={() => setManualAdd(true)}>
           <Plus size={13} /> Add device
         </button>
       </header>
@@ -59,9 +69,9 @@ function DevicesInner() {
         <Panel>
           <Empty
             title="No devices connected"
-            hint="Generate an enrollment token, then run localmesh-agent join on the machine — it appears here after you approve it."
+            hint="Install the agent on a machine, then enroll it — the Add device walkthrough covers the token, join command, and approval."
           >
-            <button className="btn btn-primary btn-sm" onClick={() => setAddOpen(true)}>
+            <button className="btn btn-primary btn-sm" onClick={() => setManualAdd(true)}>
               <Plus size={13} /> Add device
             </button>
           </Empty>
@@ -76,7 +86,7 @@ function DevicesInner() {
 
       <UpdateHistory />
 
-      {addOpen && <AddDeviceDialog onClose={() => setAddOpen(false)} />}
+      {addOpen && <AddDeviceDialog onClose={closeAdd} />}
       {selectedId && <DeviceDrawer id={selectedId} />}
     </div>
   );
@@ -1128,6 +1138,15 @@ function AddDeviceDialog({ onClose }: { onClose: () => void }) {
                 <code className="mono">--ca-fingerprint sha256:…</code> pins the cluster CA —
                 recommended so the agent verifies it is talking to your server.
               </p>
+              <div className="mt-2.5 rounded-md border border-[var(--color-border)] bg-white/[0.03] px-3 py-2.5 text-[11.5px] leading-relaxed text-[var(--color-text-dim)]">
+                No agent on the machine yet? Install it first —{" "}
+                <code className="mono break-all text-[var(--color-text)]">
+                  curl -fsSL https://raw.githubusercontent.com/Ydde21/LocalMesh/main/scripts/install-agent.sh | sh
+                </code>{" "}
+                on macOS/Linux (<code className="mono">install-agent.ps1</code> on Windows).
+                To serve models the device also needs an engine —{" "}
+                <code className="mono">ollama serve</code> with at least one pulled model.
+              </div>
               {disco?.advertising && (
                 <div className="mt-2.5 flex items-start gap-2.5 rounded-md border border-[var(--color-accent)]/25 bg-[var(--color-accent-soft)] px-3 py-2.5">
                   <Wifi size={13} className="mt-0.5 shrink-0 text-[var(--color-accent)]" />

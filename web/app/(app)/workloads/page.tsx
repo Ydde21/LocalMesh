@@ -55,8 +55,12 @@ function WorkloadsInner() {
         ) : workloads.length === 0 ? (
           <Empty
             title="No workloads"
-            hint="Send a request to POST /v1/chat/completions on the control plane to see routing here."
-          />
+            hint="Send a request through the Playground (or any OpenAI client at /v1/chat/completions) — the routing decision lands here."
+          >
+            <Link href="/playground" className="btn btn-primary btn-sm">
+              Open Playground
+            </Link>
+          </Empty>
         ) : (
           <div className="overflow-x-auto">
           <table className="w-full min-w-[780px] text-left">

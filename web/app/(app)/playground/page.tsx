@@ -10,7 +10,7 @@ import Link from "next/link";
 import { useModels, useNodes, ApiError } from "@/lib/api";
 import { useSWRConfig } from "swr";
 import { useEvents } from "@/components/shell";
-import { Panel, Empty, ErrorNote, LoadingRows } from "@/components/ui";
+import { Panel, Empty, ErrorNote, ErrorState, LoadingRows } from "@/components/ui";
 import { StatusBadge } from "@/components/status";
 import { fmtBytes, fmtMs } from "@/lib/format";
 import type { ClusterModel, Node, Workload } from "@/lib/types";
@@ -42,8 +42,8 @@ function schedulable(n: Node): boolean {
 }
 
 export default function PlaygroundPage() {
-  const { data: models, error: modelsErr } = useModels();
-  const { data: nodes, error: nodesErr } = useNodes();
+  const { data: models, error: modelsErr, mutate: modelsMutate } = useModels();
+  const { data: nodes, error: nodesErr, mutate: nodesMutate } = useNodes();
   const { events } = useEvents();
   const { mutate } = useSWRConfig();
 
@@ -357,26 +357,55 @@ export default function PlaygroundPage() {
         <Panel className="fade-up self-start px-4 py-4 lg:col-span-2">
           <div className="label mb-2.5">Model</div>
           {modelsErr || nodesErr ? (
-            <ErrorNote error={modelsErr ?? nodesErr} />
+            <ErrorState
+              error={modelsErr ?? nodesErr}
+              onRetry={() => {
+                modelsMutate();
+                nodesMutate();
+              }}
+            />
           ) : models === undefined || nodes === undefined ? (
             <LoadingRows rows={1} />
           ) : usable.length === 0 ? (
-            <Empty
-              title="No usable models"
-              hint="Install a model on an online node first — the picker only lists models the scheduler can actually serve."
-            >
-              <div className="flex flex-col items-center gap-2">
-                {unusableNames.length > 0 && (
-                  <div className="max-w-[340px] text-center text-[11px] text-[var(--color-warn)]">
-                    Installed but unschedulable (offline or out of service):{" "}
-                    {unusableNames.join(", ")}
-                  </div>
-                )}
-                <Link href="/models" className="btn btn-primary btn-sm">
-                  Install a model
+            /* First-run triage: the honest blocker is whichever step is
+               actually missing — no devices, no schedulable device, or no
+               servable model — each with its own next step. */
+            nodes.length === 0 ? (
+              <Empty
+                title="No devices yet"
+                hint="Install the agent on a machine and enroll it, then install a model — the picker only lists what a live node can serve."
+              >
+                <Link href="/devices?add=1" className="btn btn-primary btn-sm">
+                  Add a device
                 </Link>
-              </div>
-            </Empty>
+              </Empty>
+            ) : onlineSched.size === 0 ? (
+              <Empty
+                title="No schedulable devices"
+                hint="Every device is pending approval, offline, stale, or in maintenance — nothing can serve a request right now."
+              >
+                <Link href="/devices" className="btn btn-primary btn-sm">
+                  Open Devices
+                </Link>
+              </Empty>
+            ) : (
+              <Empty
+                title="No usable models"
+                hint="Install a model on an online node first — the picker only lists models the scheduler can actually serve."
+              >
+                <div className="flex flex-col items-center gap-2">
+                  {unusableNames.length > 0 && (
+                    <div className="max-w-[340px] text-center text-[11px] text-[var(--color-warn)]">
+                      Installed but unschedulable (offline or out of service):{" "}
+                      {unusableNames.join(", ")}
+                    </div>
+                  )}
+                  <Link href="/models" className="btn btn-primary btn-sm">
+                    Install a model
+                  </Link>
+                </div>
+              </Empty>
+            )
           ) : (
             <>
               <select

@@ -102,9 +102,9 @@ export default function OverviewPage() {
         <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: "var(--color-border)" }}>
           <div className="label">Cluster utilization</div>
           <div className="flex items-center gap-4 text-[10.5px] text-[var(--color-text-faint)]">
-            <Legend swatch="#4f7cff" label="CPU" />
-            <Legend swatch="#34d399" label="Memory" />
-            <Legend swatch="#a78bfa" label="Active requests" />
+            <Legend swatch="var(--color-accent)" label="CPU" />
+            <Legend swatch="var(--color-online)" label="Memory" />
+            <Legend swatch="var(--color-idle)" label="Active requests" />
           </div>
         </div>
         <div className="px-3 py-3">
@@ -142,7 +142,10 @@ export default function OverviewPage() {
               <LoadingRows rows={2} />
             ) : activeWls.length === 0 ? (
               <div className="px-4 py-8 text-center text-[12px] text-[var(--color-text-faint)]">
-                No requests currently executing
+                No requests in flight —{" "}
+                <Link href="/playground" className="text-[var(--color-accent)] hover:underline">
+                  send one from the Playground
+                </Link>
               </div>
             ) : null}
             {activeWls?.map((w) => (
@@ -179,9 +182,9 @@ export default function OverviewPage() {
         ) : nodes.length === 0 ? (
           <Empty
             title="No devices yet"
-            hint="Generate an enrollment token in Settings, then run `localmesh-agent join` on another machine."
+            hint="Install the agent on a machine and enroll it — Devices walks you through the token, join command, and approval."
           >
-            <Link href="/settings" className="btn btn-primary btn-sm">Create enrollment token</Link>
+            <Link href="/devices?add=1" className="btn btn-primary btn-sm">Add a device</Link>
           </Empty>
         ) : (
           <div className="divide-y" style={{ borderColor: "var(--color-border)" }}>
