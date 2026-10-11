@@ -213,13 +213,20 @@ file, no artifact exists for this platform, or the release's protocol
 version exceeds this build's (the control plane must be upgraded first;
 `-force` overrides when it already has been).
 
-There is no version ordering: installing an *older* signed release is a
-valid, supported downgrade — the tool only warns when the release's
+Installing an *older* signed release remains a valid, supported
+downgrade for the manual path — the tool only warns when the release's
 protocol is older than this build's. Rollback works the same way
 (re-install the older signed release, or restore `<binary>.bak`); the
 update-history tripwire blocks re-installing a version that already
-failed post-restart on the node. See the "Version ordering" paragraph
-in `docs/security.md` for the managed-rollout side.
+failed post-restart on the node.
+
+Managed rollouts, however, honor an anti-rollback floor: when an
+approved release's signed manifest declares `min_agent_version`, no
+rollout may target an older agent version until that release is
+revoked, and every node that verifies such a manifest pins the floor
+locally (refusing below-floor dispatches even if the control plane is
+compromised). See the "Version ordering" paragraph in
+`docs/security.md` for the full model.
 
 On Windows the running `.exe` can't be replaced: `update` reports the
 failure and asks you to `localmesh-agent service stop` first — it does

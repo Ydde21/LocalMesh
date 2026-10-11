@@ -48,6 +48,19 @@ agents normally; those nodes are simply skipped by rollouts until
 updated by hand (the manual runbook in `docs/agent-updates.md` works on
 every version).
 
+## Anti-rollback floor (`min_agent_version`)
+
+Separate from the wire-protocol window, a release may declare a semver
+floor in its signed manifest (`release.sh LOCALMESH_MIN_AGENT_VERSION`).
+Once such a release is approved: the server refuses rollouts targeting
+any older version, and each agent that verifies the manifest pins the
+floor into `agent.json` — afterwards that node refuses server-dispatched
+downgrades below it even if the control plane is compromised. Deliberate
+rollbacks stay possible: revoke the floor-bearing release (fleet-wide)
+or run a manual `localmesh-agent update` on the node (per-node). Use it
+when a release closes an agent vulnerability or a wire behaviour older
+builds must not resume. See `docs/security.md` → "Version ordering".
+
 ## Release channels
 
 `stable` is the only channel today. A registered release is

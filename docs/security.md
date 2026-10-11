@@ -259,25 +259,30 @@ is agent-local: a dispatched `agent_upgrade` frame names only a signer
 Every hop verified by the hop before it: the wire can choose *which*
 signed release to install but contributes zero trust of its own.
 
-**Version ordering (downgrade policy).** There is deliberately no
-semver ordering on updates — *downgrades are ordinary signed releases*:
-`localmesh-agent update` applies any release that verifies (it only
-*warns* when the release's protocol is older than this build's), and a
-managed rollout likewise accepts any registered release regardless of
-direction. The only directional gate is protocol: a release whose
-`protocol_version` exceeds what the connected control plane speaks is
-refused, since the server would reject the new agent at hello.
-Rollback *is* the downgrade path (`.bak` restore on failed health
-check, or re-install an older signed release), and the update-history
+**Version ordering (downgrade policy).** Downgrades are ordinary signed
+releases — but an **anti-rollback floor** is available when a release
+must close an agent-side vulnerability or wire behaviour. A release
+whose signed manifest declares `min_agent_version`
+(`release.sh LOCALMESH_MIN_AGENT_VERSION`, `gen-manifest
+-min-agent-version`) raises two floors once it is approved and verified:
+
+- **Server:** `CreateRollout` refuses any target release below the
+  strongest `min_agent_version` across approved manifests — an admin
+  key alone cannot schedule the downgrade; revoking the floor-bearing
+  release is the deliberate, audited escape hatch.
+- **Agent:** the first upgrade that verifies a floor-bearing manifest
+  pins `version_floor` into `agent.json` *before* the binary swap;
+  afterwards that node refuses any server-dispatched upgrade below its
+  floor even if the control plane is compromised and the old release's
+  signature is valid. A manual `localmesh-agent update` on the node is
+  the per-node escape.
+
+Without the opt-in flag the policy is unchanged: managed rollouts and
+`update` accept any registered signed release in either direction, the
+protocol gate still refuses releases the server can't speak, `.bak`
+restore remains the post-failure downgrade path, and the update-history
 tripwire blocks re-installing a version that already failed
-post-restart on that node. What nothing currently stops: an
-administrator (or an attacker holding an `admin` API key) intentionally
-rolling the fleet back to an old but validly-signed release — there is
-no minimum-version floor or anti-rollback pin in
-`internal/agent/update` or `internal/server/updateplane`. That is a
-documented gap, not an oversight in verification: the signature still
-proves provenance, so the residual exposure is policy — an `admin`
-key can schedule a downgrade — not forgery.
+post-restart on that node.
 
 Same story as enrollment, restated: the server can *schedule* but never
 *sign* — trust enters the fleet from the operator's key on each device.
