@@ -56,6 +56,42 @@ go run ./internal/release/cmd/sign keygen -dev \
   -pub ~/.localmesh/keys/localmesh-dev.pub              # dev/RC only
 ```
 
+Environment for the *production* pair: generate it on a machine that
+is offline or at least single-purpose for the ceremony (a laptop booted
+for this, not a shared CI worker). Write the pair directly to
+`~/.localmesh/keys/` or to encrypted removable media — never to a
+scratch dir that later syncs anywhere.
+
+### Verify the pair right after keygen
+
+Before the secret goes into custody, prove the pair agrees with itself
+and record the fingerprint you will publish:
+
+```bash
+# key id / fingerprint — derive it from the PUBLIC key, never trust
+# filenames. Minisign keys: the hex id is in the .pub comment line and
+# in every signature the key produces.
+head -1 ~/.localmesh/keys/localmesh-release.pub
+#   → untrusted comment: minisign public key <HEXID>
+# PEM/openssl: sha256 of the DER public key, as release.sh derives it
+openssl pkey -pubin -in ~/.localmesh/keys/localmesh-release.pub \
+  -outform DER | shasum -a 256 | cut -c1-32     # → "sha256:<this>"
+# localmesh .sec → re-emit the canonical .pub
+go run ./internal/release/cmd/sign pubkey -sec ~/.localmesh/keys/localmesh-release.sec
+
+# self-check: sign a file with the secret, verify with the public half
+echo test > /tmp/t && minisign -S -s ~/.localmesh/keys/localmesh-release.sec -m /tmp/t \
+  && minisign -V -p ~/.localmesh/keys/localmesh-release.pub -m /tmp/t && rm /tmp/t*
+```
+
+The key id the public key resolves to (e.g. `7E7C3A36C493E4C1`-style
+hex for minisign, `sha256:…` for PEM) is the **fingerprint** — write it
+down separately from the keys; the activation ceremony and the release
+notes publish it. Passphrase practice: store it in a password manager
+immediately, never in shell history, a dotfile, or a CI variable that
+echoes (`LOCALMESH_SIGNING_PASSWORD` is the only sanctioned path, and
+only inside a secrets store — see CI below).
+
 ## Custody
 
 - **Location:** `~/.localmesh/keys/` (the `LOCALMESH_KEYS_DIR`
@@ -78,10 +114,16 @@ go run ./internal/release/cmd/sign keygen -dev \
   from the signing host (e.g. passphrase-protected export on removable
   media in a safe). The `.pub` needs no backup — it is derived +
   distributed.
-- **CI:** expose `LOCALMESH_SIGNING_KEY` (+ optional
-  `LOCALMESH_SIGNING_PASSWORD`) at release time only; set
-  `LOCALMESH_RELEASE_KEY_ID` to the expected key id so a mis-configured
-  secret aborts the build instead of signing with it.
+- **CI:** keep the secret in the CI secrets store, mounted as a *file*
+  (release.sh wants a path, not a value in argv). Expose
+  `LOCALMESH_SIGNING_KEY` (+ `LOCALMESH_SIGNING_PASSWORD` when the key
+  is passphrase-protected) only in the release job's environment —
+  masked so nothing can echo them into a log. Always set
+  `LOCALMESH_RELEASE_KEY_ID` to the expected key id so a
+  mis-provisioned or swapped secret aborts the build instead of
+  signing with it. Prefer a short-lived job (ephemeral runner or a
+  step that deletes the mounted key on exit): the secret's exposure
+  window is the release build, nothing else.
 
 ## How release.sh consumes the identity
 
@@ -110,6 +152,54 @@ Resolution order and guards:
    wrong secret can't sign.
 4. `--pubkey` defaults to the sibling `.pub` next to the secret key
    and is used for the openssl key-id derivation.
+
+## First-use ceremony (activating the production key)
+
+The first maintainer-signed release is when the production `key_id`
+becomes a fleet trust anchor — do these steps in order, once:
+
+1. **Generate** the pair per *Generating keys* (offline host,
+   passphrase-encrypted real minisign preferred) and run the
+   post-keygen checks — you now hold the **fingerprint** (key id).
+2. **Publish the public half** by committing it as
+   `keys/localmesh-release.pub` in this repo (see `keys/README.md`).
+   The commit — and the signed release tag that contains it — is the
+   distribution channel; mirror downloads must never be the source of
+   the key. Reserve the name: nothing else may ever be committed under
+   `keys/localmesh-release.pub`, and the secret half is never committed
+   anywhere.
+3. **Pin the fingerprint in CI** before the first signed build:
+   `LOCALMESH_RELEASE_KEY_ID=<key id>` so release.sh aborts on any
+   secret that isn't this key.
+4. **Announce the fingerprint in the release notes** of the first
+   maintainer-signed release ("release signing key id: …") — that gives
+   verifiers an independent string to compare against what their
+   verifier reports and against `signer.key_id` in the manifest.
+5. **Register the key** on every production control plane:
+   `POST /api/v1/release-keys` `{key_id, kind, public_key, comment}` —
+   without the row, the control plane cannot admit the signed release.
+6. **Cut the release** (`LOCALMESH_SIGNING_KEY=…sec
+   LOCALMESH_RELEASE_KEY_ID=<id> ./scripts/release.sh -v X.Y.Z`), then
+   `verify-release.sh dist --pubkey keys/localmesh-release.pub` — must
+   PASS with **no** `signer.dev` warning.
+7. **Pin the fleet**: operators run `localmesh-agent update-key
+   localmesh-release.pub` per node (or bake `-update-pubkey` into
+   install media). Until a node is pinned it refuses server-dispatched
+   upgrades — `localmesh-agent update` with `-pubkey` still works.
+
+## What a user verifies
+
+For everyone who is not the maintainer, verification reduces to: the
+signatures over `SHA256SUMS` and `release-manifest.json` check out
+under the public key *they already trust* (from `keys/` at a known
+commit/tag — never from the release download), every artifact digest
+matches the signed sums, the five agent platforms are present, and the
+manifest carries **no** `signer.dev` flag for a production build. The
+copy-paste version of this is the "Verifying a release" section of
+`docs/releases.md`; `scripts/verify-release.sh` performs all of it and
+fails closed — unsigned releases are rejected outright unless
+`--allow-unsigned` is passed, and `--allow-unsigned` only ever yields
+checksum verification, never trust.
 
 ## Rotation (planned)
 
