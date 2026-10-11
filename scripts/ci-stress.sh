@@ -140,7 +140,7 @@ for round in $(seq "$ROUNDS"); do
     if [ -n "$tags" ]; then
       args=(-tags "$tags" "${args[@]}")
     fi
-    out=$(mktemp -t ci-stress)
+    out=$(mktemp "${TMPDIR:-/tmp}/ci-stress.XXXXXX")
     if go test "${args[@]}" "$pkg" >"$out" 2>&1; then
       PASSN[$i]=$((PASSN[$i] + 1))
       [ "$QUIET" -eq 0 ] && tail -n 3 "$out" || true
