@@ -126,6 +126,7 @@ func (a *API) Register(mux *http.ServeMux, mwAdmin, mwRead func(http.Handler) ht
 	mux.Handle("POST /api/v1/models/delete", mwAdmin(http.HandlerFunc(a.handleModelDelete)))
 	mux.Handle("GET /api/v1/model-operations", mwRead(http.HandlerFunc(a.handleModelOps)))
 	mux.Handle("POST /api/v1/model-operations/{id}/cancel", mwAdmin(http.HandlerFunc(a.handleModelOpCancel)))
+	mux.Handle("POST /api/v1/model-operations/{id}/retry", mwAdmin(http.HandlerFunc(a.handleModelOpRetry)))
 	mux.Handle("GET /api/v1/models/placement", mwRead(http.HandlerFunc(a.handleModelPlacement)))
 	mux.Handle("GET /api/v1/discovery/status", mwRead(http.HandlerFunc(a.handleDiscoveryStatus)))
 	mux.Handle("POST /api/v1/dashboard/sessions/revoke", mwAdmin(http.HandlerFunc(a.handleSessionRevoke)))

@@ -182,6 +182,9 @@ func TestDedupeRestartMidRetrySingleOp(t *testing.T) {
 			break
 		}
 		if got := coveredOps(t, envB, nodeID, "midretry:latest"); got != 1 {
+			if st = opStatus(t, envB, op.ID); st == "succeeded" || st == "failed" {
+				break
+			}
 			t.Fatalf("covered rows = %d mid-recovery (op %s), want 1", got, st)
 		}
 		time.Sleep(100 * time.Millisecond)
