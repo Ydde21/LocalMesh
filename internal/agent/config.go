@@ -39,6 +39,12 @@ type Config struct {
 	// release.ParsePublicKey().ID() at provisioning time — the value
 	// `update-key` prints for pinning into server-side release policy.
 	UpdatePubkeyID string `json:"update_pubkey_id,omitempty"`
+	// VersionFloor is the anti-rollback floor this agent ratcheted from
+	// a signed release manifest: server-dispatched upgrades to a version
+	// below it are refused, so a compromised control plane cannot roll
+	// this node back. Deliberate rollbacks remain possible via a manual
+	// `localmesh-agent update` run on the node itself.
+	VersionFloor string `json:"version_floor,omitempty"`
 }
 
 // DefaultDir returns the agent config directory.

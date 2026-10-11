@@ -252,6 +252,17 @@ func (a *Agent) runUpgrade(ctx context.Context, c *wsjson.Conn, job *upgradeJob)
 		return
 	}
 
+	// --- anti-rollback floor (cheap, pre-download) ---
+	// A floor ratcheted from a signed manifest bounds every
+	// server-dispatched upgrade. This checks the dispatch's claimed
+	// version; the signed manifest is re-checked after verification —
+	// the manifest is authoritative, the frame merely asserted.
+	if a.cfg.VersionFloor != "" && u.Version != "" &&
+		release.VersionLT(u.Version, a.cfg.VersionFloor) {
+		fail("release %s is below this node's anti-rollback floor %s", u.Version, a.cfg.VersionFloor)
+		return
+	}
+
 	// --- resolve the release source ---
 	opts := update.Options{
 		PubKey: []byte(a.cfg.UpdatePubkey),
@@ -311,6 +322,21 @@ func (a *Agent) runUpgrade(ctx context.Context, c *wsjson.Conn, job *upgradeJob)
 	if u.Version != "" && !versionsEqual(u.Version, plan.Manifest.Version) {
 		fail("dispatch claimed version %s but the signed manifest is %s", u.Version, plan.Manifest.Version)
 		return
+	}
+	// Anti-rollback floor — authoritative check on the signed manifest,
+	// then ratchet. The pin lands on disk BEFORE the swap so a crash
+	// mid-install cannot strand the node below the floor it promised.
+	if a.cfg.VersionFloor != "" && release.VersionLT(plan.Manifest.Version, a.cfg.VersionFloor) {
+		fail("signed release %s is below this node's anti-rollback floor %s",
+			plan.Manifest.Version, a.cfg.VersionFloor)
+		return
+	}
+	if plan.Manifest.MinAgentVersion != "" &&
+		(a.cfg.VersionFloor == "" || release.VersionLT(a.cfg.VersionFloor, plan.Manifest.MinAgentVersion)) {
+		a.cfg.VersionFloor = plan.Manifest.MinAgentVersion
+		if err := a.cfg.Save(a.cfgPath); err != nil {
+			a.log.Warn("anti-rollback floor failed to persist", "floor", plan.Manifest.MinAgentVersion, "err", err)
+		}
 	}
 	for _, w := range plan.Warnings {
 		a.log.Warn("upgrade verification warning", "op", u.OperationID, "warning", w)

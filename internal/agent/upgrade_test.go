@@ -8,6 +8,7 @@ package agent
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"net/http"
@@ -36,17 +37,29 @@ import (
 // darwin/amd64 filler, the pubkey blob, its key ID, and the running
 // platform's artifact name+bytes.
 func signRelease(t *testing.T, version string, proto, minProto int) (files map[string][]byte, pubData []byte, keyID, artName string, artBytes []byte) {
+	return signReleaseFloor(t, version, "", proto, minProto)
+}
+
+func signReleaseFloor(t *testing.T, version, minAgent string, proto, minProto int) (files map[string][]byte, pubData []byte, keyID, artName string, artBytes []byte) {
 	t.Helper()
 	priv, k, pubData, err := release.GenerateMinisignKeyPair()
 	if err != nil {
 		t.Fatal(err)
 	}
+	return signReleaseWith(t, priv, k, pubData, version, minAgent, proto, minProto)
+}
+
+// signReleaseWith signs a release under an existing key — floor tests
+// need several versions all signed by the agent's one pinned key.
+func signReleaseWith(t *testing.T, priv ed25519.PrivateKey, k *release.MinisignPublicKey, pubData []byte, version, minAgent string, proto, minProto int) (files map[string][]byte, pubDataOut []byte, keyID, artName string, artBytes []byte) {
+	t.Helper()
 	files = map[string][]byte{}
 	sums := release.Sums{}
 	m := &release.Manifest{
 		Version:            version,
 		ProtocolVersion:    proto,
 		MinProtocolVersion: minProto,
+		MinAgentVersion:    minAgent,
 		CreatedAt:          time.Now().UTC(),
 		Signer:             release.Signer{Algorithm: "minisign", KeyID: k.KeyIDHex},
 	}
@@ -1535,5 +1548,140 @@ func TestAttemptBudgetRollsBackAtBoot(t *testing.T) {
 	endSession(t, f, ch)
 	if _, ok, _ := readPendingMarker(mkPath); ok {
 		t.Fatal("marker not cleared after rolled_back landed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// anti-rollback floor — agent-local pin ratcheted from signed manifests
+// ---------------------------------------------------------------------------
+
+// TestUpgradeFloorRefusesBelowFloor: a node that has pinned a floor
+// refuses a server-dispatched rollback before fetching a single byte —
+// this is the agent-side defense against a compromised control plane.
+func TestUpgradeFloorRefusesBelowFloor(t *testing.T) {
+	f := newFakeCP(t)
+	dir := t.TempDir()
+	files, pubData, keyID, _, _ := signRelease(t, "0.8.0", contracts.ProtocolVersion, 1)
+	f.releaseFiles = serveRelease("r1", files)
+	a := upgradeTestAgent(t, f, dir, pubData)
+	a.cfg.VersionFloor = "0.9.5" // ratcheted by an earlier floor-bearing release
+	if err := os.WriteFile(a.updTarget, []byte("old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stubProcessSeams(t)
+	dispatchUpgrade(f, contracts.AgentUpgrade{
+		OperationID: "op-floor", ReleaseID: "r1", Version: "0.8.0", KeyID: keyID,
+		Source:          "localmesh://releases/r1",
+		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
+	})
+	ch := runSession(a)
+	defer endSession(t, f, ch)
+
+	states := collectStates(t, f, upPhaseFailed, 8*time.Second)
+	st := lastPhase(states)
+	if !strings.Contains(st.Error, "anti-rollback floor") {
+		t.Fatalf("floor refusal = %+v", st)
+	}
+	if f.lastRelAuth.Load() != nil {
+		t.Fatal("release files were fetched despite the floor refusal")
+	}
+}
+
+// TestUpgradeFloorRatchesFromSignedManifest: installing a release whose
+// signed manifest declares min_agent_version pins that floor into the
+// durable config BEFORE the swap — a later dispatch below it is refused.
+func TestUpgradeFloorRatchesFromSignedManifest(t *testing.T) {
+	f := newFakeCP(t)
+	dir := t.TempDir()
+	files, pubData, keyID, _, _ := signReleaseFloor(t, "0.10.0", "0.9.5", contracts.ProtocolVersion, 1)
+	f.releaseFiles = serveRelease("r1", files)
+	a := upgradeTestAgent(t, f, dir, pubData)
+	if err := os.WriteFile(a.updTarget, []byte("old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stubProcessSeams(t)
+	dispatchUpgrade(f, contracts.AgentUpgrade{
+		OperationID: "op-ratchet", ReleaseID: "r1", Version: "0.10.0", KeyID: keyID,
+		Source:          "localmesh://releases/r1",
+		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
+	})
+	ch := runSession(a)
+	defer endSession(t, f, ch)
+
+	collectStates(t, f, upPhaseRestarting, 15*time.Second)
+	if a.cfg.VersionFloor != "0.9.5" {
+		t.Fatalf("in-memory floor = %q, want 0.9.5", a.cfg.VersionFloor)
+	}
+	// The pin must be durable — reload from disk as the restarted
+	// process would.
+	persisted, err := LoadConfig(a.cfgPath)
+	if err != nil || persisted.VersionFloor != "0.9.5" {
+		t.Fatalf("persisted floor = %q (err %v), want 0.9.5", persisted.VersionFloor, err)
+	}
+}
+
+// TestUpgradeFloorSurvivesCompromisedDispatch: the sequence that makes
+// the floor meaningful — install a floor-bearing release, then a
+// hostile rollback dispatch on the SAME session is refused at the
+// manifest check even though its signature is valid.
+func TestUpgradeFloorSurvivesCompromisedDispatch(t *testing.T) {
+	f := newFakeCP(t)
+	dir := t.TempDir()
+	priv, k, pubData, err := release.GenerateMinisignKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, pubData, keyID, _, _ := signReleaseWith(t, priv, k, pubData, "0.10.0", "0.9.5", contracts.ProtocolVersion, 1)
+	f.releaseFiles = serveRelease("r1", files)
+	oldFiles, _, _, _, _ := signReleaseWith(t, priv, k, pubData, "0.8.0", "", contracts.ProtocolVersion, 1)
+	for n, b := range serveRelease("r2", oldFiles) {
+		f.releaseFiles[n] = b
+	}
+	a := upgradeTestAgent(t, f, dir, pubData)
+	if err := os.WriteFile(a.updTarget, []byte("old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stubProcessSeams(t)
+	dispatchUpgrade(f, contracts.AgentUpgrade{
+		OperationID: "op-good", ReleaseID: "r1", Version: "0.10.0", KeyID: keyID,
+		Source:          "localmesh://releases/r1",
+		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
+	})
+	ch := runSession(a)
+	collectStates(t, f, upPhaseRestarting, 15*time.Second)
+	if a.cfg.VersionFloor != "0.9.5" {
+		endSession(t, f, ch)
+		t.Fatalf("floor not pinned: %q", a.cfg.VersionFloor)
+	}
+	endSession(t, f, ch)
+
+	// New session (post-restart): hostile dispatch with a fully valid
+	// signature — only the floor says no. (fakeCP flushes queued
+	// dispatches at handshake, so it goes on a fresh session like the
+	// rollback tests do.)
+	dispatchUpgrade(f, contracts.AgentUpgrade{
+		OperationID: "op-rollback", ReleaseID: "r2", Version: "0.8.0", KeyID: keyID,
+		Source:          "localmesh://releases/r2",
+		ProtocolVersion: contracts.ProtocolVersion, MinAgentProtocol: 1,
+	})
+	ch = runSession(a)
+	defer endSession(t, f, ch)
+	// Session 2 opens with op-good's boot-confirm (the stub never
+	// swapped binaries, so it correctly reports failed) — drain states
+	// until op-rollback's own refusal lands.
+	var sawRefusal bool
+	deadline := time.Now().Add(10 * time.Second)
+	for !sawRefusal && time.Now().Before(deadline) {
+		for _, st := range collectStates(t, f, upPhaseFailed, 10*time.Second) {
+			if st.OperationID == "op-rollback" {
+				if !strings.Contains(st.Error, "anti-rollback floor") {
+					t.Fatalf("hostile rollback should refuse on the floor, got %+v", st)
+				}
+				sawRefusal = true
+			}
+		}
+	}
+	if !sawRefusal {
+		t.Fatal("op-rollback dispatch produced no failed state")
 	}
 }
