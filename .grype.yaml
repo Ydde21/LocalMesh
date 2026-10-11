@@ -1,0 +1,32 @@
+# Grype policy for the LocalMesh release security gate.
+#
+# Consumed by scripts/ci-security-scan.sh for BOTH the image scans and the
+# source-tree scan — see docs/security-scan.md for the full gate contract.
+#
+# Suppression contract — entries in `ignore:` are the ONLY way to suppress a
+# finding, and every entry must satisfy all of:
+#   1. be scoped to a single vulnerability ID (never a namespace, severity,
+#      distro, or package-only blanket rule);
+#   2. carry a justification comment above the entry explaining WHY the match
+#      is a false positive or an accepted risk;
+#   3. set `reason:` to "<why>; expires: YYYY-MM-DD" (or "review-by:"). The
+#      gate parses this field: a rule with a missing/malformed/expired date
+#      fails the scan outright, so suppressions cannot silently go stale.
+#
+# Narrow the match with `package:` sub-fields (name/type/location globs) so a
+# suppression cannot hide the same CVE in an unrelated component.
+#
+# Template:
+#
+#   # GHSA-0000-0000-0000 — <package> is only reachable via <path>; the shipped
+#   # entrypoint never invokes it (evidence: <file:line>). Revisit on base bump.
+#   - vulnerability: GHSA-0000-0000-0000
+#     package:
+#       name: some-dep
+#       location: "/usr/local/lib/node_modules/npm/**"
+#     reason: "dormant bundled tooling, unreachable at runtime; expires: 2026-12-01"
+#
+# v0.10 gate status: the scan findings are triaged in docs/security-scan.md
+# and the v0.10 release report — no suppressions are currently active; all
+# Critical/High findings are reported and remediated via base-image bumps.
+ignore: []

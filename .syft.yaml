@@ -1,0 +1,18 @@
+# Syft config for the LocalMesh release security gate — applied by
+# scripts/ci-security-scan.sh ONLY to the source-tree scan (`syft dir:.`),
+# never to image scans: image SBOMs must catalog the full shipped filesystem,
+# and these path globs must not hide anything inside a container.
+#
+# Exclusions cover files that are not part of the source distribution:
+# VCS metadata, tool caches, and gitignored build output. web/node_modules is
+# excluded because web/package-lock.json is the artifact of record — a local
+# install tree is not source (and may not even exist in a fresh checkout).
+# The same set is passed to `grype dir:.` via --exclude flags, because
+# exclusions in .grype.yaml would wrongly apply to image scans too.
+exclude:
+  - "**/.git/**"
+  - "**/node_modules/**"
+  - "**/.next/**"
+  - "**/dist/**"
+  - "**/bin/**"
+  - "**/data/**"
