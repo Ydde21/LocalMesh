@@ -16,8 +16,12 @@ import (
 func psJSON(ctx context.Context, expr string, v any) error {
 	ctx2, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+	// @(…) forces array JSON even for a single row — ConvertTo-Json
+	// emits a bare object for one result, which would not unmarshal
+	// into the callers' slices (Win32_ComputerSystem is always a
+	// single row, so memoryTotal would silently return 0 forever).
 	out, err := exec.CommandContext(ctx2, "powershell", "-NoProfile", "-NonInteractive",
-		"-Command", expr+" | ConvertTo-Json -Compress").Output()
+		"-Command", "@("+expr+") | ConvertTo-Json -Compress").Output()
 	if err != nil {
 		return err
 	}
