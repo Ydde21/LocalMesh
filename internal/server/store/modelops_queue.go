@@ -10,13 +10,19 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Model-operation scheduling queue (migration 0005)
+// Model-operation scheduling queue (migration 0005; dedupe hardened 0014)
 //
 // These queries back the modelops dispatcher: ops are persisted 'queued'
 // first and claimed atomically (FOR UPDATE SKIP LOCKED) so a future second
 // poller cannot double-dispatch. OpState extends ModelOperation with the
 // scheduling columns; the embedded struct keeps JSON shape compatible with
 // the existing admin API.
+//
+// Dedupe: model_operations_active_uniq covers the WHOLE active lifecycle
+// — ('queued','dispatched','running','interrupted'). 'interrupted' is in
+// the set since 0014: an op parked between interruption and the resume
+// sweep must still block resubmission, or a second live op lands on the
+// same (node, model) and both end up dispatched.
 // ---------------------------------------------------------------------------
 
 // OpState is a model_operations row including the queue columns.
@@ -55,8 +61,9 @@ func scanOpState(row pgx.Row) (*OpState, error) {
 }
 
 // EnqueueModelOp persists a new op in 'queued' status, due immediately.
-// The partial unique index maps a conflicting active op on the same
-// node+model to ErrActiveModelOp.
+// The partial unique index maps a conflicting non-terminal op on the
+// same node+model — queued, dispatched, running, OR interrupted — to
+// ErrActiveModelOp.
 func (d *DB) EnqueueModelOp(ctx context.Context, nodeID, model, op string, priority, maxAttempts int) (*ModelOperation, error) {
 	var o ModelOperation
 	err := d.Pool.QueryRow(ctx,
@@ -75,14 +82,21 @@ func (d *DB) EnqueueModelOp(ctx context.Context, nodeID, model, op string, prior
 	return &o, nil
 }
 
-// ActiveModelOpFor returns the currently active (queued/dispatched/
-// running) op for a node+model, used to describe a dedupe conflict.
+// ActiveModelOpFor returns the op currently covering a node+model —
+// queued/dispatched/running OR interrupted (the whole
+// model_operations_active_uniq set) — used to describe a dedupe
+// conflict. Post-0014 at most one such row exists; the ORDER BY only
+// matters for data written before the index closed the 'interrupted'
+// gap, and prefers surfacing the interrupted row since it is the one an
+// operator must resolve.
 func (d *DB) ActiveModelOpFor(ctx context.Context, nodeID, model string) (*ModelOperation, error) {
 	var o ModelOperation
 	err := d.Pool.QueryRow(ctx,
 		`SELECT id,node_id,model,op,status,detail,completed,total,error,created_at,updated_at
 		 FROM model_operations
-		 WHERE node_id=$1 AND model=$2 AND status IN ('queued','dispatched','running')`,
+		 WHERE node_id=$1 AND model=$2 AND status IN ('queued','dispatched','running','interrupted')
+		 ORDER BY (status='interrupted') DESC, created_at DESC, id DESC
+		 LIMIT 1`,
 		nodeID, model).Scan(&o.ID, &o.NodeID, &o.Model, &o.Op, &o.Status,
 		&o.Detail, &o.Completed, &o.Total, &o.Error, &o.CreatedAt, &o.UpdatedAt)
 	if err != nil {
@@ -319,18 +333,29 @@ func (d *DB) InterruptActiveModelOps(ctx context.Context, reason string) (int64,
 // ResumeInterruptedPulls requeues interrupted pulls on a node (empty
 // nodeID = all nodes) with attempts remaining, scheduling each retry at
 // now + base*2^attempt with ±20% jitter (attempt already counts the
-// interrupted dispatch). Deletes are NEVER resumed — a delete's outcome
-// after interruption is unknown, so it stays parked for a human.
-// Returns the requeued op ids.
+// interrupted dispatch — interrupt→resume preserves the consumed
+// attempt). Deletes are NEVER resumed — a delete's outcome after
+// interruption is unknown, so it stays parked for a human.
+//
+// The NOT EXISTS guard is defensive conflict-safety: a row only resumes
+// when no OTHER live row covers the same node+model. Migration 0014
+// makes such pairs impossible (and cleans legacy ones), so the guard
+// can never trigger on a migrated database — but if it somehow did, the
+// row parks 'interrupted' for an operator rather than crashing the
+// whole sweep on a 23505. Returns the requeued op ids.
 func (d *DB) ResumeInterruptedPulls(ctx context.Context, nodeID string, baseSecs float64) ([]string, error) {
 	rows, err := d.Pool.Query(ctx,
-		`UPDATE model_operations SET status='queued',
-			last_error=error, error='',
-			next_attempt_at=now() + make_interval(secs => $1 * power(2, LEAST(attempt,8)) * (0.8 + 0.4*random())),
+		`UPDATE model_operations o SET status='queued',
+			last_error=o.error, error='',
+			next_attempt_at=now() + make_interval(secs => $1 * power(2, LEAST(o.attempt,8)) * (0.8 + 0.4*random())),
 			updated_at=now()
-		 WHERE op='pull' AND status='interrupted' AND attempt < max_attempts
-		   AND (CAST(NULLIF($2,'') AS uuid) IS NULL OR node_id = CAST(NULLIF($2,'') AS uuid))
-		 RETURNING id`,
+		 WHERE o.op='pull' AND o.status='interrupted' AND o.attempt < o.max_attempts
+		   AND (CAST(NULLIF($2,'') AS uuid) IS NULL OR o.node_id = CAST(NULLIF($2,'') AS uuid))
+		   AND NOT EXISTS (SELECT 1 FROM model_operations x
+		                   WHERE x.node_id = o.node_id AND x.model = o.model
+		                     AND x.id <> o.id
+		                     AND x.status IN ('queued','dispatched','running','interrupted'))
+		 RETURNING o.id`,
 		baseSecs, nodeID)
 	if err != nil {
 		return nil, err
@@ -345,6 +370,42 @@ func (d *DB) ResumeInterruptedPulls(ctx context.Context, nodeID string, baseSecs
 		out = append(out, id)
 	}
 	return out, rows.Err()
+}
+
+// RetryModelOp manually requeues an 'interrupted' op — the operator
+// resolution path for work parked on an uncertain outcome (deletes are
+// never auto-resumed; a pull interrupted past its sweep may also park).
+// The op keeps its identity and consumed attempts: this is a retry of
+// the SAME operation, not a new submission, so next_attempt_at=now()
+// makes it due on the next dispatch pass while attempt/max_attempts
+// bookkeeping stays honest. Does NOT gate on attempt — an operator may
+// deliberately re-drive an exhausted op; the next claim consumes an
+// attempt as usual and normal bookkeeping applies from there.
+//
+// epoch >= 0 fences the mutation like ClaimDueModelOps: a superseded
+// control plane cannot re-arm work a successor owns. Returns false when
+// the op is not currently 'interrupted' or the epoch no longer matches —
+// callers re-read the row to report the honest state. A 23505 from the
+// unique index (a second live row appeared for the same node+model)
+// maps to ErrActiveModelOp: unreachable post-0014, but the mapping
+// keeps the failure deterministic instead of leaking a pg error.
+func (d *DB) RetryModelOp(ctx context.Context, id string, epoch int64) (bool, error) {
+	tag, err := d.Pool.Exec(ctx,
+		`UPDATE model_operations SET status='queued',
+			last_error=error, error='',
+			next_attempt_at=now(), updated_at=now()
+		 WHERE id=$1 AND status='interrupted'
+		   AND ($2::bigint < 0 OR
+		        (SELECT epoch FROM control_plane_lock WHERE id = 1) = $2)`,
+		id, epoch)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return false, ErrActiveModelOp
+		}
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // FailExhaustedInterruptedPulls terminally fails interrupted pulls that
