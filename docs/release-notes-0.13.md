@@ -99,12 +99,14 @@ Every gate green on the release candidate:
   container legs only; fleet-scale behavior is CI-verified, not
   hardware-fleet-verified. `docs/hardware-validation-checklist.md`
   defines the legs that close each gap.
-- **`ci-ha-smoke` silent-exit flake — unresolved watch item.** The
-  control plane once exited status 1 ~1s after launch on a shared
-  `ubuntu-latest` runner; the evidence was being deleted by the
-  cleanup-order bug fixed in this cut, so the real error was never
-  captured. The postgres readiness gate was hardened in parallel. If
-  it recurs, the log tail now survives and identifies the cause.
+- **`ci-ha-smoke`/`ci-update-smoke` silent-exit flake — diagnosed and
+  hardened.** Root cause captured by the new log preservation:
+  postgres accepted `pg_isready` then *reset the server's first real
+  connection* ~40ms later during its init tail (`read: connection
+  reset by peer` → clean exit 1). The smokes' readiness gate now
+  requires a successful `SELECT 1`, closing that window. Residual
+  watch item: any future recurrence will print the actual server error
+  instead of empty tails.
 - **Failover interrupts streams honestly** — an in-flight generation
   on a killed node aborts rather than replaying (safe-retries-only
   design); clients must retry.

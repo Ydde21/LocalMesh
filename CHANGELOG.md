@@ -45,10 +45,11 @@ v1 both ways).
 - **`wait` exit-status harvesting made `set -e`-safe** — the
   diagnostics could die before printing the status they existed to
   report.
-- **Postgres readiness gate tightened.** `pg_isready` can report ready
-  while the server still rejects real sessions during its init tail;
-  all three live-stack smokes now require a successful `SELECT 1`
-  before launching the control plane.
+- **Postgres readiness gate tightened.** Confirmed by the preserved
+  logs: `pg_isready` reports ready while postgres still *resets* real
+  connections during its init tail (`connection reset by peer` → the
+  silent control-plane exit-1 flake). All three live-stack smokes now
+  require a successful `SELECT 1` before launching the control plane.
 - **Upgrade test hygiene.** The upgrade goroutine is drained inside
   `endSession` (before seam stubs restore and `t.TempDir()` removal) —
   fixes both the APFS `unlinkat` cleanup race and a latent
