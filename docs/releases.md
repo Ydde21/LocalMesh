@@ -82,9 +82,9 @@ which prints a warning and produces a release that `update` and
 `verify-release.sh` will refuse to trust (checksums and schema can still
 be checked with `--allow-unsigned`).
 
-`make release` predates this flow and stays as the quick local
-cross-compile; the integrator may point it at `scripts/release.sh
---unsigned` or leave it for dev use only.
+`make release` invokes `scripts/release.sh` — the signed flow above
+(VERSION=v… or a git describe fallback). For a local unsigned
+cross-compile use `scripts/release.sh --unsigned` directly.
 
 ### Reproducibility
 

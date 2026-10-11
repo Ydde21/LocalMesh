@@ -13,8 +13,11 @@ go test -tags chaos -count=1 -run 'TestChaos|TestChaos2|TestFailure' -v ./intern
 ```
 
 Files: `internal/server/chaos_test.go` (v0.8 wave, 9 tests),
-`internal/server/chaos2_*_test.go` (v0.9 wave, 9 tests), shared helpers
-in `chaos_helpers_test.go` + `chaos_helpers2_test.go`.
+`internal/server/chaos2_*_test.go` (v0.9 wave, 9 tests),
+`internal/server/modelops_dedupe_chaos_test.go` (v0.10, 1 test),
+`internal/server/dbrecovery_test.go` (v0.10, 3 `TestFailure*` tests
+matched by the same `-run` regex) — 22 total; shared helpers in
+`chaos_helpers_test.go` + `chaos_helpers2_test.go`.
 
 ## Scenario map (v0.9 additions)
 

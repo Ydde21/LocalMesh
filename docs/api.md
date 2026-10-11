@@ -176,13 +176,17 @@ doesn't send it) — it appears in server logs as `req=<id>`.
 | POST   | `/models/delete`      | `{model, node_ids?, force?, priority?}` — same for deletion; see last-replica guard below |
 | GET    | `/model-operations`   | pull/delete operation status + queue/progress/retry state |
 | POST   | `/model-operations/{id}/cancel` | cancel a `queued`/`interrupted` op or abort a `dispatched`/`running` one (`204`); finished ops return `409` |
+| POST   | `/model-operations/{id}/retry`  | **v0.10** — requeue an `interrupted` op in place (`200`); preserves the op's identity and consumed attempts, epoch-fenced like dispatch. The operator path for ops parked on an uncertain outcome — deletes never auto-resume, and a pull that outlives its resume sweep needs this too. `409`/`ErrNotActive` when the op left `interrupted` |
 
 Model operations go through a persistent bounded queue (see the
 `modelops` settings above). States: `queued` (persisted, awaiting a
 slot) → `dispatched` → `running` → `succeeded` | `failed` | `cancelled`
 | `interrupted` (node vanished mid-op; retryable pulls resume to
-`queued`, deletes stay `interrupted`). Concurrent ops on the same
-node+model are deduplicated (`409`); a full queue returns `429`.
+`queued`, deletes stay `interrupted` until retried or cancelled).
+Concurrent ops on the same node+model are deduplicated (`409`) — since
+migration 0014 an `interrupted` op still holds the dedupe slot, so a
+resubmission in the interrupt→resume window cannot land a second live
+op; a full queue returns `429`.
 Queued/interrupted ops survive control-plane restarts — restart
 reconciles leftovers and resumes retryable pulls.
 

@@ -49,7 +49,7 @@ bash scripts/ci-update-smoke.sh    # signed release → rollout → durable cana
 bash scripts/ci-agent-smoke.sh     # agent CLI/service lifecycle contract checks
 bash scripts/ci-agent-runtime.sh   # real-executable checks (native agent build + fakeollama leg)
 bash scripts/fleet-report.sh       # redacted per-device fleet-validation evidence bundle
-make chaos-test                    # distributed failure-injection suite (internal/server, 18 tests)
+make chaos-test                    # distributed failure-injection suite (internal/server, 22 tests)
 
 # dev stack
 make dev-up                     # postgres on :5433
