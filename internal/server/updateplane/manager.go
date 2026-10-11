@@ -650,7 +650,13 @@ func (m *Manager) processDraining(ctx context.Context) {
 		return
 	}
 	cfg := m.config()
-	now := time.Now()
+	// Drain age must be measured on the DB clock — updated_at is a
+	// server-stamped column, so comparing host time to it inherits any
+	// skew between the two clocks (e.g. containerized postgres).
+	now, err := m.st.Now(ctx)
+	if err != nil {
+		now = time.Now()
+	}
 	for _, u := range rows {
 		switch {
 		case now.Sub(u.UpdatedAt) > cfg.DrainTimeout:
@@ -714,7 +720,12 @@ func (m *Manager) processRebooting(ctx context.Context) {
 		return
 	}
 	cfg := m.config()
-	now := time.Now()
+	// Same clock rule as processDraining: ages over server-stamped
+	// updated_at must be measured on the DB clock.
+	now, err := m.st.Now(ctx)
+	if err != nil {
+		now = time.Now()
+	}
 	for _, u := range rows {
 		age := now.Sub(u.UpdatedAt)
 		if !m.disp.Online(u.NodeID) {

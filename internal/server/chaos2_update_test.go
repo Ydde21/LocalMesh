@@ -181,15 +181,15 @@ func TestChaos2AgentUpdateAcrossFailover(t *testing.T) {
 	}
 
 	// Keep the node busy so claim lands 'draining' and parks there.
-	// A single request can finish (or error) inside one poll gap under
-	// load, letting the row race draining→dispatched→failed unseen —
-	// re-fire the busy call until the ctx expires.
+	// A single short request can finish (or error) inside one poll gap
+	// under load, letting the row race draining→dispatched→failed
+	// unseen — a 2000-token stream outlasts the whole window, and the
+	// loop re-fires on error/finish until the ctx expires.
 	cctx, ccancel := context.WithTimeout(ctx, 30*time.Second)
 	defer ccancel()
 	go func() {
 		for cctx.Err() == nil {
-			chatRaw(cctx, a.base, "llm:latest", longPrompt(20))
-			time.Sleep(100 * time.Millisecond)
+			chatRaw(cctx, a.base, "llm:latest", longPrompt(2000))
 		}
 	}()
 	chaosWait(t, 15*time.Second, func() bool {

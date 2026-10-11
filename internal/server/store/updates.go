@@ -289,6 +289,16 @@ func (d *DB) ClearStaleUpdatingMaintenance(ctx context.Context, reasonPrefix str
 	return tag.RowsAffected(), nil
 }
 
+// Now returns the database's clock — the only clock consistent with
+// server-stamped columns like updated_at. Timeout decisions that
+// compare process time against those columns inherit clock skew (DB on
+// another host, containerized postgres on a drifting VM) otherwise.
+func (d *DB) Now(ctx context.Context) (time.Time, error) {
+	var t time.Time
+	err := d.Pool.QueryRow(ctx, `SELECT now()`).Scan(&t)
+	return t, err
+}
+
 // LiveUpdatesByPhase lists unfinished updates in the given phases — the
 // orchestrator's work set each pass.
 func (d *DB) LiveUpdatesByPhase(ctx context.Context, phases ...string) ([]*AgentUpdate, error) {
