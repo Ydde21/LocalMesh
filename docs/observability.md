@@ -86,6 +86,13 @@ correct, not a Prometheus problem. On the single-server stack the
 `server-standby` target never resolves — expected; delete it if it
 bothers you.
 
+**Standby presence (v0.10):** the waiting standby publishes no metrics,
+but it is no longer invisible — it heartbeats a `control_plane_peers`
+row, which the active serves via `GET /api/v1/control-plane` (the
+`standby` block), `GET /api/v1/control-plane/peers`, and the
+`localmesh_control_plane_peers{role="standby"}` gauge. A standby that
+stops heartbeating fades out of all three within ~15s.
+
 The router is **not** scraped: it has no Prometheus endpoint (its
 `/status` on `127.0.0.1:9443` is a JSON operator snapshot). Follow-up
 listed below.
@@ -104,17 +111,34 @@ ids and model names never become labels.
 | `localmesh_workloads_queued_total` | — | `workload.queued` — inference request accepted | — |
 | `localmesh_workloads_started_total` | — | `workload.started` — dispatched to a node | — |
 | `localmesh_workloads_finished_total` | `status` | `workload.finished` — terminal outcome | `completed`, `failed`, `cancelled` |
+| `localmesh_inference_requests_total` *(v0.10)* | `status` | `workload.finished` in the **normalized** outcome vocabulary (`completed`→`succeeded`) — a read-optimized alias, not a second truth | `succeeded`, `failed`, `cancelled` |
 | `localmesh_model_operation_events_total` | `status` | every `model.operation` event | `queued`, `dispatched`, `running` (**one per agent progress frame — high frequency**), `succeeded`, `failed`, `cancelled`, `interrupted` |
 | `localmesh_agent_updates_finished_total` | `phase` | terminal agent updates, **deduped per update id** | `succeeded`, `failed`, `rolled_back`, `cancelled`, `interrupted` |
+| `localmesh_agent_updates_rolled_back_total` *(v0.10)* | — | terminal updates whose phase is `rolled_back`, **deduped per update id** — the rollback headline without mining the phase table | — |
 | `localmesh_rollout_transitions_total` | `state` | rollout state changes, **deduped per rollout id** (orchestrator republishes the row per child event) | `pending`, `running`, `awaiting_approval`, `succeeded`, `failed`, `cancelled` |
+| `localmesh_rollouts_failed_total` *(v0.10)* | — | rollouts reaching `failed`, **deduped per rollout id** | — |
 | `localmesh_node_connected_total` | — | agent WebSocket established | — |
 | `localmesh_node_disconnected_total` | — | agent WebSocket closed | — |
+| `localmesh_node_reconnects_total` *(v0.10)* | — | `node.connected` for a node id already connected **this process lifetime** — the flap/churn signal. A control-plane restart resets the seen-set, so a first connect after restart always reads as fresh | — |
 | `localmesh_node_maintenance_events_total` | `state` | maintenance-state transitions | `draining`, `maintenance`, `updating`, `none` (marker cleared; empty string normalizes to `none`) |
 | `localmesh_releases_registered_total` | — | signed releases admitted | — |
 | `localmesh_releases_revoked_total` | — | releases revoked | — |
 | `localmesh_release_keys_registered_total` | — | signing keys registered | — |
 | `localmesh_release_keys_revoked_total` | — | signing keys revoked | — |
 | `localmesh_ownership_transitions_total` | `event` | control-plane lifecycle | `acquired`, `promoted`, `released`, `lost` (empty/unknown kinds normalize to `unknown`) |
+
+### Histograms (`internal/server/metrics/metrics.go`, v0.10)
+
+Cumulative `_bucket`/`_sum`/`_count` triples per the exposition spec —
+query with `histogram_quantile(q, sum by (le) (rate(<family>_bucket[5m])))`.
+Sampled at observe time; series appear only after the first observation.
+
+| Metric | Labels | Buckets (s) | What it measures |
+|---|---|---|---|
+| `localmesh_inference_queue_seconds` | — | 0.05, 0.25, 1, 5, 30, 120, 300 | scheduling wait — `decision.queued_ms` recorded at `workload.started`. Requests that die in queue emit no `started` event and contribute no sample: this is a wait profile, not per-request accounting |
+| `localmesh_inference_ttft_seconds` | `status` | 0.25, 0.5, 1, 2.5, 5, 15, 60 | seconds to first token on `workload.finished`. **Emitted only once `workload.finished` payloads carry `ttft_ms` — see the integrator wiring below** (the collector reads it today; the gateway publish path doesn't set it yet) |
+| `localmesh_inference_duration_seconds` | `status` | 1, 5, 15, 60, 180, 600 | end-to-end seconds on `workload.finished` — `total_ms` when present, else `finished_at`/`started_at`→observe-time fallback. A failed request records its time-to-fail |
+| `localmesh_model_operation_duration_seconds` | `status` | 5, 30, 120, 600, 1800, 7200 | first observed `dispatched`/`running` → terminal `succeeded`/`failed`/`cancelled`. `interrupted` deliberately does **not** close the timer — retryable pulls resume under the same op id, so the sample spans retries. A terminal arriving with no observed start (control plane restarted mid-op) records nothing rather than a fabricated duration |
 
 ### Gauges (scrape-time snapshot, `server.go` `SetGauges` provider)
 
@@ -128,6 +152,10 @@ holding ownership.
 | `localmesh_nodes_online` | — | agents with a live connection |
 | `localmesh_nodes_total` | — | enrolled node records |
 | `localmesh_agent_updates_live` | `phase` | update rows not yet terminal (`pending`, `draining`, `dispatched`, `verifying`, `downloading`, `staging`, `installing`, `restarting`, `verify_health`) |
+| `localmesh_db_reachable` *(v0.10 — integrator wiring)* | — | `1` while the control plane can ping Postgres. The API keeps serving on a dead DB (stale reads fail lazily) — this is the early-warning gauge |
+| `localmesh_model_ops_queue_depth` *(v0.10 — integrator wiring)* | — | model ops persisted in `queued` — the backlog the `queued`/`dispatched` counters only show as flow |
+| `localmesh_control_plane_peers` *(v0.10 — integrator wiring)* | `role` (`active`\|`standby`) | control-plane processes with a fresh `control_plane_peers` heartbeat (<15s). **The waiting standby is visible here even though it serves no metrics itself** |
+| `localmesh_tls_cert_days_remaining` *(v0.10 — integrator wiring)* | — | days until the serving-certificate leaf expires — renew before agents can no longer verify. Absent in dev-insecure mode (no cert) |
 
 ## What resets on restart — three different layers
 
@@ -221,19 +249,154 @@ and needs no prefix.
 is `deploy/.env`, not the root one; copy or `--env-file` as needed
 (this is base-compose behavior, unchanged by this layer).
 
+## Integrator wiring (v0.10)
+
+This workstream owns `internal/server/metrics`, `internal/server/store/{peers,nodedisk}.go`,
+migration `0015_control_plane_peers.sql`, `internal/server/adminapi/handlers_obs.go`,
+and the tests/docs that go with them. The following edits land in
+**core-owned files** — apply them verbatim.
+
+### `internal/server/adminapi/handlers.go` — `Register`, inside the mwRead block
+
+```go
+mux.Handle("GET /api/v1/control-plane/peers", mwRead(http.HandlerFunc(a.handleControlPlanePeers)))
+mux.Handle("GET /api/v1/nodes/{id}/disk",     mwRead(http.HandlerFunc(a.handleNodeDisk)))
+```
+
+(Proven non-conflicting with `/control-plane` and `/nodes/{id}` in
+`adminapi/handlers_obs_test.go`.)
+
+### `internal/server/server.go` — four small diffs
+
+**(a) Standby reporter** — in the `s.cfg.Standby` branch, wrap the
+`WaitForOwnership` call so a waiting standby heartbeats a peers row:
+
+```go
+	rep := store.NewPeerReporter(st, store.PeerRoleStandby, "", s.log)
+	rep.Start()
+	own, err = WaitForOwnership(ctx, s.cfg.DatabaseURL, s.log)
+	rep.Stop(context.Background()) // the standby row must not survive promotion
+```
+
+**(b) Active reporter** — once after the if/else ownership block (covers
+both acquired and promoted paths; the row is keyed on the ownership
+instance id so it correlates with `control_plane_lock`/`ownership_events`):
+
+```go
+	activeRep := store.NewPeerReporterWithID(st, own.InstanceID().String(),
+		store.PeerRoleActive, "", s.log)
+	activeRep.Start()
+	defer activeRep.Stop(context.Background())
+```
+
+**(c) Standby block in `controlPlaneStatus`** — before `return out, nil`:
+
+```go
+	if sb, err := s.st.StandbyPresence(ctx); err == nil {
+		out["standby"] = sb
+	}
+```
+
+**(d) v0.10 gauges** — inside the `s.mc.SetGauges` closure, before
+`return g` (one shared short deadline; each read fails soft):
+
+```go
+		gctx, gcancel := context.WithTimeout(context.Background(), 2*time.Second)
+		dbOK := s.st.Pool.Ping(gctx) == nil
+		dbVal := 0.0
+		if dbOK {
+			dbVal = 1
+		}
+		g = append(g, metrics.Gauge{
+			Name: "db_reachable", Help: "1 while the control plane can reach Postgres.", Value: dbVal})
+		if n, err := s.st.QueuedModelOpCount(gctx); err == nil {
+			g = append(g, metrics.Gauge{
+				Name: "model_ops_queue_depth", Help: "Model operations waiting in 'queued'.", Value: float64(n)})
+		}
+		for _, role := range []string{store.PeerRoleActive, store.PeerRoleStandby} {
+			if n, err := s.st.CountFreshPeers(gctx, role, store.PeerStaleAfter); err == nil {
+				g = append(g, metrics.Gauge{
+					Name: "control_plane_peers", Help: "Control-plane processes with a fresh presence heartbeat.",
+					Value: float64(n), Labels: map[string]string{"role": role}})
+			}
+		}
+		gcancel()
+		if s.ca != nil && len(s.ca.Server.Certificate) > 0 {
+			if days, ok := metrics.CertDaysRemaining(s.ca.Server.Certificate[0]); ok {
+				g = append(g, metrics.Gauge{
+					Name: "tls_cert_days_remaining", Help: "Days until the serving certificate leaf expires.",
+					Value: days})
+			}
+		}
+```
+
+### `internal/server/gateway/openai.go` — finishWorkload (TTFT + precise duration)
+
+`finishWorkload` writes `ttft`/`total` to the workload row but publishes
+the struct without them, so `workload.finished` events lack `ttft_ms`/
+`total_ms`. Set both on the payload before publishing:
+
+```go
+	wl.Status = status
+	wl.Error = errStr
+	wl.TTFTms = ttft      // add
+	wl.TotalMS = total    // add
+	g.ev.Publish("workload.finished", wl)
+```
+
+Until this lands, `localmesh_inference_ttft_seconds` emits no series and
+`localmesh_inference_duration_seconds` uses the timestamp fallback —
+correct within the sub-millisecond broker hop.
+
+### `internal/contracts/types.go` + `internal/server/nodehub/hub.go` — node disk
+
+The `nodes` table columns and `store.UpdateNodeDisk`/`GetNodeDisk` are in
+place (migration 0015 + `nodedisk.go`); the wire fields are not — the
+agent does not send disk telemetry yet. To complete the path:
+
+1. `contracts.Metrics` gains `disk_free_bytes`, `disk_total_bytes` and a
+   `disk_measured` flag (same convention as the existing `*_measured`
+   flags — a metrics report without disk must not overwrite the stored
+   columns).
+2. Agent-side: fill them in the heartbeat metrics probe
+   (`internal/agent/hardware`).
+3. `nodehub` heartbeat handler: after `UpdateNodeMetrics`, when
+   `m.DiskMeasured` is true call `st.UpdateNodeDisk(ctx, id, free, total)`.
+4. Optionally surface the columns on `/nodes` rows: extend `nodeCols`,
+   `scanNode`, and `nodeJSON` (`disk_free_bytes`, `disk_total_bytes`,
+   `disk_measured_at` — all nullable). Until then
+   `GET /api/v1/nodes/{id}/disk` is the surfacing endpoint.
+5. `web/lib/types.ts` mirror additions:
+   `Metrics.disk_free_bytes?`, `Metrics.disk_total_bytes?`,
+   `Node.disk_*?` when nodeJSON emits them, and new `NodeDisk` +
+   `ControlPlanePeer` interfaces for the two new endpoints.
+
+### `web/lib/types.ts` — gap summary (for the dashboard workstream)
+
+`GET /api/v1/control-plane/peers` →
+`{instance_id, role: "active"|"standby", hostname, started_at,
+heartbeat_at, heartbeat_age_seconds, fresh}[]` (add `ControlPlanePeer`).
+`GET /api/v1/nodes/{id}/disk` →
+`{node_id, disk_free_bytes, disk_total_bytes, disk_measured_at}` with all
+three telemetry fields nullable (add `NodeDisk`). `ControlPlaneStatus`
+gains `standby?: {present, count, instance_id?, hostname?,
+heartbeat_age_seconds?}` once wiring (c) lands. Every other Go response
+was field-checked against the file — no other drift found.
+
 ## Known gaps / integrator follow-ups
 
 Metrics you might expect that **do not exist** — dashboards don't fake
 them; add them in `internal/server/metrics` + `SetGauges` if needed:
 
-- **No latency anywhere.** No histogram/summary for inference duration,
-  TTFT, or queue wait (the fields exist on workload rows —
-  `ttft_ms`, `total_ms`, `decision.queued_ms` — but nothing exports
-  them). Model-op durations likewise unmeasured.
-- **No live model-op queue depth gauge.** `queued` vs `dispatched`
-  counters give flow, not backlog; `GET /api/v1/model-operations` has it.
 - **No per-node or per-model dimensions** — deliberately (bounded label
-  cardinality). Version distribution, per-node capacity: admin API only.
+  cardinality). Version distribution, per-node capacity, per-node disk:
+  admin API only.
+- **TTFT histogram needs the gateway diff above** — the collector reads
+  `ttft_ms` whenever the payload carries it; until then the family is
+  registered but emits no series.
+- **Model-op duration is observe-time, not row-time** — it spans
+  dispatch→terminal *as seen by this process*: ops that started before
+  a control-plane restart are invisible to it (documented on the panel).
 - **No SSE subscriber count** — the broker keeps the set private
   (`doc.go` notes this needs a broker accessor first).
 - **Router has no `/metrics`** — `internal/router` serves only JSON
@@ -241,10 +404,15 @@ them; add them in `internal/server/metrics` + `SetGauges` if needed:
   endpoint there (backend readiness, elected-active, probe errors)
   would close the failover-visibility gap.
 - **Standby serves no metrics pre-promotion** — by design; the `up`
-  flip is the promotion signal (see above).
-- **No Postgres metrics** — add `prometheuscommunity/postgres-exporter`
-  as your own sidecar if wanted; skipped here to keep the layer lean
-  and avoid shipping DB credentials.
+  flip is the promotion signal. Its *presence* is now visible via
+  `control_plane_peers`/`localmesh_control_plane_peers` (see above) —
+  that is presence, not a metrics scrape.
+- **No Postgres metrics** — `localmesh_db_reachable` covers binary
+  reachability only; add `prometheuscommunity/postgres-exporter` as
+  your own sidecar for pool/lock/replication depth, skipped here to
+  keep the layer lean and avoid shipping DB credentials.
 - **Agents aren't scrapeable** — outbound WebSocket clients with no
   listener; heartbeat cadence visible via
   `localmesh_events_total{event="node.metrics"}`.
+- **Node disk telemetry** — schema + endpoint exist; values stay NULL
+  until the contracts/agent diff above ships (no fabricated zeros).

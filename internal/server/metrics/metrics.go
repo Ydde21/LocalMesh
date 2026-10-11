@@ -1,12 +1,15 @@
 package metrics
 
 import (
+	"crypto/x509"
+	"encoding/json"
 	"log/slog"
 	"reflect"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/localmesh/localmesh/internal/server/events"
 )
@@ -28,6 +31,19 @@ type Gauge struct {
 	Help   string            // # HELP line text (optional but recommended)
 	Value  float64           // NaN/±Inf render per exposition conventions
 	Labels map[string]string // bounded, enum-like values only — never ids
+}
+
+// CertDaysRemaining parses a DER leaf certificate and returns days
+// until expiry — the value behind the control_plane_cert_days_remaining
+// gauge the integrator wires from the serving chain (s.ca.Server.
+// Certificate[0]); ok=false when the bytes aren't a cert (dev-insecure
+// mode simply emits no series).
+func CertDaysRemaining(leafDER []byte) (days float64, ok bool) {
+	cert, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		return 0, false
+	}
+	return time.Until(cert.NotAfter).Hours() / 24, true
 }
 
 // label is one metric label pair.
@@ -100,6 +116,88 @@ func (v *counterVec) snapshot() []sample {
 	return out
 }
 
+// ---------------------------------------------------------------------------
+// histograms
+// ---------------------------------------------------------------------------
+
+// histSeries is one labeled histogram series: per-bucket counts (last
+// cell catches >last-bucket, i.e. le="+Inf"), running sum and total.
+type histSeries struct {
+	labels []label
+	counts []uint64 // len(buckets)+1 — final cell is the +Inf bucket
+	sum    float64
+	total  uint64
+}
+
+// histSample is a point-in-time copy of one histogram series.
+type histSample struct {
+	key    string
+	labels []label
+	counts []uint64 // per-bucket (non-cumulative), +Inf last
+	sum    float64
+	total  uint64
+}
+
+// histogramVec is a minimal labeled histogram family: fixed buckets
+// declared at construction, mutex-guarded series map. Observations are
+// event-rate (never hot enough to need per-bucket atomics).
+type histogramVec struct {
+	name    string
+	help    string
+	buckets []float64 // sorted ascending; +Inf is implicit
+	mu      sync.Mutex
+	m       map[string]*histSeries
+}
+
+func newHistogramVec(name, help string, buckets []float64) *histogramVec {
+	return &histogramVec{
+		name: name, help: help,
+		buckets: buckets,
+		m:       map[string]*histSeries{},
+	}
+}
+
+// observe adds one sample to the labeled series.
+func (v *histogramVec) observe(ls []label, val float64) {
+	if len(ls) > 1 {
+		sort.Slice(ls, func(i, j int) bool { return ls[i].k < ls[j].k })
+	}
+	key := seriesKey(ls)
+	v.mu.Lock()
+	s, ok := v.m[key]
+	if !ok {
+		s = &histSeries{
+			labels: append([]label(nil), ls...),
+			counts: make([]uint64, len(v.buckets)+1),
+		}
+		v.m[key] = s
+	}
+	idx := sort.SearchFloat64s(v.buckets, val) // first bucket >= val
+	s.counts[idx]++
+	s.sum += val
+	s.total++
+	v.mu.Unlock()
+}
+
+// snapshot returns all series in deterministic (key-sorted) order,
+// with counts copied so rendering holds no lock.
+func (v *histogramVec) snapshot() []histSample {
+	v.mu.Lock()
+	out := make([]histSample, 0, len(v.m))
+	for k, s := range v.m {
+		out = append(out, histSample{
+			key:    k,
+			labels: s.labels,
+			counts: append([]uint64(nil), s.counts...),
+			sum:    s.sum,
+			total:  s.total,
+		})
+	}
+	v.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].key < out[j].key })
+	return out
+}
+
 // Collector counts broker events and serves them as Prometheus text.
 // Everything is in-memory: a process restart resets counters (gauges
 // come from the integrator's provider, so they stay truthful). All
@@ -111,11 +209,15 @@ type Collector struct {
 	workloadsQ      *counterVec // localmesh_workloads_queued_total
 	workloadsS      *counterVec // localmesh_workloads_started_total
 	workloadsF      *counterVec // localmesh_workloads_finished_total{status}
+	inferenceReq    *counterVec // localmesh_inference_requests_total{status}
 	modelOps        *counterVec // localmesh_model_operation_events_total{status}
 	updatesFinished *counterVec // localmesh_agent_updates_finished_total{phase}
+	updatesRB       *counterVec // localmesh_agent_updates_rolled_back_total
 	rolloutTrans    *counterVec // localmesh_rollout_transitions_total{state}
+	rolloutsFail    *counterVec // localmesh_rollouts_failed_total
 	nodeConn        *counterVec // localmesh_node_connected_total
 	nodeDisc        *counterVec // localmesh_node_disconnected_total
+	nodeReconn      *counterVec // localmesh_node_reconnects_total
 	nodeMaint       *counterVec // localmesh_node_maintenance_events_total{state}
 	releasesReg     *counterVec // localmesh_releases_registered_total
 	releasesRev     *counterVec // localmesh_releases_revoked_total
@@ -126,10 +228,20 @@ type Collector struct {
 	// vecs is the fixed render order (declaration order above).
 	vecs []*counterVec
 
-	// dedupe guards rolloutState/updateDone.
+	queueSec *histogramVec // localmesh_inference_queue_seconds
+	ttftSec  *histogramVec // localmesh_inference_ttft_seconds{status}
+	totalSec *histogramVec // localmesh_inference_duration_seconds{status}
+	opDurSec *histogramVec // localmesh_model_operation_duration_seconds{status}
+
+	// hvecs is the fixed histogram render order (declaration order).
+	hvecs []*histogramVec
+
+	// dedupe guards rolloutState/updateDone/nodeSeen/opStarted.
 	mu           sync.Mutex
-	rolloutState map[string]string // rollout id → last counted state
-	updateDone   map[string]bool   // update id → terminal already counted
+	rolloutState map[string]string    // rollout id → last counted state
+	updateDone   map[string]bool      // update id → terminal already counted
+	nodeSeen     map[string]bool      // node id → connected this process lifetime
+	opStarted    map[string]time.Time // op id → first dispatch observed
 
 	gaugeMu sync.RWMutex
 	gaugeFn func() []Gauge
@@ -150,27 +262,47 @@ func New(log *slog.Logger) *Collector {
 		workloadsQ:      newCounterVec("localmesh_workloads_queued_total", "Inference workloads accepted into the queue."),
 		workloadsS:      newCounterVec("localmesh_workloads_started_total", "Inference workloads dispatched to a node."),
 		workloadsF:      newCounterVec("localmesh_workloads_finished_total", "Inference workloads reaching a terminal status."),
+		inferenceReq:    newCounterVec("localmesh_inference_requests_total", "Inference requests reaching a terminal outcome (normalized: succeeded|failed|cancelled)."),
 		modelOps:        newCounterVec("localmesh_model_operation_events_total", "Model-operation events by reported status."),
 		updatesFinished: newCounterVec("localmesh_agent_updates_finished_total", "Agent updates reaching a terminal phase (deduplicated per update)."),
+		updatesRB:       newCounterVec("localmesh_agent_updates_rolled_back_total", "Agent updates that terminated in a rollback (deduplicated per update)."),
 		rolloutTrans:    newCounterVec("localmesh_rollout_transitions_total", "Rollout state transitions (deduplicated per rollout)."),
+		rolloutsFail:    newCounterVec("localmesh_rollouts_failed_total", "Rollout campaigns that reached the failed state (deduplicated per rollout)."),
 		nodeConn:        newCounterVec("localmesh_node_connected_total", "Node agent connections established."),
 		nodeDisc:        newCounterVec("localmesh_node_disconnected_total", "Node agent connections closed."),
+		nodeReconn:      newCounterVec("localmesh_node_reconnects_total", "Node connections for an id already connected this process lifetime (churn signal)."),
 		nodeMaint:       newCounterVec("localmesh_node_maintenance_events_total", "Node maintenance-state events by target state."),
 		releasesReg:     newCounterVec("localmesh_releases_registered_total", "Signed releases registered."),
 		releasesRev:     newCounterVec("localmesh_releases_revoked_total", "Releases revoked."),
 		releaseKeysReg:  newCounterVec("localmesh_release_keys_registered_total", "Release signing keys registered."),
 		releaseKeysRev:  newCounterVec("localmesh_release_keys_revoked_total", "Release signing keys revoked."),
 		ownership:       newCounterVec("localmesh_ownership_transitions_total", "Control-plane ownership transitions by event kind."),
-		rolloutState:    map[string]string{},
-		updateDone:      map[string]bool{},
+		queueSec: newHistogramVec("localmesh_inference_queue_seconds",
+			"Seconds an inference workload waited between acceptance and dispatch (decision.queued_ms).",
+			[]float64{0.05, 0.25, 1, 5, 30, 120, 300}),
+		ttftSec: newHistogramVec("localmesh_inference_ttft_seconds",
+			"Seconds to first token for finished inference workloads, by outcome.",
+			[]float64{0.25, 0.5, 1, 2.5, 5, 15, 60}),
+		totalSec: newHistogramVec("localmesh_inference_duration_seconds",
+			"End-to-end seconds for finished inference workloads, by outcome.",
+			[]float64{1, 5, 15, 60, 180, 600}),
+		opDurSec: newHistogramVec("localmesh_model_operation_duration_seconds",
+			"Seconds from a model op's first observed dispatch to its terminal status, by outcome. Interrupted ops keep the timer across retries; ops predating a restart are undercounted.",
+			[]float64{5, 30, 120, 600, 1800, 7200}),
+		rolloutState: map[string]string{},
+		updateDone:   map[string]bool{},
+		nodeSeen:     map[string]bool{},
+		opStarted:    map[string]time.Time{},
 	}
 	c.vecs = []*counterVec{
 		c.eventsTotal, c.workloadsQ, c.workloadsS, c.workloadsF,
-		c.modelOps, c.updatesFinished, c.rolloutTrans,
-		c.nodeConn, c.nodeDisc, c.nodeMaint,
+		c.inferenceReq, c.modelOps, c.updatesFinished, c.updatesRB,
+		c.rolloutTrans, c.rolloutsFail,
+		c.nodeConn, c.nodeDisc, c.nodeReconn, c.nodeMaint,
 		c.releasesReg, c.releasesRev, c.releaseKeysReg, c.releaseKeysRev,
 		c.ownership,
 	}
+	c.hvecs = []*histogramVec{c.queueSec, c.ttftSec, c.totalSec, c.opDurSec}
 	return c
 }
 
@@ -274,16 +406,38 @@ func (c *Collector) Observe(event string, payload any) {
 		c.workloadsQ.inc()
 	case "workload.started":
 		c.workloadsS.inc()
+		// Queue wait: recorded at dispatch because that's when the wait
+		// actually ends (the decision carries the scheduler-measured
+		// queued_ms). Workloads that die in the queue never emit started
+		// and contribute no sample — this is a scheduling-wait profile,
+		// not a per-request guarantee.
+		if ms, ok := numField(anyField(payload, "decision"), "queued_ms"); ok && ms >= 0 {
+			c.queueSec.observe(nil, ms/1000)
+		}
 	case "workload.finished":
-		c.workloadsF.inc(label{"status", norm(strField(payload, "status"))})
+		status := norm(strField(payload, "status"))
+		c.workloadsF.inc(label{"status", status})
+		c.inferenceReq.inc(label{"status", normOutcome(status)})
+		// Timings land when the row carries them — a failed request's
+		// duration is still a real duration (time-to-fail), so no
+		// outcome filter; absent fields contribute no sample.
+		if ms, ok := numField(payload, "ttft_ms"); ok && ms > 0 {
+			c.ttftSec.observe([]label{{"status", status}}, ms/1000)
+		}
+		if sec, ok := workloadDuration(payload); ok {
+			c.totalSec.observe([]label{{"status", status}}, sec)
+		}
 	case "model.operation":
-		c.modelOps.inc(label{"status", norm(strField(payload, "status"))})
+		status := norm(strField(payload, "status"))
+		c.modelOps.inc(label{"status", status})
+		c.observeModelOp(strField(payload, "operation_id"), status)
 	case "agent.update":
 		c.observeUpdate(payload)
 	case "rollout":
 		c.observeRollout(payload)
 	case "node.connected":
 		c.nodeConn.inc()
+		c.observeNodeConnect(payload)
 	case "node.disconnected":
 		c.nodeDisc.inc()
 	case "node.maintenance":
@@ -325,6 +479,11 @@ func (c *Collector) observeUpdate(payload any) {
 		c.mu.Unlock()
 	}
 	c.updatesFinished.inc(label{"phase", norm(phase)})
+	// Rollbacks are the update outcome operators most need at a glance —
+	// a dedicated counter keeps that signal out of the phase table.
+	if phase == "rolled_back" {
+		c.updatesRB.inc()
+	}
 }
 
 // observeRollout counts a rollout event only when the state differs
@@ -348,6 +507,93 @@ func (c *Collector) observeRollout(payload any) {
 		c.mu.Unlock()
 	}
 	c.rolloutTrans.inc(label{"state", norm(state)})
+	if state == "failed" {
+		c.rolloutsFail.inc()
+	}
+}
+
+// observeNodeConnect counts a node.connected as a "reconnect" when the
+// node id has already connected during this process's lifetime. The
+// map is process-local: a first connect after a restart always reads
+// as a fresh connect — honest, since pre-restart history is unknowable.
+func (c *Collector) observeNodeConnect(payload any) {
+	id := strField(payload, "id")
+	if id == "" {
+		return
+	}
+	c.mu.Lock()
+	if len(c.nodeSeen) >= dedupeCap && !c.nodeSeen[id] {
+		c.nodeSeen = map[string]bool{}
+	}
+	reconnect := c.nodeSeen[id]
+	c.nodeSeen[id] = true
+	c.mu.Unlock()
+	if reconnect {
+		c.nodeReconn.inc()
+	}
+}
+
+// observeModelOp tracks model-op execution wall time for the duration
+// histogram. The timer starts on the first 'dispatched' (or 'running'
+// progress frame — the first signal an agent is actually working) and
+// closes on the terminal emit; 'interrupted' deliberately does NOT end
+// it — retryable pulls resume under the same operation id, so the
+// sample spans retries, which is the duration an operator cares about.
+// Ops whose terminal arrives with no observed start (process restarted
+// mid-op) contribute no sample rather than a fabricated duration.
+func (c *Collector) observeModelOp(opID, status string) {
+	if opID == "" {
+		return
+	}
+	switch status {
+	case "dispatched", "running":
+		c.mu.Lock()
+		if len(c.opStarted) >= dedupeCap {
+			c.opStarted = map[string]time.Time{}
+		}
+		if _, ok := c.opStarted[opID]; !ok {
+			c.opStarted[opID] = time.Now()
+		}
+		c.mu.Unlock()
+	case "succeeded", "failed", "cancelled":
+		c.mu.Lock()
+		start, ok := c.opStarted[opID]
+		if ok {
+			delete(c.opStarted, opID)
+		}
+		c.mu.Unlock()
+		if ok {
+			c.opDurSec.observe([]label{{"status", status}}, time.Since(start).Seconds())
+		}
+	}
+}
+
+// workloadDuration resolves the end-to-end seconds of a finished
+// workload. Preferred source is the stored total_ms (exact, survives
+// republish); producers that publish the row without it (the current
+// gateway emits workload.finished before the struct carries the
+// timings) fall back to timestamps: finished_at−started_at on
+// republished rows, or started_at→observe-time on the live emit — the
+// broker hop is sub-millisecond, well inside any bucket. queued_at is
+// the deeper fallback for rows that never reached 'running'. Durations
+// beyond a day are rejected as clock junk.
+func workloadDuration(payload any) (float64, bool) {
+	if ms, ok := numField(payload, "total_ms"); ok && ms > 0 {
+		return ms / 1000, true
+	}
+	start, ok := timeField(payload, "started_at", "queued_at")
+	if !ok {
+		return 0, false
+	}
+	end := time.Now()
+	if fin, ok := timeField(payload, "finished_at"); ok {
+		end = fin
+	}
+	d := end.Sub(start).Seconds()
+	if d < 0 || d > 86400 {
+		return 0, false
+	}
+	return d, true
 }
 
 // observeRelease maps the release registry's discriminated event:
@@ -387,46 +633,101 @@ func terminalPhase(phase string) bool {
 // *store.Rollout, *store.OwnershipEvent). Field lookup is deliberately
 // duck-typed so this package stays free of a store dependency.
 
-// strField reads the first listed string field from a map or struct
-// (struct match is case-insensitive: "status" hits Status). Returns ""
-// when absent or not a string.
+// strField reads the first listed string field from a map or struct.
+// Returns "" when absent or not a string.
 func strField(v any, names ...string) string {
 	for _, n := range names {
-		if s := field(v, n); s != "" {
+		if s, ok := anyField(v, n).(string); ok && s != "" {
 			return s
 		}
 	}
 	return ""
 }
 
-func field(v any, name string) string {
+// numField reads the first listed field as a number — every integer
+// and float kind map/struct producers emit, plus json.Number. ok=false
+// when the field is absent or non-numeric.
+func numField(v any, names ...string) (float64, bool) {
+	for _, n := range names {
+		switch x := anyField(v, n).(type) {
+		case int:
+			return float64(x), true
+		case int8:
+			return float64(x), true
+		case int16:
+			return float64(x), true
+		case int32:
+			return float64(x), true
+		case int64:
+			return float64(x), true
+		case uint:
+			return float64(x), true
+		case uint8:
+			return float64(x), true
+		case uint16:
+			return float64(x), true
+		case uint32:
+			return float64(x), true
+		case uint64:
+			return float64(x), true
+		case float32:
+			return float64(x), true
+		case float64:
+			return x, true
+		case json.Number:
+			if f, err := x.Float64(); err == nil {
+				return f, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// anyField reads a field from a map or struct payload. For structs the
+// match is by JSON wire name first (e.g. "ttft_ms" reaches
+// Workload.TTFTms via its tag — the name producers actually emit),
+// falling back to a case-insensitive Go field-name match when the
+// field carries no tag. Pointer fields are dereferenced; nil pointers
+// read as absent.
+func anyField(v any, name string) any {
 	if v == nil {
-		return ""
+		return nil
 	}
 	switch m := v.(type) {
 	case map[string]string:
 		return m[name]
 	case map[string]any:
-		if s, ok := m[name].(string); ok {
-			return s
-		}
-		return ""
+		return m[name]
 	}
 	rv := reflect.ValueOf(v)
 	for rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
-			return ""
+			return nil
 		}
 		rv = rv.Elem()
 	}
 	if rv.Kind() != reflect.Struct {
-		return ""
+		return nil
 	}
-	f := rv.FieldByNameFunc(func(n string) bool { return strings.EqualFold(n, name) })
-	if f.IsValid() && f.Kind() == reflect.String {
-		return f.String()
+	rt := rv.Type()
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
+		jn, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if jn == "-" {
+			continue
+		}
+		if jn == name || (jn == "" && strings.EqualFold(f.Name, name)) {
+			fv := rv.Field(i)
+			for fv.Kind() == reflect.Pointer {
+				if fv.IsNil() {
+					return nil
+				}
+				fv = fv.Elem()
+			}
+			return fv.Interface()
+		}
 	}
-	return ""
+	return nil
 }
 
 // subField reads a nested payload field (e.g. the "release" object
@@ -438,6 +739,25 @@ func subField(v any, name string) any {
 	return nil
 }
 
+// timeField reads the first listed field as a timestamp — time.Time
+// struct fields (dereferenced) or RFC3339 strings from map payloads.
+// ok=false when absent, unparseable, or the zero time.
+func timeField(v any, names ...string) (time.Time, bool) {
+	for _, n := range names {
+		switch x := anyField(v, n).(type) {
+		case time.Time:
+			if !x.IsZero() {
+				return x, true
+			}
+		case string:
+			if t, err := time.Parse(time.RFC3339Nano, x); err == nil && !t.IsZero() {
+				return t, true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
 // norm canonicalizes a label value: empty → "unknown" (Prometheus
 // prefers a named bucket over an empty one), trimmed otherwise. Label
 // VALUES come only from bounded enums (status/phase/state/event) —
@@ -447,4 +767,16 @@ func norm(s string) string {
 		return "unknown"
 	}
 	return s
+}
+
+// normOutcome maps the workload terminal-status vocabulary onto the
+// three-bucket outcome enum inference_requests_total exposes
+// (succeeded|failed|cancelled): the store spells success "completed",
+// dashboards ask "did it work". workloads_finished_total keeps the raw
+// vocabulary — this is a read-optimized alias, not a second truth.
+func normOutcome(status string) string {
+	if status == "completed" {
+		return "succeeded"
+	}
+	return status
 }

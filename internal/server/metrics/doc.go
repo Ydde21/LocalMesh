@@ -52,6 +52,15 @@
 //     only when it differs from the last counted state for that id.
 //     Same for terminal agent updates: one terminal count per update
 //     id. Dedupe state is capped (8192 ids) and resets wholesale.
+//   - v0.10 adds histograms (fixed buckets declared at construction)
+//     and two more capped id-keyed maps: nodeSeen (reconnect detection)
+//     and opStarted (model-op duration timers — 'interrupted' keeps the
+//     timer so the sample spans retries; a terminal with no observed
+//     start records nothing).
+//   - Histogram series appear only after their first observation —
+//     localmesh_inference_ttft_seconds stays empty until a producer
+//     publishes finished workloads carrying ttft_ms (the collector
+//     reads it whenever it arrives).
 //   - SSE subscriber count is NOT exposed: the broker keeps its
 //     subscriber set private. Surface it via SetGauges if a broker
 //     accessor is ever added.

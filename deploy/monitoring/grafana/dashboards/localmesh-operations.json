@@ -187,6 +187,68 @@
       },
       "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [{"refId": "A", "expr": "sum by (state) (increase(localmesh_rollout_transitions_total[15m]))", "legendFormat": "{{state}}"}]
+    },
+    {
+      "id": 14,
+      "type": "row",
+      "title": "v0.10 — op durations & failure counters",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 31},
+      "panels": []
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Op duration — p50 / p95",
+      "description": "localmesh_model_operation_duration_seconds — first observed dispatch → terminal status, by outcome. 'interrupted' keeps the timer running across retries; ops predating a restart are undercounted.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {"drawStyle": "line", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(localmesh_model_operation_duration_seconds_bucket[5m])))", "legendFormat": "p50"}, {"refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(localmesh_model_operation_duration_seconds_bucket[5m])))", "legendFormat": "p95"}]
+    },
+    {
+      "id": 16,
+      "type": "stat",
+      "title": "Rollouts failed (24h)",
+      "description": "localmesh_rollouts_failed_total — campaigns that reached 'failed' (deduplicated per rollout). The raw transition stream stays on the panel above.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 32},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"refId": "A", "expr": "sum(increase(localmesh_rollouts_failed_total[24h]))", "instant": true}]
+    },
+    {
+      "id": 17,
+      "type": "stat",
+      "title": "Updates rolled back (24h)",
+      "description": "localmesh_agent_updates_rolled_back_total — agent updates terminating in rollback (deduplicated per update): the rollback-rate headline for update safety.",
+      "datasource": {"type": "prometheus", "uid": "localmesh-prometheus"},
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 32},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}
+        },
+        "overrides": []
+      },
+      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"refId": "A", "expr": "sum(increase(localmesh_agent_updates_rolled_back_total[24h]))", "instant": true}]
     }
   ]
 }
