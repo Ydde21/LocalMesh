@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   useModels, useModelOps, useNodes, usePlacement, api, MODEL_OPS_KEY,
 } from "@/lib/api";
@@ -69,6 +70,13 @@ export default function ModelsPage() {
   const nodeById = useMemo(
     () => new Map((nodes ?? []).map((n) => [n.id, n])),
     [nodes]
+  );
+
+  // Nodes that can actually receive a pull right now — the empty state
+  // branches on this so a fresh cluster is pointed at enrollment, not at
+  // an Install dialog that has nothing to dispatch to.
+  const pullTargets = (nodes ?? []).filter(
+    (n) => n.online && n.status === "approved"
   );
 
   // The catalog endpoint aggregates a subset of per-model fields; pull
@@ -222,14 +230,36 @@ export default function ModelsPage() {
         ) : models === undefined ? (
           <SkeletonRows />
         ) : (models ?? []).length === 0 ? (
-          <Empty
-            title="No models installed"
-            hint="Install a model to push it to online nodes, or pull one directly on a node via `ollama pull`."
-          >
-            <button className="btn btn-primary btn-sm" onClick={() => setInstallOpen(true)}>
-              <Download size={13} /> Install model
-            </button>
-          </Empty>
+          nodes !== undefined && pullTargets.length === 0 ? (
+            (nodes ?? []).length === 0 ? (
+              <Empty
+                title="No devices yet"
+                hint="Models install onto cluster machines — enroll a device first (token → join → approve)."
+              >
+                <Link href="/devices?add=1" className="btn btn-primary btn-sm">
+                  Add a device
+                </Link>
+              </Empty>
+            ) : (
+              <Empty
+                title="No online approved nodes"
+                hint="Devices are pending approval, offline, or in maintenance — a pull can only land on a live node."
+              >
+                <Link href="/devices" className="btn btn-primary btn-sm">
+                  Open Devices
+                </Link>
+              </Empty>
+            )
+          ) : (
+            <Empty
+              title="No models installed"
+              hint="Install dispatches a pull to the online nodes you pick — or run `ollama pull` on a node directly. A node needs a running engine to serve it."
+            >
+              <button className="btn btn-primary btn-sm" onClick={() => setInstallOpen(true)}>
+                <Download size={13} /> Install model
+              </button>
+            </Empty>
+          )
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[760px] text-left">
@@ -449,7 +479,7 @@ export default function ModelsPage() {
 
       {installOpen && (
         <InstallDialog
-          nodes={nodes ?? []}
+          nodes={nodes}
           onClose={() => setInstallOpen(false)}
           onDone={refresh}
         />
@@ -492,7 +522,7 @@ function InstallDialog({
   onClose,
   onDone,
 }: {
-  nodes: Node[];
+  nodes: Node[] | undefined;
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -501,7 +531,13 @@ function InstallDialog({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  const online = nodes.filter((n) => n.online && n.status === "approved");
+  const online = (nodes ?? []).filter((n) => n.online && n.status === "approved");
+  // The server dispatches to every online approved node — it does NOT
+  // check for an engine. A pull to an engineless node fails agent-side,
+  // so flag them here instead of letting the op die quietly.
+  const engineless = online.filter(
+    (n) => !(n.engines ?? []).some((e) => e.healthy)
+  );
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -575,26 +611,49 @@ function InstallDialog({
             >
               All online nodes ({online.length})
             </button>
-            {online.map((n) => (
-              <button
-                key={n.id}
-                className={`btn btn-sm ${targets.has(n.id) ? "btn-primary" : ""}`}
-                onClick={() =>
-                  setTargets((s) => {
-                    const next = new Set(s);
-                    if (next.has(n.id)) next.delete(n.id);
-                    else next.add(n.id);
-                    return next;
-                  })
-                }
-              >
-                {n.name}
-              </button>
-            ))}
+            {online.map((n) => {
+              const engineOk = (n.engines ?? []).some((e) => e.healthy);
+              return (
+                <button
+                  key={n.id}
+                  className={`btn btn-sm ${targets.has(n.id) ? "btn-primary" : ""}`}
+                  title={
+                    engineOk
+                      ? undefined
+                      : "no inference engine detected — install & start Ollama or the pull fails here"
+                  }
+                  onClick={() =>
+                    setTargets((s) => {
+                      const next = new Set(s);
+                      if (next.has(n.id)) next.delete(n.id);
+                      else next.add(n.id);
+                      return next;
+                    })
+                  }
+                >
+                  {n.name}
+                  {!engineOk && " ⚠"}
+                </button>
+              );
+            })}
           </div>
-          {online.length === 0 && (
+          {nodes !== undefined && online.length === 0 && (
             <p className="mt-2 text-[11.5px] text-[var(--color-warn)]">
-              No online approved nodes — nothing can receive the pull.
+              No online approved nodes — nothing can receive the pull.{" "}
+              <Link
+                href="/devices?add=1"
+                className="text-[var(--color-accent)] hover:underline"
+              >
+                Add a device →
+              </Link>
+            </p>
+          )}
+          {online.length > 0 && engineless.length > 0 && (
+            <p className="mt-2 text-[11.5px] text-[var(--color-warn)]">
+              {engineless.map((n) => n.name).join(", ")}{" "}
+              {engineless.length === 1 ? "has" : "have"} no inference engine
+              detected — the pull fails there until an engine (e.g. Ollama) is
+              installed and running.
             </p>
           )}
         </div>

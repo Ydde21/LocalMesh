@@ -84,7 +84,7 @@ export function OnboardingChecklist() {
     {
       title: "Join an agent (localmesh-agent join)",
       done: hasNode || (pending ?? []).length > 0,
-      action: { href: "/devices", label: "Add device →" },
+      action: { href: "/devices?add=1", label: "Add device →" },
       hint: "or `join --discover` on the same LAN",
     },
     {

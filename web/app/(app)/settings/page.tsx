@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import {
   useEnrollTokens, useEnrollments, useAPIKeys, useSettings, useAudit,
   useDiagnostics, useOverview, api,
@@ -38,7 +39,7 @@ export default function SettingsPage() {
 // ---------------------------------------------------------------------------
 
 function Section({ icon: Icon, title, desc, children }: {
-  icon: typeof KeyRound; title: string; desc: string; children: React.ReactNode;
+  icon: typeof KeyRound; title: string; desc: React.ReactNode; children: React.ReactNode;
 }) {
   return (
     <Panel className="fade-up">
@@ -57,6 +58,7 @@ function Section({ icon: Icon, title, desc, children }: {
 // ---- Enrollment -------------------------------------------------------------
 
 function EnrollmentSection() {
+  const { data: ov } = useOverview();
   const { data: tokens, mutate: mutTokens } = useEnrollTokens();
   const { data: pending, mutate: mutPending } = useEnrollments("pending");
   const [label, setLabel] = useState("");
@@ -110,9 +112,20 @@ function EnrollmentSection() {
     }
   };
 
+  const joinCmd = `localmesh-agent join --server ${ov?.server_url || "<control-plane-url>"} --token ${newToken}`;
+
   return (
     <Section icon={Ticket} title="Device enrollment"
-      desc="Generate a token, then run `localmesh-agent join` on the machine. Enrollments require admin approval.">
+      desc={
+        <>
+          Generate a token, then run <code className="mono">localmesh-agent join</code> on
+          the machine — enrollments require admin approval.{" "}
+          <Link href="/devices?add=1" className="text-[var(--color-accent)] hover:underline">
+            Devices → Add device
+          </Link>{" "}
+          walks through the whole flow.
+        </>
+      }>
       <div className="flex flex-wrap items-center gap-2.5">
         <input className="input w-[200px]" placeholder="token label (e.g. my-mac)"
           value={label} onChange={(e) => setLabel(e.target.value)} />
@@ -122,7 +135,7 @@ function EnrollmentSection() {
           <Plus size={13} /> Create token
         </button>
       </div>
-      {err && <p className="mt-2 text-[12px] text-[var(--color-danger)]">{err}</p>}
+      {err && <ErrorNote error={err} className="mt-3 max-w-[560px]" />}
 
       {newToken && (
         <div className="mt-3 rounded-md border border-[var(--color-online)]/30 bg-[var(--color-online-soft)] px-3.5 py-3">
@@ -130,11 +143,15 @@ function EnrollmentSection() {
             <Check size={13} /> Token created — it is shown only once.
           </div>
           <div className="codeblock flex items-center justify-between">
-            <span>{`localmesh-agent join --server <control-plane-url> --token ${newToken}`}</span>
-            <button className="btn btn-sm ml-3" onClick={() => navigator.clipboard.writeText(`localmesh-agent join --server <control-plane-url> --token ${newToken}`)}>
+            <span>{joinCmd}</span>
+            <button className="btn btn-sm ml-3" onClick={() => navigator.clipboard.writeText(joinCmd)}>
               <Copy size={12} /> Copy
             </button>
           </div>
+          <p className="mt-2 text-[11px] leading-relaxed text-[var(--color-text-dim)]">
+            Run it on the device — the enrollment request lands under Pending approval
+            below (and in the Devices walkthrough) for sign-off.
+          </p>
         </div>
       )}
 
@@ -517,11 +534,7 @@ function ModelOpsSection() {
         </Field>
       </div>
 
-      {err && (
-        <div className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
-          {err}
-        </div>
-      )}
+      {err && <ErrorNote error={err} className="mt-3 max-w-[560px]" />}
 
       <div className="mt-4 flex items-center gap-3">
         <button className="btn btn-primary btn-sm" disabled={busy} onClick={save}>
@@ -650,11 +663,7 @@ function DiagnosticsSection() {
         </div>
       )}
 
-      {err && (
-        <div className="mt-3 max-w-[560px] rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
-          {err}
-        </div>
-      )}
+      {err && <ErrorNote error={err} className="mt-3 max-w-[560px]" />}
 
       <div className="mt-4 flex items-center gap-3">
         <button className="btn btn-sm" disabled={busy} onClick={exportJson}>

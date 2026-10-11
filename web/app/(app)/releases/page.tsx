@@ -8,7 +8,7 @@ import {
   useNodes, api,
 } from "@/lib/api";
 import { fmtAgo, fmtVersion, agentVersion, versionGt } from "@/lib/format";
-import { Panel, Meter, Empty } from "@/components/ui";
+import { Panel, Meter, Empty, ErrorNote } from "@/components/ui";
 import { StatusBadge } from "@/components/status";
 import { UpdatePhaseStepper } from "@/components/update-phase";
 import { ConfirmDialog } from "@/components/confirm";
@@ -133,8 +133,8 @@ function RolloutsPanel({
         <div className="label">Rollouts ({rollouts.length})</div>
       </div>
       {err && (
-        <div className="border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-[12px] text-red-400">
-          {err}
+        <div className="px-4 py-2.5">
+          <ErrorNote error={err} />
         </div>
       )}
       {rollouts.length === 0 ? (
@@ -329,11 +329,7 @@ function RolloutDrawer({ id }: { id: string }) {
         </div>
 
         <div className="space-y-5 px-5 py-5">
-          {err && (
-            <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
-              {err}
-            </div>
-          )}
+          {err && <ErrorNote error={err} />}
 
           {/* Progress */}
           <section>
@@ -368,11 +364,7 @@ function RolloutDrawer({ id }: { id: string }) {
               )}
               {r.strategy === "parallel" && <KV2 label="Batch size" value={String(r.batch_size)} />}
             </div>
-            {r.error && (
-              <div className="mt-2.5 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
-                {r.error}
-              </div>
-            )}
+            {r.error && <ErrorNote error={r.error} className="mt-2.5" />}
           </section>
 
           {/* Actions */}
@@ -676,11 +668,7 @@ function KeysPanel({ keysData }: { keysData?: ReleaseKey[] }) {
             </button>
           </div>
         </div>
-        {err && (
-          <div className="mt-2.5 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
-            {err}
-          </div>
-        )}
+        {err && <ErrorNote error={err} className="mt-2.5" />}
 
         <div className="mt-3 space-y-1.5">
           {keysData.map((k) => (
@@ -793,6 +781,7 @@ function FileArea({
 
 function RegisterDialog({ onClose }: { onClose: () => void }) {
   const { mutate } = useSWRConfig();
+  const { data: keysData } = useReleaseKeys();
   const [manifest, setManifest] = useState("");
   const [sums, setSums] = useState("");
   const [sigs, setSigs] = useState("");
@@ -882,6 +871,14 @@ function RegisterDialog({ onClose }: { onClose: () => void }) {
           </button>
         </div>
 
+        {keysData !== undefined && keysData.filter((k) => !k.revoked_at).length === 0 && (
+          <div className="mt-3.5 rounded-md border border-[var(--color-warn)]/25 bg-[var(--color-warn-soft)] px-3 py-2 text-[12px] leading-relaxed text-[var(--color-warn)]">
+            No signing keys registered — the server verifies each release&apos;s
+            signature against a trusted key, so registration fails until you add
+            one under Signing keys.
+          </div>
+        )}
+
         <div className="mt-4 space-y-4">
           <div>
             <div className="label mb-1.5">release-manifest.json</div>
@@ -917,11 +914,7 @@ function RegisterDialog({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        {err && (
-          <div className="mt-3.5 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
-            {err}
-          </div>
-        )}
+        {err && <ErrorNote error={err} className="mt-3.5" />}
 
         <div className="mt-4 flex justify-end gap-2">
           <button className="btn btn-sm" onClick={onClose} disabled={busy}>
@@ -1066,6 +1059,11 @@ function RolloutDialog({ onClose }: { onClose: () => void }) {
                 </option>
               ))}
             </select>
+            {releases !== undefined && approved.length === 0 && (
+              <div className="mt-1.5 text-[11.5px] text-[var(--color-warn)]">
+                No approved releases — register a signed release first.
+              </div>
+            )}
           </div>
 
           <div>
