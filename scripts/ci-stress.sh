@@ -78,8 +78,12 @@ LOAD_PIDS=()
 start_load() {
   [ "$LOAD" -le 0 ] && return 0
   step "cpu pressure: $LOAD burner(s)"
+  # Each burner is a subshell that busy-loops only while this script is
+  # alive ($$ inside the subshell is the script's pid). A hard kill of
+  # the script (kill -9, dead agent shell) bypasses the EXIT trap —
+  # kill -0 then fails and the burners die with it instead of orphaning.
   for _ in $(seq "$LOAD"); do
-    yes >/dev/null 2>&1 &
+    ( trap - TERM; while kill -0 $$ 2>/dev/null; do :; done ) &
     LOAD_PIDS+=($!)
   done
 }
