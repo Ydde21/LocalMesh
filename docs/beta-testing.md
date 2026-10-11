@@ -5,15 +5,28 @@ results the maintainers can act on. The beta exists to answer one
 question the CI suite cannot: *does LocalMesh work across separate
 physical machines, on different OSes and networks?*
 
-Everything below assumes you have ≥2 devices and ~an hour. You bring the
-hardware; we ship the validation kit:
+The full beta assumes ≥2 devices and ~an hour. Only have **one**
+device? Your hardware datapoint still counts — run
+`scripts/hw-validate.sh` and file a
+[Hardware compatibility report](https://github.com/localmesh/localmesh/issues/new?template=hardware-compat.md);
+it lands as a row in [docs/hardware-matrix.md](hardware-matrix.md).
+You bring the hardware; we ship the validation kit:
 
 | Piece | Where | What it does |
 |---|---|---|
-| `scripts/beta-validate.sh` | this repo | the driver — runs the scriptable legs automatically, prompts you through the operator legs, and writes a **redacted evidence bundle** |
-| [Beta validation report](https://github.com/localmesh/localmesh/issues/new?template=beta-validation.md) | GitHub issue template | the structured form your results land in |
+| `scripts/beta-validate.sh` | this repo | the fleet driver — runs the scriptable legs automatically, prompts you through the operator legs, and writes a **redacted evidence bundle** |
+| [Beta validation report](https://github.com/localmesh/localmesh/issues/new?template=beta-validation.md) | GitHub issue template | the structured form multi-device results land in |
 | [docs/fleet-validation.md](fleet-validation.md) | this repo | the deep-dive runbook if you want to exercise every leg by hand (curl-level) instead of at smoke depth |
-| `scripts/fleet-check.sh` / `scripts/fleet-report.sh` | this repo | the lower-level probes the driver builds on |
+| `scripts/hw-validate.sh` | this repo | the **single-device** validator — one command, stricter redaction (hashed hostname, /24 IPs, basename paths), emits a paste-ready matrix row |
+| [Hardware compatibility report](https://github.com/localmesh/localmesh/issues/new?template=hardware-compat.md) | GitHub issue template | the structured form single-device results land in |
+| [docs/hardware-matrix.md](hardware-matrix.md) | this repo | the living compatibility matrix every device-level report feeds |
+| `scripts/fleet-check.sh` / `scripts/fleet-report.sh` | this repo | the lower-level probes the drivers build on |
+
+**Which path?** One device → `hw-validate.sh` + the *Hardware
+compatibility report* template (10 minutes). Two or more → the full
+beta below + the *Beta validation report* template. Both feed the same
+[evidence-tier](fleet-validation.md#evidence-tiers) standard and both
+end up in [docs/hardware-matrix.md](hardware-matrix.md).
 
 ## Supported environments
 
@@ -201,15 +214,23 @@ The evidence bundle is **redacted by construction** — the same contract
   protocol, engine version, model names, connectivity probe results,
   CA fingerprints (public trust material), and your **OS hostname** —
   the bundle exists to tell one physical machine apart from another.
-- **Nothing is uploaded anywhere.** The script writes two local files;
-  you attach them to the issue yourself. Skim the `.txt` before
+- **`hw-validate.sh` redacts harder:** a matrix row doesn't need your
+  hostname, so its bundle replaces it with a truncated SHA-256
+  (`host-<hash>`, still stable per device), truncates non-loopback
+  IPv4s to /24, and collapses absolute paths to `…/basename`.
+- **Nothing is uploaded anywhere.** Either script writes two local
+  files; you attach them to the issue yourself. Skim the `.txt` before
   posting — that is the review step, and it is yours.
 
 ## Where to file what
 
-- **Validation results** (worked / partially worked / failed):
+- **Multi-device validation results** (worked / partially worked / failed):
   [Beta validation report](https://github.com/localmesh/localmesh/issues/new?template=beta-validation.md)
   template — the checklist + bundle format above.
+- **Single-device compatibility datapoint**:
+  [Hardware compatibility report](https://github.com/localmesh/localmesh/issues/new?template=hardware-compat.md)
+  template — attach the `hw-validate.sh` bundle; lands as a row in
+  [docs/hardware-matrix.md](hardware-matrix.md).
 - **A concrete bug** found during the run:
   [bug report](https://github.com/localmesh/localmesh/issues/new?template=bug_report.md)
   template — repro steps + `localmesh-agent doctor`/`report` output.

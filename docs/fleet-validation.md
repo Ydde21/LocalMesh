@@ -12,6 +12,14 @@ results table at the end.
 > legs + a redacted evidence bundle) and a GitHub issue template. Use
 > this page when you want the underlying commands or are verifying
 > something the driver doesn't cover.
+>
+> **Single-device run?** `scripts/hw-validate.sh` is the lighter
+> one-command validator — it produces a sanitized
+> `beta-report-host-<hash>-<ts>.txt/.json` bundle plus a paste-ready
+> [docs/hardware-matrix.md](hardware-matrix.md) row, and reports via the
+> *Hardware compatibility report* issue template. Use it when you have
+> one machine to contribute; use the full protocol below when you have
+> two or more.
 
 ## What counts as verified
 
@@ -39,6 +47,27 @@ What does **not** count:
 
 If a step fails, stop and fix before moving on — the later steps depend on
 the earlier ones.
+
+## Evidence tiers
+
+Every claim LocalMesh makes or accepts carries one of these — verbatim,
+so results stay comparable across the runbook, the beta kit, and the
+[hardware matrix](hardware-matrix.md):
+
+| Tier | What it means |
+|---|---|
+| **PHYSICAL FLEET VERIFIED** | The full bar above: ≥2 different physical machines, per-OS binaries, a real network path, and the documented legs observed. The only tier that supports cross-machine claims. |
+| **PHYSICAL (device leg)** | A single real device whose control-plane path crossed a real network. Evidence *toward* fleet verification — never a substitute for it. What `hw-validate.sh` emits for a remote `--server`. |
+| **HOSTED-CI** | Legs ran on hosted CI runners (GitHub ubuntu/macos/windows) — real binaries, shared datacenter hardware, no physical fleet. |
+| **VM** | Legs ran in hypervisor guests — real network path, but shared-kernel caveats when host and guests share one box (say so). |
+| **SAME-HOST** | Control plane, agent(s), and engine all on one physical machine — loopback or `localhost` path. Proves device-level legs only. What `hw-validate.sh` emits for a local/no `--server` run. |
+| **SIMULATED** | `fakeollama`, in-process e2e, test doubles — proves wire behavior, not the platform. |
+
+Rules of use: a result is the **weakest** tier any of its evidence
+comes from; never upgrade a tier by implication (a SAME-HOST pass plus
+a HOSTED-CI pass is still not PHYSICAL FLEET VERIFIED); when a claim
+isn't backed yet, say "unverified on physical hardware" — not
+"probably works".
 
 ## Prerequisites
 
@@ -568,6 +597,7 @@ tokens, prompts, or completions; paths are ~-collapsed):
 | Artifact | How to collect | What it proves |
 |---|---|---|
 | `beta-report-<host>-<ts>.txt` + `.json` | `bash scripts/beta-validate.sh [--self-test]` | the guided bundle: all auto legs + per-step PASS/FAIL/SKIP + operator-leg outcomes, txt + JSON |
+| `beta-report-host-<hash>-<ts>.txt` + `.json` | `bash scripts/hw-validate.sh [--server …] [--token …]` | the single-device compatibility bundle: hashed-hostname transcript + JSON + paste-ready matrix row — feeds [docs/hardware-matrix.md](hardware-matrix.md) via the *Hardware compatibility report* issue template |
 | `fleet-report-<device>.txt` | `bash scripts/fleet-report.sh > fleet-report-<device>.txt` | platform/CPU/RAM/OS, engine reachability, doctor output, config presence — one paste-able bundle |
 | `report-<device>.json` | `localmesh-agent report -json > report-<device>.json` | machine-readable snapshot: version+protocol, hardware, CA fingerprint, per-probe latency, enrollment + connectivity state |
 | `report -json -self-test` | `localmesh-agent report -json -self-test` | one bounded real inference through the local engine — status/latency/token counts only |
@@ -583,12 +613,18 @@ use it when the device is offline from your shell collector but the
 agent binary is on hand. For beta runs, `scripts/beta-validate.sh`
 collects the same classes of evidence into its
 `beta-report-<host>-<ts>.txt/.json` bundle — either bundle satisfies
-this table.
+this table. For one-off device contributions, `scripts/hw-validate.sh`
+emits the stricter `beta-report-host-<hash>-<ts>` variant (hostname
+hashed, IPs /24-truncated, paths basename-collapsed) that lands in
+[docs/hardware-matrix.md](hardware-matrix.md).
 
 ## Results
 
 Fill in during the run. Attach `nodes.json`, the workload distribution
 output, the per-device evidence above, and agent logs from each device.
+Device-level compatibility datapoints from community runs are tracked
+cumulatively in [docs/hardware-matrix.md](hardware-matrix.md) — a
+PHYSICAL FLEET VERIFIED result here also earns its devices matrix rows.
 
 | Field | Device 1 | Device 2 |
 |---|---|---|
