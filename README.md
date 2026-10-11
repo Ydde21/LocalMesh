@@ -323,6 +323,11 @@ make verify                       # full regression gate (fmt+vet+tests+race+web
 - [docs/beta-testing.md](docs/beta-testing.md) — external beta: environments, protocol, reporting
 - [docs/beta-checklist.md](docs/beta-checklist.md) — public-beta readiness audit
 - [docs/fleet-validation.md](docs/fleet-validation.md) — physical multi-device validation runbook
+- [docs/hardware-matrix.md](docs/hardware-matrix.md) — device compatibility matrix; contribute yours with `scripts/hw-validate.sh`
+- [docs/security-scan.md](docs/security-scan.md) — container/SBOM release gate (pinned syft+grype)
+- [docs/reproducibility.md](docs/reproducibility.md) — byte-identical release builds: what was proven, how to verify
+- [docs/trust-review-v10.md](docs/trust-review-v10.md) — external-review trust model + residual-risk register
+- [docs/ci-release.md](docs/ci-release.md) — the release-verification workflow: job graph + what runs when
 - [docs/security-audit-v09.md](docs/security-audit-v09.md) / [docs/security-audit-v10.md](docs/security-audit-v10.md) — pre-release security audits + findings
 - [docs/troubleshooting.md](docs/troubleshooting.md) — symptom → cause → fix
 - [CHANGELOG.md](CHANGELOG.md) — release history
