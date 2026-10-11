@@ -547,3 +547,51 @@ func TestVerifyReleaseNoPubkey(t *testing.T) {
 		t.Fatal("signed release with no pubkey must FAIL")
 	}
 }
+
+func TestVerifyReleaseDevSigner(t *testing.T) {
+	dir, pub := fakeRelease(t, ExpectedAgentPlatforms, 1, 1, "minisign")
+	// Re-mark the on-disk manifest as dev-signed. Rewriting the file
+	// invalidates its .minisig (expected FAIL on signature) — the WARN
+	// is emitted from parsed manifest fields regardless.
+	manData, _ := os.ReadFile(filepath.Join(dir, ManifestFile))
+	m, err := ParseManifest(manData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signer.Dev = true
+	out, _ := m.Marshal()
+	os.WriteFile(filepath.Join(dir, ManifestFile), out, 0o644)
+	rep, _ := VerifyRelease(dir, VerifyOptions{PubKey: pub})
+	devWarn := false
+	for _, c := range rep.Checks {
+		if c.Name == "signer" && c.Status == "WARN" && strings.Contains(c.Detail, "DEV") {
+			devWarn = true
+		}
+	}
+	if !devWarn {
+		t.Fatalf("expected DEV-signer WARN, got %+v", rep.Checks)
+	}
+}
+
+// TestDevSecretKeyMarker: a `keygen -dev` key parses like any other but
+// carries the marker release.sh greps for.
+func TestDevSecretKeyMarker(t *testing.T) {
+	priv, k, _, err := GenerateMinisignKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := MarshalSigningSecretKey(k.KeyNum, priv, true)
+	if !IsDevSecretKey(dev) {
+		t.Fatal("dev key missing DEV marker")
+	}
+	if _, _, err := ParseSigningSecretKey(dev); err != nil {
+		t.Fatalf("dev key must still parse: %v", err)
+	}
+	rel := MarshalSigningSecretKey(k.KeyNum, priv, false)
+	if IsDevSecretKey(rel) {
+		t.Fatal("release key falsely marked DEV")
+	}
+	if _, _, err := ParseSigningSecretKey(rel); err != nil {
+		t.Fatalf("release key must parse: %v", err)
+	}
+}

@@ -230,18 +230,46 @@ func GenerateMinisignKeyPair() (ed25519.PrivateKey, *MinisignPublicKey, []byte, 
 	return priv, k, MarshalMinisignPublicKey(k.KeyNum, pub), nil
 }
 
+// Secret-key file comment markers. scripts/release.sh greps these to
+// detect the localmesh format and to enforce its dev-key guard: a key
+// generated with `sign keygen -dev` carries DevSecretKeyMarker and a
+// release refuses to consume it without --dev.
+const (
+	// SecretKeyMarker labels an unmarked localmesh signing secret key.
+	SecretKeyMarker = "localmesh signing secret key"
+	// DevSecretKeyMarker labels a development-only signing key. Never
+	// use one for a real release — that is exactly what the marker
+	// makes machine-detectable.
+	DevSecretKeyMarker = "localmesh DEV signing secret key"
+)
+
 // MarshalSigningSecretKey encodes a private key for the
 // internal/release/cmd/sign helper. This is a LOCALMESH format, NOT a
 // minisign secret-key file (real minisign secret keys are
 // password-encrypted via scrypt/XChaCha20 — outside the stdlib).
 // Layout: "Ed" || keynum[8] || privkey[64].
-func MarshalSigningSecretKey(keynum [minisignKeyNumLen]byte, priv ed25519.PrivateKey) []byte {
+//
+// dev=true stamps the DevSecretKeyMarker comment so release.sh refuses
+// the key unless --dev is passed.
+func MarshalSigningSecretKey(keynum [minisignKeyNumLen]byte, priv ed25519.PrivateKey, dev bool) []byte {
 	raw := make([]byte, 0, 2+8+ed25519.PrivateKeySize)
 	raw = append(raw, minisignAlgEd...)
 	raw = append(raw, keynum[:]...)
 	raw = append(raw, priv...)
-	return []byte(fmt.Sprintf("untrusted comment: localmesh signing secret key (NOT minisign format — keep private)\n%s\n",
-		base64.StdEncoding.EncodeToString(raw)))
+	marker := SecretKeyMarker + " (NOT minisign format — keep private)"
+	if dev {
+		marker = DevSecretKeyMarker + " (NOT minisign format — dev/test only, release.sh requires --dev)"
+	}
+	return []byte(fmt.Sprintf("untrusted comment: %s\n%s\n",
+		marker, base64.StdEncoding.EncodeToString(raw)))
+}
+
+// IsDevSecretKey reports whether a localmesh-format secret key file is
+// marked dev-only. Non-localmesh formats (real minisign, PEM) return
+// false — mark those with a "<keyfile>.dev" sidecar instead (checked
+// by scripts/release.sh).
+func IsDevSecretKey(data []byte) bool {
+	return strings.Contains(string(data), DevSecretKeyMarker)
 }
 
 // ParseSigningSecretKey reads a file produced by MarshalSigningSecretKey.

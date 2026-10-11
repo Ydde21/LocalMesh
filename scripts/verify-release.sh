@@ -72,5 +72,10 @@ for f in SHA256SUMS release-manifest.json; do
 		fi
 	fi
 done
-[ "$crossfail" -eq 0 ] || { echo "verify-release.sh: FAIL (external cross-check)" >&2; exit 1; }
+[ "$crossfail" -eq 0 ] || {
+	echo "verify-release.sh: FAIL — the native verifier passed but the external minisign/openssl" >&2
+	echo "  cross-check rejected a signature. This means a toolchain discrepancy, not a" >&2
+	echo "  checksum problem: re-verify with a different tool version and report it." >&2
+	exit 1
+}
 echo "verify-release.sh: PASS"

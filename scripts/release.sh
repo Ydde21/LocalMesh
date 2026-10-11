@@ -2,7 +2,8 @@
 # release.sh — build, checksum, sign, and manifest a LocalMesh release.
 #
 #   LOCALMESH_SIGNING_KEY=/keys/localmesh.sec ./scripts/release.sh
-#   ./scripts/release.sh --unsigned                      # dev builds only
+#   ./scripts/release.sh --dev -v 0.10.0-rc1           # dev-key RC build
+#   ./scripts/release.sh --unsigned                    # dev builds only
 #
 # Produces in dist/:
 #   localmesh-agent-<semver>-<os>-<arch>[.exe]   (5 targets)
@@ -13,8 +14,21 @@
 #
 # Signing (REQUIRED unless --unsigned):
 #   LOCALMESH_SIGNING_KEY   path to the maintainer's private key
-#                           (minisign secret key or PEM, per --signer)
+#                           (minisign secret key or PEM, per --signer).
+#                           When unset, the keys-directory convention is
+#                           tried: $LOCALMESH_KEYS_DIR/localmesh-release.sec
+#                           (LOCALMESH_KEYS_DIR defaults to ~/.localmesh/keys).
 #   LOCALMESH_SIGNING_PASSWORD  optional minisign key passphrase
+#   LOCALMESH_RELEASE_KEY_ID   optional allowlist — when set, the derived
+#                              signer key id MUST equal it or the release
+#                              aborts before building
+#
+# DEV-KEY GUARD: a key marked dev-only is refused unless --dev is given.
+# Marks: (a) a localmesh .sec generated with `sign keygen -dev` (embedded
+# "localmesh DEV signing secret key" comment), or (b) a sidecar file
+# "<keyfile>.dev" next to any-format key. --dev records signer.dev=true
+# in the manifest so verifiers can see the release is not fleet-trusted.
+# See docs/release-signing.md for custody, rotation, and compromise.
 #
 # The signer is auto-detected from the KEY FILE format: PEM → openssl
 # (`openssl dgst -sha256 -sign`), localmesh .sec → the repo-native
@@ -24,7 +38,8 @@
 # is derived from the secret where the tool allows it.
 #
 # Reproducibility: CGO_ENABLED=0, -trimpath, -buildvcs=false, stripped
-# binaries, sorted SHA256SUMS.
+# binaries, sorted SHA256SUMS. Set SOURCE_DATE_EPOCH to pin the
+# manifest's created_at for a fully reproducible directory.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -32,17 +47,19 @@ cd "$(dirname "$0")/.."
 DIST="dist"
 VERSION=""
 UNSIGNED=0
+DEV=0
 SIGNER="auto"
 PUBKEY=""
 
 usage() {
-	sed -n '2,25p' "$0"
+	sed -n '2,42p' "$0"
 	exit "${1:-2}"
 }
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--unsigned)      UNSIGNED=1; shift ;;
+		--dev)           DEV=1; shift ;;
 		-v|--version)    VERSION="$2"; shift 2 ;;
 		-d|--dist)       DIST="$2"; shift 2 ;;
 		--signer)        SIGNER="$2"; shift 2 ;;
@@ -86,15 +103,42 @@ log "version: $VERSION (artifacts stamped $SEMVER)"
 # auto detection keys off the KEY FILE format, not tool availability.
 ALG=""
 SIGN_TOOL=""
+[ "$UNSIGNED" -eq 1 ] && [ "$DEV" -eq 1 ] &&
+	fail "--dev and --unsigned are mutually exclusive — an unsigned release has no signer to mark"
 if [ "$UNSIGNED" -eq 0 ]; then
+	# Keys-directory convention: without LOCALMESH_SIGNING_KEY, look for
+	# the release key where docs/release-signing.md says it should live.
+	if [ -z "${LOCALMESH_SIGNING_KEY:-}" ]; then
+		KEYS_DIR="${LOCALMESH_KEYS_DIR:-$HOME/.localmesh/keys}"
+		[ -f "$KEYS_DIR/localmesh-release.sec" ] &&
+			LOCALMESH_SIGNING_KEY="$KEYS_DIR/localmesh-release.sec"
+	fi
 	[ -n "${LOCALMESH_SIGNING_KEY:-}" ] ||
-		fail "LOCALMESH_SIGNING_KEY is not set — refusing to produce an unsigned release without --unsigned"
+		fail "LOCALMESH_SIGNING_KEY is not set and no \$LOCALMESH_KEYS_DIR/localmesh-release.sec exists — refusing to produce an unsigned release without --unsigned"
 	[ -f "$LOCALMESH_SIGNING_KEY" ] ||
 		fail "LOCALMESH_SIGNING_KEY=$LOCALMESH_SIGNING_KEY is not a file"
+	# Default --pubkey: the sibling .pub next to the secret key
+	# (documented custody convention) — used for the openssl key id.
+	if [ -z "$PUBKEY" ]; then
+		cand="${LOCALMESH_SIGNING_KEY%.*}.pub"
+		[ -f "$cand" ] && PUBKEY="$cand"
+	fi
+	# --- dev-key guard -------------------------------------------------
+	# A key is dev-marked when the localmesh .sec embeds the DEV marker
+	# (`sign keygen -dev`) or a "<keyfile>.dev" sidecar exists (the way
+	# to mark real-minisign/PEM dev keys, whose format we don't control).
+	KEY_DEV=0
+	grep -q "localmesh DEV signing secret key" "$LOCALMESH_SIGNING_KEY" 2>/dev/null && KEY_DEV=1
+	[ -f "$LOCALMESH_SIGNING_KEY.dev" ] && KEY_DEV=1
+	if [ "$KEY_DEV" -eq 1 ] && [ "$DEV" -eq 0 ]; then
+		fail "signing key $LOCALMESH_SIGNING_KEY is marked DEV-ONLY — refusing a dev-key release. If this really is a dev/RC build, pass --dev; otherwise point LOCALMESH_SIGNING_KEY at the release key (docs/release-signing.md)"
+	fi
+	[ "$DEV" -eq 1 ] &&
+		log "WARNING: --dev — signing with a non-release identity; manifest gets signer.dev=true. Do NOT publish as a trusted release."
 	if [ "$SIGNER" = "auto" ]; then
 		if grep -q -- "-----BEGIN" "$LOCALMESH_SIGNING_KEY"; then
 			SIGNER="openssl"
-		elif grep -q "localmesh signing secret key" "$LOCALMESH_SIGNING_KEY"; then
+		elif grep -qE "localmesh (DEV )?signing secret key" "$LOCALMESH_SIGNING_KEY"; then
 			SIGNER="native"
 		else
 			SIGNER="minisign"  # real minisign-format secret
@@ -180,13 +224,19 @@ if [ "$UNSIGNED" -eq 0 ]; then
 		KEYID="sha256:${KEYID:-unknown}"
 	fi
 	[ -z "$KEYID" ] && KEYID="unknown"
+	# Optional identity allowlist — belt-and-suspenders so a release is
+	# signed only by the expected maintainer key id (docs/release-signing.md).
+	if [ -n "${LOCALMESH_RELEASE_KEY_ID:-}" ] && [ "$KEYID" != "$LOCALMESH_RELEASE_KEY_ID" ]; then
+		fail "signer key id $KEYID does not match LOCALMESH_RELEASE_KEY_ID=$LOCALMESH_RELEASE_KEY_ID — wrong key, refusing to continue"
+	fi
 else
 	ALG="unsigned"
 fi
 
 # --- manifest ---------------------------------------------------------
 go run ./internal/release/cmd/gen-manifest \
-	-dist "$DIST" -version "$SEMVER" -signer "$ALG" -signer-key-id "$KEYID"
+	-dist "$DIST" -version "$SEMVER" -signer "$ALG" -signer-key-id "$KEYID" \
+	$( [ "$DEV" -eq 1 ] && printf -- '-dev' )
 
 if [ "$UNSIGNED" -eq 0 ]; then
 	sign_file "$DIST/release-manifest.json"
@@ -200,7 +250,7 @@ cat <<EOF
 release $SEMVER complete in $DIST/
   agent targets: darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64
   server targets: linux/amd64 linux/arm64
-  signer: $ALG ${KEYID:+(key $KEYID)}
+  signer: $ALG ${KEYID:+(key $KEYID)}$( [ "$DEV" -eq 1 ] && printf ' [DEV]' )
 
 verify with:
   ./scripts/verify-release.sh $DIST --pubkey <release public key>
