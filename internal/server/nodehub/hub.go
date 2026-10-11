@@ -394,6 +394,7 @@ func (h *Hub) unregister(id string, nc *conn) {
 	}
 	h.log.Info("node disconnected", "node", nc.node.Name, "id", id, "reason", reason)
 	h.ev.Publish("node.disconnected", map[string]string{"id": id, "name": nc.node.Name})
+
 	if h.opQueue != nil {
 		// Queue owns interruption + retry-resume bookkeeping; its
 		// InterruptNodeModelOps is status-guarded and idempotent vs the
@@ -404,6 +405,17 @@ func (h *Hub) unregister(id string, nc *conn) {
 		h.updates.OnNodeDisconnected(id)
 	}
 	h.notify()
+}
+
+// ownsOp reports whether nodeID may report on opID. An op with no
+// recorded owner (e.g. pendingOps rebuilt after restart hasn't covered
+// it yet) is permitted — the durable guards downstream still fence it;
+// an op attributed to a DIFFERENT node is forged or misrouted and drops.
+func (h *Hub) ownsOp(opID, nodeID string) bool {
+	h.pendingOpsMu.Lock()
+	owner, tracked := h.pendingOps[opID]
+	h.pendingOpsMu.Unlock()
+	return !tracked || owner == nodeID
 }
 
 func (h *Hub) handleFrame(ctx context.Context, nc *conn, env contracts.Envelope) {
@@ -492,6 +504,9 @@ func (h *Hub) handleFrame(ctx context.Context, nc *conn, env contracts.Envelope)
 		if env.Decode(&p) != nil {
 			return
 		}
+		if !h.ownsOp(p.OperationID, nc.node.ID) {
+			return // progress frame for an op owned by another node — drop
+		}
 		if h.opQueue != nil {
 			h.opQueue.OnProgress(ctx, p.OperationID, modelops.Progress{
 				Phase:         p.Phase,
@@ -514,6 +529,9 @@ func (h *Hub) handleFrame(ctx context.Context, nc *conn, env contracts.Envelope)
 		var d contracts.OpDone
 		if env.Decode(&d) != nil {
 			return
+		}
+		if !h.ownsOp(d.OperationID, nc.node.ID) {
+			return // completion frame for an op owned by another node — drop
 		}
 		h.pendingOpsMu.Lock()
 		delete(h.pendingOps, d.OperationID)

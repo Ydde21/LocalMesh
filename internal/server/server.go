@@ -1081,6 +1081,11 @@ func (rl *rateLimiter) allow(key string) bool {
 		return false
 	}
 	rl.hits[key] = append(kept, time.Now())
+	if len(rl.hits) > 65536 {
+		// Bound memory against distinct-key floods: resetting the window
+		// is fail-open for a handful of requests, not a memory leak.
+		rl.hits = map[string][]time.Time{key: rl.hits[key]}
+	}
 	return true
 }
 

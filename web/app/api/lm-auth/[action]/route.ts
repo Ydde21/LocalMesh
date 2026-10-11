@@ -6,6 +6,7 @@ import {
   checkSession,
   clearLoginFailures,
   clientIP,
+  cookieSecure,
   createSession,
   destroySession,
   loginAllowed,
@@ -20,7 +21,7 @@ function json(status: number, body: unknown) {
 }
 
 function cookieHeader(req: Request, token: string, maxAge: number) {
-  const secure = new URL(req.url).protocol === "https:";
+  const secure = cookieSecure(req);
   return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure ? "; Secure" : ""}`;
 }
 
@@ -35,6 +36,11 @@ async function handle(req: Request, ctx: { params: Promise<{ action: string }> }
     const ip = clientIP(req);
     if (!loginAllowed(ip)) {
       return json(429, { error: "too many attempts — try again in a minute" });
+    }
+    // Cheap abuse bound: login bodies are a few dozen bytes of JSON.
+    const len = Number(req.headers.get("content-length") ?? 0);
+    if (len > 4096) {
+      return json(413, { error: "body too large" });
     }
     let password = "";
     try {

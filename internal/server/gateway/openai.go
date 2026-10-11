@@ -74,7 +74,8 @@ type oaiModel struct {
 func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
 	views, err := g.hub.Snapshot(r.Context())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal_error", err.Error())
+		g.log.Warn("models snapshot failed", "err", err)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 	seen := map[string]bool{}
@@ -197,7 +198,8 @@ func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		} else if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			writeErr(w, 499, "client_closed", "client disconnected while queued")
 		} else {
-			writeErr(w, http.StatusInternalServerError, "internal_error", err.Error())
+			g.log.Warn("schedule failed", "err", err)
+			writeErr(w, http.StatusInternalServerError, "internal_error", "internal error")
 		}
 		return
 	}
