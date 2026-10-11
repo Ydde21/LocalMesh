@@ -29,8 +29,9 @@ running server's.
 
 | Server | Agent | Result |
 |--------|-------|--------|
-| v0.10  | v0.5–v0.10 | accepted (proto v1 both ways) |
-| v0.10  | older than `min_agent_protocol` | rejected at handshake — upgrade the agent |
+| v0.10/v0.11 | v0.5–v0.11 | accepted (proto v1 both ways) |
+| v0.11  | older than `min_agent_protocol` | rejected at handshake — upgrade the agent |
+| v0.10  | v0.11 (proto still v1) | accepted — but run server-first order anyway so future floors/gates apply |
 | v0.9   | v0.10+ (if proto bumps) | rejected at handshake — upgrade the server first |
 
 ## Feature × minimum version
@@ -41,6 +42,8 @@ running server's.
 | Managed agent upgrades (`agent.upgrade` dispatch, rollouts) | agent ≥ v0.7 **and** server ≥ v0.7 — older agents don't understand the frame; the update lands `failed` |
 | Pinned release key (`join -update-pubkey`, `localmesh-agent update-key`) | agent ≥ v0.7 |
 | Air-gap release proxy (`localmesh://releases/...` source) | agent ≥ v0.7 |
+| `min_agent_version` anti-rollback floor | server ≥ v0.11 gates rollouts; agent ≥ v0.11 pins the floor locally |
+| Inference-role key confined to `/v1/*` | server ≥ v0.11 — earlier servers let it read the admin metadata surface |
 | Node maintenance, standby control plane, `/api/v1/control-plane` | server-only — any agent version |
 
 A mixed fleet is fine: current servers schedule inference on v0.5/v0.6

@@ -336,7 +336,13 @@ make verify                       # full regression gate (fmt+vet+tests+race+web
 
 ## Release status
 
-**v0.10.0 is published** — the first maintainer-signed release:
+**v0.11.0 is the current release** — the post-beta stabilization cut:
+inference-key confinement, the `min_agent_version`
+anti-rollback floor, Windows/Linux agent and installer fixes, and a
+fully green release gate. Notes:
+[docs/release-notes-0.11.md](docs/release-notes-0.11.md).
+
+`v0.10.0` — the first maintainer-signed release:
 [`v0.10.0`](https://github.com/Ydde21/LocalMesh/releases/tag/v0.10.0)
 (tag → commit `769bc3f`). Releases are signed with the production
 release key, id `0538AA36C3BC9FD3` (le64 hex — the string `minisign`

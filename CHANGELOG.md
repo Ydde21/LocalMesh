@@ -4,9 +4,70 @@ Notable changes per release. Versions are stamped at release time by
 `scripts/release.sh` (git tag → `main.version`); this file follows the
 repo's `vX.Y` naming. Detail-level references live in `docs/`.
 
-## v0.11 — in preparation
+## v0.11 — stabilization
 
-Changes for the next release land here as they merge.
+Post-release hardening driven by the first real GitHub Actions runs,
+code review, and a live-gate re-run on the published tag. No protocol
+change — v0.10 and v0.11 interop freely (proto v1 both ways).
+
+### Security
+
+- **Inference-role API keys are now confined to the OpenAI surface**
+  (`GET /v1/models`, `POST /v1/chat/completions`). `Can(readonly)`
+  previously admitted any non-empty role, so an inference key could
+  read the whole admin metadata surface — nodes, audit, enrollment
+  tokens, release keys, metrics, settings. Regression coverage sweeps
+  all 28 read endpoints.
+- **`min_agent_version` anti-rollback floor** — a signed release may
+  declare a semver floor in its manifest (`release.sh
+  LOCALMESH_MIN_AGENT_VERSION`). Once approved, the server refuses
+  rollouts to older versions, and each agent pins the floor into
+  `agent.json` at verify time — so a compromised control plane cannot
+  dispatch a validly-signed downgrade either. Escape hatches stay
+  deliberate: revoke the release (fleet-wide) or run a manual
+  `localmesh-agent update` on the node.
+- **`serviceManaged()` no longer trusts bare `INVOCATION_ID`** —
+  anything that is itself a systemd unit (CI runners, `systemd-run`
+  wrappers) leaks it to children that nobody restarts. Linux now
+  requires `localmesh-agent.service` in `/proc/self/cgroup` to prove
+  supervision; anything else re-execs instead of exiting into a dead
+  node.
+
+### Fixed
+
+- **Windows agent**: socket errors are classified from real WSA codes
+  (`connectex` refused, timeouts, unreachable, DNS, reset/abort) —
+  the invented unix errno constants never matched, so every Windows
+  reconnect was logged `unknown`. Rollback now checks `.bak` exists
+  before handing off to `update-apply` — a missing copy previously
+  exited the agent with nothing to restore (dead node, phantom
+  rollback). `-config` is forwarded through the update-apply relaunch
+  so custom config paths survive a restart. Hardware detection wraps
+  PowerShell output in `@(...)` — a single-CPU machine previously
+  returned an object, not an array, and detection silently failed.
+- **Restart-path testability** — `osExit`/`execSelf`/`spawnApply`/
+  `serviceManaged` are injectable seams, so supervisor-marker leaks on
+  CI runners no longer decide which restart path a test exercises.
+- **Installers**: `LOCALMESH_REPO` default was `localmesh/localmesh`
+  (every release download would have 404'd) → `Ydde21/LocalMesh`.
+  `install-agent.ps1` had a `$Version:` scoped-variable parse error —
+  the script never parsed, let alone ran. Remaining
+  `localmesh/localmesh` placeholder links fixed in the beta/hardware
+  validators and issue templates.
+- **CI scripts**: `mktemp` template fixed for GNU (`ci-stress` died
+  instantly on Linux); `artifact-install` now runs against a real
+  Ollama container and receives the ephemeral signing pubkey;
+  `ci-agent-smoke` passes native paths to the native binary on Windows
+  and runs the real `systemctl --user` lifecycle where a user bus
+  exists; `release-verify` also triggers on `release: published`
+  (covers the tag-push/registration race on fresh repos).
+
+### Documentation
+
+- README, `keys/README.md`, and all install/onboarding docs corrected
+  to the real repository and published-release state; the anti-
+  rollback floor is documented in `security.md`, `releases.md`, and
+  `compatibility.md`.
 
 ## v0.10 — public beta
 
