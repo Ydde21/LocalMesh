@@ -31,6 +31,23 @@ hardware.
                                              └──────────────┘
 ```
 
+## What LocalMesh is — and isn't
+
+- **vs Ollama.** Ollama runs models on *one* machine. LocalMesh is the
+  layer above it: an agent on each machine reports what it has, and the
+  control plane routes every request to the best node. Ollama is the
+  engine; LocalMesh is the whole cluster behind one endpoint.
+- **vs Tailscale.** Tailscale is a networking layer — it joins devices
+  into an overlay but knows nothing about inference. LocalMesh rides
+  whatever network already joins your machines (LAN, Tailscale,
+  Headscale, WireGuard) and keeps its own mTLS + cluster CA on top.
+  Tailscale can carry LocalMesh traffic; it doesn't schedule, route,
+  or serve models.
+- **What it is not:** a model-parallelism system. LocalMesh distributes
+  **independent inference workloads** — each request runs whole on one
+  chosen node. It does not shard a model across machines and does not
+  pool VRAM; a model must fit within one node's resources.
+
 ## Features
 
 - **Single OpenAI-compatible endpoint** — point any OpenAI SDK at the
@@ -106,21 +123,24 @@ Create an enrollment token in the dashboard (**Settings → Device
 enrollment**) or via the API. New devices land in **pending** until you
 approve them — then they connect, report hardware, and start serving.
 On the same LAN the agent can also find the cluster itself:
-`localmesh-agent join -discover` browses mDNS advertisements and verifies
+`localmesh-agent discover` browses mDNS advertisements and verifies
 the advertised cluster CA fingerprint against the CA the server actually
-presents (pin out-of-band instead with `-ca-fingerprint`).
+presents (pin out-of-band instead with `join -ca-fingerprint`).
 
 Pre-flight checks and fleet rollout:
 
 ```bash
-./scripts/fleet-check.sh                 # TCP/TLS/CA/Ollama probe
+./scripts/fleet-check.sh https://<control-plane>:8443   # TCP/TLS/CA/Ollama probe
 localmesh-agent doctor                   # full diagnostics on the device
 localmesh-agent service install          # launchd / systemd / SCM
 ```
 
 See [docs/fleet-validation.md](docs/fleet-validation.md) for the
 physical multi-device runbook and [docs/services.md](docs/services.md)
-for service management details.
+for service management details. Running the external beta?
+[docs/beta-testing.md](docs/beta-testing.md) is the tester guide;
+`scripts/beta-validate.sh` produces the redacted evidence bundle to
+attach to your report.
 
 ### 3. Call the API
 
@@ -184,6 +204,37 @@ See [docs/ha-deployment.md](docs/ha-deployment.md) for the full recipe
 and [docs/ha-design.md](docs/ha-design.md) for the design (Postgres is
 the arbiter and remains a single point of failure).
 
+## Known limitations
+
+Stated plainly — the long version with verification detail lives in
+[docs/beta-checklist.md](docs/beta-checklist.md) §6:
+
+- **A model must fit on one node.** LocalMesh distributes independent
+  inference workloads — it does not shard models across nodes and does
+  not pool VRAM. A 70B model on two 16 GB laptops is still a 70B model
+  that doesn't fit.
+- **PostgreSQL is a single point of failure.** No lock can be taken
+  without it — the standby pair can't promote, agents can't connect.
+  Database HA is out of scope (managed Postgres/Patroni recommended).
+- **In-flight streams die on failover** (and on plain restarts). The
+  gateway re-dispatches only when zero response bytes reached the
+  client; mid-stream clients retry the request.
+- **No connection migration.** Live agent sockets, SSE subscriptions,
+  queued workloads, and rate-limit counters are rebuilt, not moved.
+- **`localmesh-router` is one process.** Stateless and fast to restart,
+  but its death takes the stable endpoint down until it returns.
+- **mDNS discovery is single-subnet** — `join -server` is the path
+  across routed networks, VLANs, and VPNs.
+- **Windows can't replace a running `.exe`** — self-update detours
+  through a helper process and the service must stop first.
+- **Ollama is the only shipping engine adapter.** The `Engine`
+  interface is designed for vLLM, llama.cpp, and MLX — not shipped.
+- **Verification ceilings are disclosed, not hidden.** NVIDIA GPU
+  telemetry is parser/exec-seam tested only (no runner owns a GPU);
+  physical heterogeneous-fleet validation is the beta program's open
+  item — [docs/beta-testing.md](docs/beta-testing.md) if you want to
+  run it.
+
 ## Repository layout
 
 ```
@@ -216,7 +267,9 @@ LOCALMESH_DATABASE_URL='postgres://localmesh:localmesh@localhost:5433/localmesh?
 cd web && npm install && npm run dev   # dashboard on :3000
 
 go vet ./... && go test ./...     # unit + e2e (spins a Postgres container)
-make release                      # cross-compile agents → dist/
+make release                      # signed release → dist/ (needs
+                                  # LOCALMESH_SIGNING_KEY, or hack
+                                  # scripts/release.sh --unsigned)
 ```
 
 ## Documentation
@@ -236,7 +289,9 @@ make release                      # cross-compile agents → dist/
 - [docs/ha-deployment.md](docs/ha-deployment.md) — HA deployment: standby pair + localmesh-router stable endpoint
 - [docs/ha-design.md](docs/ha-design.md) — active-standby design + failover semantics
 - [docs/compatibility.md](docs/compatibility.md) — version/platform/Postgres floors
+- [docs/beta-testing.md](docs/beta-testing.md) — external beta: environments, protocol, reporting
 - [docs/beta-checklist.md](docs/beta-checklist.md) — public-beta readiness audit
+- [docs/fleet-validation.md](docs/fleet-validation.md) — physical multi-device validation runbook
 - [docs/troubleshooting.md](docs/troubleshooting.md) — symptom → cause → fix
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [SECURITY.md](SECURITY.md) — vulnerability reporting + scope

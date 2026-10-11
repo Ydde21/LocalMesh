@@ -28,7 +28,7 @@ cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
 pass() { printf 'PASS %s\n' "$1"; PASS=$((PASS+1)); }
-bad()  { printf 'FAIL %s\n' "$1"; FAIL=$((FAIL+1)); }
+bad()  { if [ $# -gt 1 ]; then printf 'FAIL %s — %s\n' "$1" "$2"; else printf 'FAIL %s\n' "$1"; fi; FAIL=$((FAIL+1)); }
 wrn()  { printf 'WARN %s\n' "$1"; WARN=$((WARN+1)); }
 skp()  { printf 'SKIP %s — %s\n' "$1" "$2"; SKIP=$((SKIP+1)); }
 info() { printf '     %s\n' "$1"; }

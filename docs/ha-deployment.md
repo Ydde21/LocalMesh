@@ -36,7 +36,7 @@ does not speak HTTP.
 ## `localmesh-router`
 
 A tiny TCP-level active-standby router (`cmd/localmesh-router`). One
-binary, six flags; every flag has a `LOCALMESH_ROUTER_*` env equivalent.
+binary; every flag has a `LOCALMESH_ROUTER_*` env equivalent.
 
 | Flag | Env | Default | Meaning |
 |---|---|---|---|

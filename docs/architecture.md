@@ -1,9 +1,11 @@
 # Architecture
 
-LocalMesh is a control-plane / worker-node system with three deployables:
+LocalMesh is a control-plane / worker-node system with four deployables:
 
 - **`localmesh-server`** — the control plane (one Go binary)
 - **`localmesh-agent`** — the node agent (one static Go binary per device)
+- **`localmesh-router`** — optional active-standby L4 router that fronts
+  an HA control-plane pair with one stable endpoint (docs/ha-deployment.md)
 - **`web/`** — the dashboard (Next.js, deployed beside the server)
 
 ```
@@ -135,10 +137,17 @@ then confirms protocol version and heartbeat cadence.
 | `heartbeat` (metrics) | `infer_cancel`        |
 | `infer_chunk` (SSE)   | `model_pull`          |
 | `infer_end`           | `model_delete`        |
-| `infer_error`         | `ping`                |
-| `model_op_progress`   | `error`               |
-| `model_op_done`       |                       |
-| `pong`                |                       |
+| `infer_error`         | `model_op_abort`      |
+| `model_op_progress`   | `agent_upgrade`       |
+| `model_op_done`       | `upgrade_abort`       |
+| `upgrade_state`       | `ping`                |
+| `pong`                | `error`               |
+
+The `agent_upgrade`/`upgrade_abort`/`upgrade_state` frames are the
+managed agent-update path (v0.7+): the control plane dispatches a
+registered signed release and tracks each node's progress; the agent
+verifies signatures against an operator-pinned key — see
+`docs/updates-orchestration.md`.
 
 Heartbeat default: 10s; a node is `stale` after ~45s without one and
 `offline` when the socket drops.
@@ -162,8 +171,15 @@ Heartbeat default: 10s; a node is `stale` after ~45s without one and
 
 ## Known limits (by design, for now)
 
-- Single control-plane process (no HA leader election).
-- Whole-request routing — no cross-node tensor/pipeline splitting.
+- Whole-request routing — LocalMesh distributes independent inference
+  workloads: each request runs whole on one chosen node. There is no
+  cross-node tensor/pipeline splitting, no model sharding, and no VRAM
+  pooling; a model must fit on a single node.
+- Single-writer control plane — one active instance at a time, fenced
+  by a Postgres advisory lock. Active-standby failover (v0.7 standby
+  promotion + v0.8 `localmesh-router` stable endpoint) exists, but it
+  is failover, not scale-out: PostgreSQL remains the single point of
+  failure. See `docs/ha-design.md`.
 - Ollama is the only shipping engine adapter; the `Engine` interface is
   the extension point.
 - `LOCALMESH_DEV_INSECURE_HTTP` is a development flag, not a deployment

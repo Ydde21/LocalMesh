@@ -29,9 +29,9 @@ running server's.
 
 | Server | Agent | Result |
 |--------|-------|--------|
-| v0.7   | v0.5–v0.7 | accepted (proto v1 both ways) |
-| v0.7   | older than `min_agent_protocol` | rejected at handshake — upgrade the agent |
-| v0.6   | v0.7+ (if proto bumps) | rejected at handshake — upgrade the server first |
+| v0.10  | v0.5–v0.10 | accepted (proto v1 both ways) |
+| v0.10  | older than `min_agent_protocol` | rejected at handshake — upgrade the agent |
+| v0.9   | v0.10+ (if proto bumps) | rejected at handshake — upgrade the server first |
 
 ## Feature × minimum version
 
@@ -43,7 +43,7 @@ running server's.
 | Air-gap release proxy (`localmesh://releases/...` source) | agent ≥ v0.7 |
 | Node maintenance, standby control plane, `/api/v1/control-plane` | server-only — any agent version |
 
-A mixed fleet is fine: v0.7 servers schedule inference on v0.5/v0.6
+A mixed fleet is fine: current servers schedule inference on v0.5/v0.6
 agents normally; those nodes are simply skipped by rollouts until
 updated by hand (the manual runbook in `docs/agent-updates.md` works on
 every version).
@@ -73,7 +73,10 @@ Release artifacts ship for five agent targets plus two server targets
 Honest ceilings (details: `docs/ci.md`): no NVIDIA GPU exists on any
 runner; `agent-integration` runs dev-insecure HTTP (TLS paths are
 covered by unit tests + `fleet-check.sh`); a fake Ollama stands in for
-the real engine on the wire-level checks.
+the real engine on the wire-level checks (the real-Ollama HA smoke,
+`scripts/ci-ollama-ha-smoke.sh`, covers the dev stack when an engine is
+present). Physical multi-device verification is the external beta's
+job — see `docs/beta-testing.md` and `docs/fleet-validation.md`.
 
 **Server requirements:** one Go binary (linux amd64/arm64 artifacts,
 or `make build` anywhere Go runs), PostgreSQL, and a data dir.

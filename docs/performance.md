@@ -5,7 +5,7 @@ indicative of relative cost, not SLAs. Reproduce the benchmark suite
 with:
 
 ```bash
-bash scripts/bench.sh            # or `make bench` once wired
+bash scripts/bench.sh            # or: make bench
 ```
 
 Environment overrides: `BENCHTIME` (default `1s`), `COUNT` (default

@@ -5,6 +5,14 @@ different hardware, different OSes, a real network path between agents and
 the control plane. Follow it top to bottom; record observations in the
 results table at the end.
 
+> **Beta testers:** this document is the deep-dive runbook — every leg at
+> curl level. The external beta kit in
+> [docs/beta-testing.md](beta-testing.md) packages the same honesty
+> standard into `scripts/beta-validate.sh` (auto legs + guided PROMPT
+> legs + a redacted evidence bundle) and a GitHub issue template. Use
+> this page when you want the underlying commands or are verifying
+> something the driver doesn't cover.
+
 ## What counts as verified
 
 **PHYSICAL FLEET VERIFIED** means all of these were observed on this run:
@@ -22,8 +30,8 @@ results table at the end.
 
 What does **not** count:
 
-- `make release` producing all six binaries — that proves they compile.
-  Cross-compilation success is not cross-platform interop.
+- `make release` producing all five agent binaries — that proves they
+  compile. Cross-compilation success is not cross-platform interop.
 - The e2e suite — it runs in-process against `fakeollama` on one machine.
 - Two agents on the same machine — exercises the multi-node code path but
   shares kernel, localhost networking, and hardware detection. Useful as a
@@ -126,6 +134,11 @@ state, config presence — as a paste-able bundle. Expected: `PASS` on tcp,
 ca, ca-pin, tls, healthz from fleet-check; `PASS` on ollama if it is
 installed locally. Any `FAIL` — fix before joining; the scripts print a
 hint per failure.
+
+(`scripts/beta-validate.sh` wraps these probes plus the numbered
+protocol into one guided driver — see
+[docs/beta-testing.md](beta-testing.md). This runbook keeps them separate
+so every leg's raw output is visible.)
 
 ## 4. Join device 1 (macOS)
 
@@ -554,6 +567,7 @@ tokens, prompts, or completions; paths are ~-collapsed):
 
 | Artifact | How to collect | What it proves |
 |---|---|---|
+| `beta-report-<host>-<ts>.txt` + `.json` | `bash scripts/beta-validate.sh [--self-test]` | the guided bundle: all auto legs + per-step PASS/FAIL/SKIP + operator-leg outcomes, txt + JSON |
 | `fleet-report-<device>.txt` | `bash scripts/fleet-report.sh > fleet-report-<device>.txt` | platform/CPU/RAM/OS, engine reachability, doctor output, config presence — one paste-able bundle |
 | `report-<device>.json` | `localmesh-agent report -json > report-<device>.json` | machine-readable snapshot: version+protocol, hardware, CA fingerprint, per-probe latency, enrollment + connectivity state |
 | `report -json -self-test` | `localmesh-agent report -json -self-test` | one bounded real inference through the local engine — status/latency/token counts only |
@@ -566,7 +580,10 @@ finds the agent binary from `./bin`, PATH, or install paths; pass the
 binary path explicitly when needed (`fleet-report.sh /path/to/agent`).
 The `report` subcommand mirrors the same contract inside the agent —
 use it when the device is offline from your shell collector but the
-agent binary is on hand.
+agent binary is on hand. For beta runs, `scripts/beta-validate.sh`
+collects the same classes of evidence into its
+`beta-report-<host>-<ts>.txt/.json` bundle — either bundle satisfies
+this table.
 
 ## Results
 
