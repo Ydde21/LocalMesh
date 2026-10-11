@@ -1,26 +1,79 @@
-# Onboarding devices
+# Onboarding
+
+From zero to a working LocalMesh cluster: install the control plane,
+get credentials, enroll a device, run inference. Every command below is
+copy-pasteable and is exactly what `scripts/ci-clean-install.sh`
+verifies on a clean machine.
 
 The flow is always the same regardless of OS:
 
-1. Create an **enrollment token** on the control plane.
-2. Run `localmesh-agent join` on the device.
-3. **Approve** the pending enrollment (dashboard or API).
-4. The agent connects, reports hardware + models, and starts serving.
-
-The dashboard requires sign-in — the password is generated on first
-boot (`docker compose exec web cat /ca/bootstrap-dashboard.password`) or
-set via `LOCALMESH_DASHBOARD_PASSWORD`.
+1. Start the control plane (`docker compose up -d`).
+2. Pull the **bootstrap admin key** and **cluster CA** out of the data
+   volume.
+3. Create an **enrollment token** on the control plane.
+4. Install the agent, run `localmesh-agent join` on the device.
+5. **Approve** the pending enrollment (dashboard or API).
+6. The agent connects, reports hardware + models, and starts serving.
 
 No firewall or VPN setup is required as long as the agent can reach the
 control-plane port (8443 by default) and the name/IP it dials is in the
-server cert's SANs. For devices on other networks, use your existing
-overlay — Tailscale, Headscale, WireGuard — and point the agent at the
-control plane's address on that network. Full guide:
-[docs/networking.md](networking.md).
+server cert's SANs (`LOCALMESH_HOSTNAMES` in `.env`). For devices on
+other networks, use your existing overlay — Tailscale, Headscale,
+WireGuard — and point the agent at the control plane's address on that
+network. Full guide: [docs/networking.md](networking.md).
 
 ---
 
-## 1. Create an enrollment token
+## 0. Start the control plane
+
+Prerequisites: Docker with the Compose v2 plugin (`docker compose
+version`), ~2 GB free disk. Then, in a LocalMesh checkout:
+
+```bash
+# Either let the bootstrapper do steps 0–2 for you:
+sh scripts/install-localmesh.sh
+
+# …or do it by hand:
+echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)" > .env   # only required var
+docker compose up -d                                    # builds + starts
+```
+
+For a production-shaped `.env` (real admin key, SAN hostnames, bind
+address, dashboard password) use `./scripts/gen-secrets.sh` instead —
+it writes a complete `./.env` at mode 0600.
+
+Wait for healthy:
+
+```bash
+docker compose ps                      # server should reach (healthy)
+curl -sk https://localhost:8443/healthz   # → "ok"; -k only until you
+                                        # fetch the CA below
+```
+
+`docker compose up` fails loudly if `POSTGRES_PASSWORD` is unset
+(`error…required variable`) or a published port is taken — fix
+`LOCALMESH_PORT`/`LOCALMESH_WEB_PORT` in `.env` for the latter.
+
+## 1. Get the admin key, CA, and dashboard password
+
+All bootstrap secrets land in the shared `localmesh-data` volume:
+
+```bash
+docker compose exec server cat /data/bootstrap-admin.key    # lmk_…
+docker compose exec web cat /ca/bootstrap-dashboard.password
+docker compose exec server cat /data/ca.pem > ca.pem
+export ADMIN_KEY=$(docker compose exec server cat /data/bootstrap-admin.key | tr -d '[:space:]')
+```
+
+The key is also printed once in `docker compose logs server`
+("bootstrap admin API key created"). Setting `LOCALMESH_ADMIN_KEY` in
+`.env` before first boot installs a known key instead of generating
+one; it is applied only while no admin key exists.
+
+The dashboard requires sign-in — the password above is generated on
+first boot, or set `LOCALMESH_DASHBOARD_PASSWORD` in `.env`.
+
+## 2. Create an enrollment token
 
 Dashboard: **Settings → Device enrollment → Create token**
 (label optional, set max uses and TTL).
@@ -28,14 +81,14 @@ Dashboard: **Settings → Device enrollment → Create token**
 API:
 
 ```bash
-curl -X POST https://localhost:8443/api/v1/enrollment-tokens \
-  --cacert ca.pem -H "Authorization: Bearer $ADMIN_KEY" \
+curl --cacert ca.pem -X POST https://localhost:8443/api/v1/enrollment-tokens \
+  -H "Authorization: Bearer $ADMIN_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"label": "gpu-box", "max_uses": 1, "ttl_hours": 24}'
 # → {"token": "lme_..."}   (shown once)
 ```
 
-## 2. Install the agent
+## 3. Install the agent on the device
 
 ### macOS / Linux
 
@@ -43,10 +96,12 @@ curl -X POST https://localhost:8443/api/v1/enrollment-tokens \
 curl -fsSL https://raw.githubusercontent.com/localmesh/localmesh/main/scripts/install-agent.sh | sh
 ```
 
-The installer resolves the release manifest, picks the artifact for your
-OS/arch, and verifies its SHA-256 against `SHA256SUMS` before anything
-is installed. Or build from source (`make build` → `bin/localmesh-agent`),
-or download a release binary yourself (see `docs/releases.md`).
+The installer detects OS/arch, resolves the release manifest, verifies
+the artifact's SHA-256 (and the minisign signature when
+`LOCALMESH_RELEASE_PUBKEY` + `minisign` are present), then installs to
+`/usr/local/bin` (or `~/.local/bin` without root). Or build from source
+(`make build` → `bin/localmesh-agent`), or download a release binary
+yourself (see `docs/releases.md`).
 
 ### Windows (PowerShell)
 
@@ -54,16 +109,33 @@ or download a release binary yourself (see `docs/releases.md`).
 powershell -ExecutionPolicy Bypass -File install-agent.ps1
 ```
 
-Same manifest + checksum verification as the shell installer. Installs to
-`%LOCALAPPDATA%\LocalMesh` and adds it to your user PATH.
+Same manifest + checksum (+ optional signature) verification as the
+shell installer. Installs to `%LOCALAPPDATA%\LocalMesh` and adds it to
+your user PATH.
 
-## 3. Join the cluster
+## 4. Join the cluster
+
+An engine must be installed for the node to serve inference —
+[Ollama](https://ollama.com) on the agent machine, with at least one
+`ollama pull`-ed model. Without it the node still enrolls but reports
+no engine and can't take work.
 
 ```bash
+# Pin the cluster CA — print its fingerprint on the control-plane host:
+openssl x509 -in ca.pem -outform DER | openssl dgst -sha256
+# (must match out-of-band — this is what proves you're joining YOUR cluster)
+
 localmesh-agent join \
   -server https://<control-plane>:8443 \
-  -token lme_...
+  -token lme_... \
+  -ca-fingerprint sha256:<hex-from-above>
 ```
+
+Without `-ca-fingerprint` the agent prints the fingerprint and trusts
+it (TOFU) — acceptable on a trusted LAN, pin it when in doubt. The
+name/IP in `-server` must appear in the server's `LOCALMESH_HOSTNAMES`
+SAN list or TLS verification fails (see
+[docs/troubleshooting.md](troubleshooting.md)).
 
 On the same LAN, `join -discover` finds the control plane itself —
 no `-server` needed:
@@ -92,39 +164,64 @@ Flags:
 - `-ollama-url <url>` — non-default Ollama endpoint
 - `-config <path>` — alternate config path (default `~/.localmesh/agent.json`)
 - `-wait 30m` — how long to poll for approval
-
-On first contact the agent fetches `/api/v1/ca.pem`. For a self-signed
-cluster CA it prints the CA fingerprint and trusts it (TOFU) unless you
-pass `-ca-fingerprint`. For a publicly trusted cert nothing extra is
-needed — just make sure your `LOCALMESH_HOSTNAMES`/cert SANs cover the
-address agents dial.
+- `-run=false` — enroll only, don't start serving (the installer uses
+  this before handing lifecycle to the OS service)
 
 `join` submits the enrollment and **waits for approval**. It then writes
 `~/.localmesh/agent.json` (server URL, node ID, node credential, CA PEM)
 and, by default, stays running to serve workloads. Run it under a
 service manager for persistence — examples below.
 
-## 4. Approve the enrollment
+## 5. Approve the enrollment
 
 Dashboard: **Settings → Device enrollment → Pending requests → Approve**.
 
 API:
 
 ```bash
-curl https://localhost:8443/api/v1/enrollments --cacert ca.pem \
-  -H "Authorization: Bearer $ADMIN_KEY"          # find the pending request
-curl -X POST https://localhost:8443/api/v1/enrollments/<id>/approve \
-  --cacert ca.pem -H "Authorization: Bearer $ADMIN_KEY"
+curl --cacert ca.pem "https://localhost:8443/api/v1/enrollments?status=pending" \
+  -H "Authorization: Bearer $ADMIN_KEY"          # find the pending request id
+curl --cacert ca.pem -X POST https://localhost:8443/api/v1/enrollments/<id>/approve \
+  -H "Authorization: Bearer $ADMIN_KEY"
 ```
 
 Within seconds the node flips `online`, reports hardware/engines/models,
 and becomes a scheduling candidate.
 
-## 5. Verify
+## 6. Verify end-to-end
 
-- Dashboard **Devices** shows the node with live CPU/RAM meters.
-- `localmesh-agent status` on the device prints its config.
-- `curl https://localhost:8443/v1/models` lists the node's models.
+```bash
+# node online with hardware + engines + models:
+curl --cacert ca.pem https://localhost:8443/api/v1/nodes -H "Authorization: Bearer $ADMIN_KEY"
+
+# schedulable model inventory:
+curl --cacert ca.pem https://localhost:8443/v1/models -H "Authorization: Bearer $ADMIN_KEY"
+
+# real inference through the gateway:
+curl --cacert ca.pem -X POST https://localhost:8443/v1/chat/completions \
+  -H "Authorization: Bearer $ADMIN_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"<a-model-the-node-reports>","messages":[{"role":"user","content":"hello"}],"stream":false}'
+
+# metadata-only workload record (prompts are never persisted):
+curl --cacert ca.pem https://localhost:8443/api/v1/workloads -H "Authorization: Bearer $ADMIN_KEY"
+```
+
+Other checks: dashboard **Devices** shows the node with live CPU/RAM
+meters; `localmesh-agent status` on the device prints its config;
+`localmesh-agent doctor` runs the full self-diagnostic (below).
+
+## Install a model without touching the device
+
+```bash
+curl --cacert ca.pem -X POST https://localhost:8443/api/v1/models/pull \
+  -H "Authorization: Bearer $ADMIN_KEY" -H 'Content-Type: application/json' \
+  -d '{"model": "qwen2.5:0.5b"}'          # empty node_ids = all online nodes
+curl --cacert ca.pem https://localhost:8443/api/v1/model-operations \
+  -H "Authorization: Bearer $ADMIN_KEY"   # watch status: queued → running → succeeded
+```
+
+The agent pulls via its local engine and re-reports capabilities; the
+model becomes schedulable when the op succeeds.
 
 ## Running the agent as a service
 

@@ -46,8 +46,16 @@ services:
       LOCALMESH_LISTEN: 0.0.0.0:8443
       LOCALMESH_DATA_DIR: /data
       LOCALMESH_ADMIN_KEY: ${LOCALMESH_ADMIN_KEY:-}
-      LOCALMESH_HOSTNAMES: server,localmesh-server,localhost
-      LOCALMESH_CORS_ORIGINS: ""
+      # SANs on the serving cert — must cover every name/IP clients and
+      # agents dial. Default covers compose-internal + localhost use.
+      LOCALMESH_HOSTNAMES: ${LOCALMESH_HOSTNAMES:-server,localmesh-server,localhost}
+      # Dashboard calls go through the same-origin BFF — leave empty
+      # unless a third-party web client needs CORS.
+      LOCALMESH_CORS_ORIGINS: ${LOCALMESH_CORS_ORIGINS:-}
+      LOCALMESH_LOG_LEVEL: ${LOCALMESH_LOG_LEVEL:-info}
+      # Trust X-Forwarded-For for rate limiting — set to 1 ONLY behind a
+      # reverse proxy that overwrites the header.
+      LOCALMESH_TRUST_PROXY: ${LOCALMESH_TRUST_PROXY:-}
       # mDNS LAN advertisement (_localmesh._tcp). Default on. NOTE: in
       # Docker's NAT'd networking this only advertises inside the
       # container network — real LAN discovery needs a Linux host with
@@ -77,6 +85,9 @@ services:
       # bootstrap-dashboard.password in the shared volume is used.
       LOCALMESH_DASHBOARD_PASSWORD: ${LOCALMESH_DASHBOARD_PASSWORD:-}
       LOCALMESH_DASHBOARD_PASSWORD_FILE: /ca/bootstrap-dashboard.password
+      # Session-signing key: env value first, shared-volume file fallback
+      # — either way sessions survive web restarts.
+      LOCALMESH_SESSION_KEY: ${LOCALMESH_SESSION_KEY:-}
       LOCALMESH_SESSION_KEY_FILE: /ca/session.key
     volumes:
       - localmesh-data:/ca:ro

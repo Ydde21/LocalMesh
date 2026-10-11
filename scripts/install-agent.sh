@@ -78,6 +78,8 @@ elif [ -x "./bin/localmesh-agent" ]; then
   log "using repo build: ./bin/localmesh-agent"
   src="./bin/localmesh-agent"
 else
+  command -v curl >/dev/null 2>&1 \
+    || fail "curl is required to download the release — install curl, or set LOCALMESH_AGENT_BIN to a local binary"
   # Release artifacts are named localmesh-agent-<ver>-<os>-<arch>. The
   # release manifest resolves the "latest" name indirection AND is the
   # published inventory of what was actually released.
@@ -155,18 +157,20 @@ esac
 # --- join ------------------------------------------------------------------
 if [ "$NO_JOIN" -eq 0 ] && [ -n "$SERVER" ] && [ -n "$TOKEN" ]; then
   log "joining cluster at $SERVER"
-  args=""
-  [ -n "$NAME" ] && args="$args -name $(printf '%s' "$NAME" | sed "s/'/'\\\\''/g")"
+  # Positional params keep -name values with spaces/shell chars intact.
+  set -- join -server "$SERVER" -token "$TOKEN"
+  [ -n "$NAME" ] && set -- "$@" -name "$NAME"
   if [ "$SERVICE" -eq 1 ]; then
     # Enroll only (no foreground run), then hand lifecycle to the OS.
-    # shellcheck disable=SC2086
-    "${dest}/localmesh-agent" join -server "$SERVER" -token "$TOKEN" -run=false $args
+    "${dest}/localmesh-agent" "$@" -run=false
     "${dest}/localmesh-agent" service install
   else
-    # shellcheck disable=SC2086
-    exec "${dest}/localmesh-agent" join -server "$SERVER" -token "$TOKEN" $args
+    exec "${dest}/localmesh-agent" "$@"
   fi
 else
+  if [ "$NO_JOIN" -eq 0 ] && { [ -n "$SERVER" ] || [ -n "$TOKEN" ]; }; then
+    log "note: only one of --server/--token given — joining needs both; installed only"
+  fi
   if [ "$SERVICE" -eq 1 ]; then
     cfgdir="${LOCALMESH_AGENT_DIR:-$HOME/.localmesh}"
     if [ -f "$cfgdir/agent.json" ]; then
@@ -184,16 +188,29 @@ Installed. Next steps:
      or:  curl -X POST "\$SERVER/api/v1/enrollment-tokens" \\
             -H "Authorization: Bearer \$ADMIN_KEY" -d '{}'
 
-  2. Join the cluster:
-       localmesh-agent join -server https://<control-plane>:8443 -token lme_...
+  2. (Recommended) pin the cluster CA so the agent verifies it on first
+     contact instead of trust-on-first-use. Print the fingerprint:
+       curl -sk https://<control-plane>:8443/api/v1/ca.pem | \\
+         openssl x509 -outform DER | openssl dgst -sha256
+     (it must match what the control plane admin sees — check out-of-band)
 
-  3. Approve the enrollment in the dashboard — the node comes online
+  3. Join the cluster:
+       localmesh-agent join -server https://<control-plane>:8443 \\
+         -token lme_... -ca-fingerprint sha256:<hex-from-step-2>
+     Without -ca-fingerprint the agent prints the fingerprint and trusts
+     it (TOFU) — fine on a trusted LAN, pin it when in doubt.
+
+  4. Approve the enrollment in the dashboard — the node comes online
      automatically once approved.
 
-  4. (Optional) run the agent as a background service instead of a
+  5. (Optional) run the agent as a background service instead of a
      foreground terminal process:
        localmesh-agent service install
      (launchd user agent on macOS, systemd --user unit on Linux)
+
+If 'join' fails on TLS ("certificate is valid for ..."): the name/IP you
+dial must be in the server's LOCALMESH_HOSTNAMES SAN list — fix .env and
+restart; the leaf cert reissues on restart. See docs/troubleshooting.md.
 
 EOF
 fi

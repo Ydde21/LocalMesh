@@ -72,12 +72,20 @@ if ($env:LOCALMESH_AGENT_BIN -and (Test-Path $env:LOCALMESH_AGENT_BIN)) {
     $base = "https://github.com/$Repo/releases/download/$Version"
   }
   $mfPath = Join-Path $env:TEMP "lm-manifest.json"
-  Invoke-WebRequest -Uri "$base/release-manifest.json" -OutFile $mfPath -UseBasicParsing
+  try {
+    Invoke-WebRequest -Uri "$base/release-manifest.json" -OutFile $mfPath -UseBasicParsing
+  } catch {
+    throw "could not fetch release manifest from $base — is the release published? (check -Repo/-Version and connectivity): $_"
+  }
   $mf = Get-Content $mfPath -Raw | ConvertFrom-Json
   $artifact = ($mf.artifacts | Where-Object { $_.os -eq "windows" -and $_.arch -eq "amd64" } | Select-Object -First 1).file
-  if (-not $artifact) { throw "no windows/amd64 artifact in the release manifest" }
+  if (-not $artifact) { throw "no windows/amd64 artifact in the release manifest for $Repo@$Version" }
   Write-Host "  downloading $base/$artifact"
-  Invoke-WebRequest -Uri "$base/$artifact" -OutFile $bin -UseBasicParsing
+  try {
+    Invoke-WebRequest -Uri "$base/$artifact" -OutFile $bin -UseBasicParsing
+  } catch {
+    throw "download failed — check that $artifact exists in release $Version: $_"
+  }
 
   # Verify checksum against the release manifest (never trust transport alone).
   $want = ($mf.artifacts | Where-Object { $_.file -eq $artifact }).sha256
@@ -85,6 +93,29 @@ if ($env:LOCALMESH_AGENT_BIN -and (Test-Path $env:LOCALMESH_AGENT_BIN)) {
     $got = Get-Sha256 $bin
     if ($got -ne $want) { throw "checksum mismatch for $artifact ($got != $want) — aborting" }
     Write-Host "  checksum verified against release manifest"
+  }
+
+  # Signature verification when a release pubkey + minisign are available —
+  # same contract as install-agent.sh (docs/releases.md).
+  if ($env:LOCALMESH_RELEASE_PUBKEY -and (Get-Command minisign -ErrorAction SilentlyContinue)) {
+    $sumsPath = Join-Path $env:TEMP "lm-sha256sums.txt"
+    $sigPath  = Join-Path $env:TEMP "lm-sha256sums.minisig"
+    try {
+      Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile $sumsPath -UseBasicParsing
+      Invoke-WebRequest -Uri "$base/SHA256SUMS.minisig" -OutFile $sigPath -UseBasicParsing
+    } catch {
+      throw "SHA256SUMS/signature unavailable — cannot verify signature: $_"
+    }
+    $pub = (Get-Content $env:LOCALMESH_RELEASE_PUBKEY -Raw).Trim()
+    & minisign -V -x $sigPath -m $sumsPath -P $pub 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "release signature verification failed — refusing to install" }
+    $binSum = Get-Sha256 $bin
+    if (-not (Select-String -Path $sumsPath -Pattern "$binSum" -SimpleMatch -Quiet)) {
+      Write-Host "  note: artifact not in signed SHA256SUMS (manifest checksum already verified)"
+    }
+    Write-Host "  release signature verified"
+  } else {
+    Write-Host "  note: LOCALMESH_RELEASE_PUBKEY unset or minisign missing — checksum verified only"
   }
 }
 
@@ -123,6 +154,8 @@ if (-not $NoJoin -and $Server -and $Token) {
   }
   Write-Host ""
   Write-Host "Next: localmesh-agent join -server https://<control-plane>:8443 -token lme_..."
+  Write-Host "Recommended: pin the cluster CA with -ca-fingerprint sha256:<hex>"
+  Write-Host "  (curl -sk https://<control-plane>:8443/api/v1/ca.pem -> DER -> sha256)"
   Write-Host "Approve the enrollment in the dashboard when it appears."
   Write-Host "Optional: localmesh-agent service install   (Windows service, elevated)"
 }

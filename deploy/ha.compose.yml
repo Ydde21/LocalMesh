@@ -55,7 +55,9 @@ services:
       # Must cover every name clients dial THROUGH the router: the
       # docker alias `router` (dashboard), plus your stable public name.
       LOCALMESH_HOSTNAMES: ${LOCALMESH_HOSTNAMES:-server,server-standby,router,localmesh-server,localhost}
-      LOCALMESH_CORS_ORIGINS: ""
+      LOCALMESH_CORS_ORIGINS: ${LOCALMESH_CORS_ORIGINS:-}
+      LOCALMESH_LOG_LEVEL: ${LOCALMESH_LOG_LEVEL:-info}
+      LOCALMESH_TRUST_PROXY: ${LOCALMESH_TRUST_PROXY:-}
       # mDNS inside Docker's NAT advertises only inside this network —
       # see the base compose file's note; discovery is a LAN feature.
       LOCALMESH_DISCOVERY: ${LOCALMESH_DISCOVERY:-on}
@@ -81,7 +83,9 @@ services:
       LOCALMESH_STANDBY: "1"
       LOCALMESH_ADMIN_KEY: ${LOCALMESH_ADMIN_KEY:-}
       LOCALMESH_HOSTNAMES: ${LOCALMESH_HOSTNAMES:-server,server-standby,router,localmesh-server,localhost}
-      LOCALMESH_CORS_ORIGINS: ""
+      LOCALMESH_CORS_ORIGINS: ${LOCALMESH_CORS_ORIGINS:-}
+      LOCALMESH_LOG_LEVEL: ${LOCALMESH_LOG_LEVEL:-info}
+      LOCALMESH_TRUST_PROXY: ${LOCALMESH_TRUST_PROXY:-}
       LOCALMESH_DISCOVERY: ${LOCALMESH_DISCOVERY:-on}
       LOCALMESH_CLUSTER_NAME: ${LOCALMESH_CLUSTER_NAME:-localmesh}
     volumes:
