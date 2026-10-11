@@ -132,6 +132,12 @@ func classifyConnectErr(err error) ConnectCause {
 		return CauseUnreachable
 	}
 
+	// Windows socket failures carry raw WSA codes (connectex et al.),
+	// not the unix errno names above.
+	if cause, ok := classifyPlatformErr(err); ok {
+		return cause
+	}
+
 	// Closed sockets: clean close, mid-session reset, or the read side
 	// hitting EOF after the peer went away.
 	var closeErr websocket.CloseError

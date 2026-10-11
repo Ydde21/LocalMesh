@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -53,8 +54,11 @@ func TestUpdateHistoryRoundTrip(t *testing.T) {
 	if h[0].FinishedAt.IsZero() {
 		t.Fatal("FinishedAt was not defaulted")
 	}
-	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
-		t.Fatalf("history file mode = %v, %v", st.Mode().Perm(), err)
+	if runtime.GOOS != "windows" {
+		// Windows reports 0666 for writable files — no unix perm bits.
+		if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
+			t.Fatalf("history file mode = %v, %v", st.Mode().Perm(), err)
+		}
 	}
 }
 

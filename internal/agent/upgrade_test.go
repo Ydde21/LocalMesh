@@ -90,28 +90,34 @@ func serveRelease(id string, files map[string][]byte) map[string][]byte {
 	return out
 }
 
-// processSeams stubs osExitFn/execSelfFn/spawnApplyFn so an upgrade's
-// restart handoff is observable without killing the test process.
+// processSeams stubs osExitFn/execSelfFn/spawnApplyFn/serviceManagedFn
+// so an upgrade's restart handoff is observable without killing the
+// test process. managed lets a test pose as a supervised process —
+// supervisor env markers (INVOCATION_ID et al.) leak onto CI runners
+// and must not decide which restart path a test exercises.
 type processSeams struct {
 	exits   *atomic.Int32
 	execed  *atomic.Value // string: target passed to execSelfFn
 	spawned *atomic.Pointer[applyRequest]
+	managed *atomic.Bool
 }
 
 func stubProcessSeams(t *testing.T) *processSeams {
 	t.Helper()
-	oldExit, oldExec, oldSpawn := osExitFn, execSelfFn, spawnApplyFn
+	oldExit, oldExec, oldSpawn, oldManaged := osExitFn, execSelfFn, spawnApplyFn, serviceManagedFn
 	s := &processSeams{
 		exits:   &atomic.Int32{},
 		execed:  &atomic.Value{},
 		spawned: &atomic.Pointer[applyRequest]{},
+		managed: &atomic.Bool{},
 	}
 	s.exits.Store(-1)
 	osExitFn = func(code int) { s.exits.Store(int32(code)) }
 	execSelfFn = func(target string) error { s.execed.Store(target); return nil }
 	spawnApplyFn = func(r applyRequest) error { s.spawned.Store(&r); return nil }
+	serviceManagedFn = func() bool { return s.managed.Load() }
 	t.Cleanup(func() {
-		osExitFn, execSelfFn, spawnApplyFn = oldExit, oldExec, oldSpawn
+		osExitFn, execSelfFn, spawnApplyFn, serviceManagedFn = oldExit, oldExec, oldSpawn, oldManaged
 	})
 	return s
 }
@@ -431,6 +437,9 @@ func TestUpgradeViaProxyHappyPath(t *testing.T) {
 		if !req.Relaunch {
 			t.Fatal("foreground windows agent should relaunch via helper")
 		}
+		if req.ConfigPath != a.cfgPath {
+			t.Fatalf("relaunch config = %q, want %q", req.ConfigPath, a.cfgPath)
+		}
 	} else {
 		if string(gotBin) != string(artBytes) {
 			t.Fatal("target does not contain the release artifact")
@@ -610,6 +619,7 @@ func TestAttemptBudgetClearsMarker(t *testing.T) {
 	f := newFakeCP(t)
 	dir := t.TempDir()
 	a := upgradeTestAgent(t, f, dir, nil)
+	seams := stubProcessSeams(t)
 	mkPath, _ := a.pendingMarkerPath()
 	if err := writePendingMarker(mkPath, pendingUpdate{
 		OperationID: "op-loop", FromVersion: "0.6.0", ToVersion: "0.7.0",
@@ -619,6 +629,11 @@ func TestAttemptBudgetClearsMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.upgradeBootCheck()
+	// No .bak exists — rollback is impossible, so no restart handoff
+	// may fire on any platform.
+	if seams.exits.Load() != -1 || seams.execed.Load() != nil || seams.spawned.Load() != nil {
+		t.Fatal("restart handoff fired for a rollback with no .bak")
+	}
 	if _, ok, _ := readPendingMarker(mkPath); ok {
 		t.Fatal("marker not cleared at attempt budget")
 	}
@@ -798,10 +813,11 @@ func TestUpdateApplyWaitAndSwap(t *testing.T) {
 	var relaunched atomic.Value
 	err := UpdateApply(context.Background(), UpdateApplyOptions{
 		Target: target, Staged: staged, ParentPID: 12345, Relaunch: true,
-		PollEvery: time.Millisecond, WaitBound: 5 * time.Second,
+		ConfigPath: "custom-agent.json",
+		PollEvery:  time.Millisecond, WaitBound: 5 * time.Second,
 		pidAlive: func(int) bool { return probes.Add(1) < 3 }, // dies after 2 probes
-		relaunchFn: func(tg string) error {
-			relaunched.Store(tg)
+		relaunchFn: func(tg, cfgPath string) error {
+			relaunched.Store([2]string{tg, cfgPath})
 			return nil
 		},
 	})
@@ -819,8 +835,9 @@ func TestUpdateApplyWaitAndSwap(t *testing.T) {
 	if string(bak) != "old" {
 		t.Fatalf(".bak = %q, want old", bak)
 	}
-	if rl, _ := relaunched.Load().(string); rl != target {
-		t.Fatalf("relaunch target = %q", rl)
+	rl, _ := relaunched.Load().([2]string)
+	if rl[0] != target || rl[1] != "custom-agent.json" {
+		t.Fatalf("relaunch target/config = %v", rl)
 	}
 }
 
@@ -837,7 +854,7 @@ func TestUpdateApplyRollback(t *testing.T) {
 		Target: target, Rollback: true, Relaunch: true,
 		PollEvery:  time.Millisecond,
 		pidAlive:   func(int) bool { return false },
-		relaunchFn: func(string) error { return nil },
+		relaunchFn: func(string, string) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)

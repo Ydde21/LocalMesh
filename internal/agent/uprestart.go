@@ -24,11 +24,15 @@ import (
 )
 
 // Injectable process seams — like the dial/handshake timeout vars, tests
-// swap these to observe exits without dying.
+// swap these to observe exits without dying. serviceManagedFn is here
+// too: supervisor markers (INVOCATION_ID, the SCM session check) leak
+// into test processes on CI runners, so the restart path must be
+// forced deterministic like the others.
 var (
-	osExitFn     = os.Exit
-	execSelfFn   = execSelfPlatform
-	spawnApplyFn = spawnUpdateApply
+	osExitFn         = os.Exit
+	execSelfFn       = execSelfPlatform
+	spawnApplyFn     = spawnUpdateApply
+	serviceManagedFn = serviceManaged
 )
 
 // applyRequest describes one update-apply handoff — the parent builds
@@ -40,6 +44,10 @@ type applyRequest struct {
 	Service   bool   // restart via the OS service manager
 	Relaunch  bool   // restart via detached `<target> run`
 	Rollback  bool   // restore Target.bak instead of installing Staged
+	// ConfigPath is forwarded to the relaunched `<target> run` so a
+	// custom -config location survives the restart (service-managed
+	// restarts carry it in the installed binPath already).
+	ConfigPath string
 }
 
 // spawnUpdateApply launches this same binary as a detached
@@ -59,6 +67,9 @@ func spawnUpdateApply(req applyRequest) error {
 	if req.Rollback {
 		args = append(args, "-rollback")
 	}
+	if req.ConfigPath != "" {
+		args = append(args, "-config", req.ConfigPath)
+	}
 	// The restart mode is orthogonal to the swap direction — a rollback
 	// still needs its relaunch/service-start instruction.
 	switch {
@@ -73,19 +84,20 @@ func spawnUpdateApply(req applyRequest) error {
 // UpdateApplyOptions controls the update-apply helper. It is exported
 // for the hidden `localmesh-agent update-apply` subcommand.
 type UpdateApplyOptions struct {
-	Target    string        // binary to replace/restore (required)
-	Staged    string        // <target>.new to install (forward mode; required unless Rollback)
-	ParentPID int           // pid to await before swapping (0 = no wait)
-	Rollback  bool          // restore Target.bak rather than installing Staged
-	Service   bool          // afterwards: `service start`
-	Relaunch  bool          // afterwards: detached `<target> run`
-	WaitBound time.Duration // total bound on pid-wait + swap retries (default 60s)
-	PollEvery time.Duration // poll interval (default 250ms)
-	Out       io.Writer     // progress; nil → io.Discard
+	Target     string        // binary to replace/restore (required)
+	Staged     string        // <target>.new to install (forward mode; required unless Rollback)
+	ParentPID  int           // pid to await before swapping (0 = no wait)
+	Rollback   bool          // restore Target.bak rather than installing Staged
+	Service    bool          // afterwards: `service start`
+	Relaunch   bool          // afterwards: detached `<target> run`
+	ConfigPath string        // forwarded to the relaunched `run` as -config
+	WaitBound  time.Duration // total bound on pid-wait + swap retries (default 60s)
+	PollEvery  time.Duration // poll interval (default 250ms)
+	Out        io.Writer     // progress; nil → io.Discard
 
 	// Test seams (nil → platform defaults).
 	pidAlive   func(pid int) bool
-	relaunchFn func(target string) error
+	relaunchFn func(target, cfgPath string) error
 	serviceFn  func(out io.Writer) error
 }
 
@@ -173,13 +185,19 @@ func UpdateApply(ctx context.Context, opts UpdateApplyOptions) error {
 		if fn == nil {
 			fn = relaunchAgent
 		}
-		return fn(opts.Target)
+		return fn(opts.Target, opts.ConfigPath)
 	}
 	return nil
 }
 
 // relaunchAgent starts `<target> run` detached — the foreground-agent
-// restart path after update-apply swaps the binary.
-func relaunchAgent(target string) error {
-	return spawnDetached(target, "run")
+// restart path after update-apply swaps the binary. The config path is
+// forwarded so an agent started with a custom -config comes back on
+// the same config instead of the default path (which may not exist).
+func relaunchAgent(target, cfgPath string) error {
+	args := []string{"run"}
+	if cfgPath != "" {
+		args = append(args, "-config", cfgPath)
+	}
+	return spawnDetached(target, args...)
 }

@@ -3,6 +3,7 @@ package update
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -49,9 +50,13 @@ func TestStageAndInstall(t *testing.T) {
 	if _, err := os.Stat(staged); !os.IsNotExist(err) {
 		t.Fatal("staged file should have been renamed away")
 	}
-	// Executable bit preserved on unix.
-	if info, _ := os.Stat(target); info.Mode()&0o111 == 0 {
-		t.Fatal("installed target lost executable bit")
+	// Executable bit preserved on unix — Windows file modes have no
+	// exec bits (executability is by extension), so there is nothing
+	// to preserve there.
+	if runtime.GOOS != "windows" {
+		if info, _ := os.Stat(target); info.Mode()&0o111 == 0 {
+			t.Fatal("installed target lost executable bit")
+		}
 	}
 }
 

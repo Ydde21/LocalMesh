@@ -388,10 +388,11 @@ func (a *Agent) runUpgrade(ctx context.Context, c *wsjson.Conn, job *upgradeJob)
 func (a *Agent) installAndRestart(ctx context.Context, c *wsjson.Conn, job *upgradeJob, staged, target, mkPath string) {
 	if runtime.GOOS == "windows" {
 		a.reportPhase(c, job, upPhaseInstalling, "handing the swap to the update-apply helper", "")
-		managed := serviceManaged()
+		managed := serviceManagedFn()
 		if err := spawnApplyFn(applyRequest{
 			Target: target, Staged: staged, ParentPID: os.Getpid(),
 			Service: managed, Relaunch: !managed,
+			ConfigPath: a.cfgPath,
 		}); err != nil {
 			clearPendingMarker(mkPath)
 			os.Remove(staged)
@@ -423,7 +424,7 @@ func (a *Agent) installAndRestart(ctx context.Context, c *wsjson.Conn, job *upgr
 		return
 	}
 	a.reportPhase(c, job, upPhaseRestarting, "", "")
-	if serviceManaged() {
+	if serviceManagedFn() {
 		osExitFn(0) // systemd/launchd restarts the service into the new binary
 		return
 	}

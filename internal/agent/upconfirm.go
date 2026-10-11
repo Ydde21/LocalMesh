@@ -318,9 +318,21 @@ func (a *Agent) rollbackMarkedUpdate(c *wsjson.Conn, path string, m pendingUpdat
 	if runtime.GOOS == "windows" {
 		// The running exe still holds the target — the update-apply
 		// helper restores the .bak once we exit, then restarts the agent.
+		// A missing .bak means the helper could only fail AFTER this
+		// process exits — the node would stay dead (or report a phantom
+		// rollback if the service restarted the new binary). Refuse the
+		// way the unix RollbackBinary below does.
+		if _, err := os.Stat(update.BackupPath(target)); err != nil {
+			a.unstampRolledBack(path, m)
+			a.reportUpgrade(c,
+				state(upPhaseFailed, "", "no rollback copy at "+update.BackupPath(target)))
+			return false
+		}
+		managed := serviceManagedFn()
 		if err := spawnApplyFn(applyRequest{
 			Target: target, ParentPID: os.Getpid(), Rollback: true,
-			Service: serviceManaged(), Relaunch: !serviceManaged(),
+			Service: managed, Relaunch: !managed,
+			ConfigPath: a.cfgPath,
 		}); err != nil {
 			a.unstampRolledBack(path, m)
 			a.reportUpgrade(c,
