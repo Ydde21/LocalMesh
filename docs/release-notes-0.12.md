@@ -1,7 +1,7 @@
 # LocalMesh 0.12.0 — release notes
 
-> **Status: PREPARED.** Artifacts staged and verified unsigned;
-> production signature pending. After signing, releases are signed with
+> **Status: PUBLISHED.** The `v0.12.0` beta-experience release, cut
+> from `main` after the full CI gate went green. Signed with
 > the production release key — key id **`0538AA36C3BC9FD3`** (the le64
 > hex `minisign` prints); the public half is committed at
 > [`keys/localmesh-release.pub`](../keys/localmesh-release.pub). Verify
