@@ -6,6 +6,7 @@ package server_test
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"strconv"
@@ -13,9 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/localmesh/localmesh/internal/agent"
+	"github.com/localmesh/localmesh/internal/contracts"
 	"github.com/localmesh/localmesh/internal/creds"
 	"github.com/localmesh/localmesh/internal/server"
 	"github.com/localmesh/localmesh/internal/testutil/fakeollama"
+	"github.com/localmesh/localmesh/internal/wsjson"
 )
 
 // xffReq issues a request with a caller-chosen X-Forwarded-For so tests
@@ -367,5 +371,147 @@ func TestSecurityV10EnrollPollNeedsSecret(t *testing.T) {
 		if code != http.StatusNotFound {
 			t.Fatalf("poll %s: got %d, want 404", path, code)
 		}
+	}
+}
+
+// agentWS dials /api/v1/agent/connect with a node credential and
+// completes the hello handshake — a raw frame channel under a real lmn_
+// identity, without a real agent behind it.
+func agentWS(t *testing.T, e *testEnv, cfg *agent.Config) *wsjson.Conn {
+	t.Helper()
+	hdr := http.Header{"Authorization": {"Bearer " + cfg.NodeToken}}
+	hctx, hcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer hcancel()
+	c, err := wsjson.Dial(hctx,
+		strings.Replace(e.base, "http", "ws", 1)+"/api/v1/agent/connect", hdr, nil)
+	if err != nil {
+		t.Fatalf("dial agent conn: %v", err)
+	}
+	if err := c.Write(hctx, contracts.Envelope{
+		ID:   "hello-1",
+		Type: contracts.MsgHello,
+		Payload: contracts.MarshalPayload(contracts.Hello{
+			NodeID:          cfg.NodeID,
+			ProtocolVersion: contracts.ProtocolVersion,
+		}),
+	}); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	env, err := c.Read(hctx)
+	if err != nil {
+		t.Fatalf("read hello_ack: %v", err)
+	}
+	if env.Type != contracts.MsgHelloAck {
+		t.Fatalf("expected hello_ack, got %q", env.Type)
+	}
+	return c
+}
+
+// TestSecurityV10OpFramesAttributedToOwningNode pins the v0.10 frame-
+// attribution fix: model_op_progress/model_op_done frames are honored
+// only from the connection that owns the operation. A second node —
+// fully authenticated with its own lmn_ credential — must not be able
+// to mark a foreign node's operation complete (a fake "success" would
+// record a model the victim never pulled). The same property holds for
+// upgrade_state, enforced in updateplane.OnUpgradeState.
+func TestSecurityV10OpFramesAttributedToOwningNode(t *testing.T) {
+	f := fakeollama.New()
+	defer f.Close()
+	e := startServer(t, f)
+
+	cfgA := enrollAndApprove(t, e, "op-victim", f.URL())
+	cfgB := enrollAndApprove(t, e, "op-forger", f.URL())
+
+	// Node A rides a raw conn: it never answers the pull frame, so the
+	// op parks in 'dispatched' — the only state where a forged done
+	// would have any effect.
+	connA := agentWS(t, e, cfgA)
+	defer connA.Close(1000, "done")
+
+	code, body, _ := e.adminReq(t, http.MethodPost, "/api/v1/models/pull",
+		map[string]any{"model": "audit-forge:1", "node_ids": []string{cfgA.NodeID}})
+	if code != http.StatusAccepted {
+		t.Fatalf("pull: got %d %v", code, body)
+	}
+	ops, _ := body["operations"].([]any)
+	if len(ops) == 0 {
+		t.Fatalf("no operations in response: %v", body)
+	}
+	opID := ops[0].(map[string]any)["id"].(string)
+	waitOpStatus(t, e, opID, 15*time.Second, "dispatched")
+
+	// Node B — its own valid credential — claims A's op succeeded.
+	connB := agentWS(t, e, cfgB)
+	defer connB.Close(1000, "done")
+	wctx, wcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer wcancel()
+	for _, env := range []contracts.Envelope{
+		{ID: "forged-progress", Type: contracts.MsgOpProgress,
+			Payload: contracts.MarshalPayload(contracts.OpProgress{
+				OperationID: opID, Model: "audit-forge:1", Status: "downloading",
+				Phase: "downloading", Completed: 5, Total: 10})},
+		{ID: "forged-done", Type: contracts.MsgOpDone,
+			Payload: contracts.MarshalPayload(contracts.OpDone{
+				OperationID: opID, Model: "audit-forge:1", Success: true,
+				Phase: "complete", Completed: 10, Total: 10})},
+	} {
+		if err := connB.Write(wctx, env); err != nil {
+			t.Fatalf("write forged frame: %v", err)
+		}
+	}
+
+	// The op must remain 'dispatched': attribution drops the foreign
+	// frames before they reach the queue or the store.
+	time.Sleep(800 * time.Millisecond)
+	if got := opStatus(t, e, opID); got != "dispatched" {
+		t.Fatalf("foreign op frames moved node A's op to %q — frame attribution broken", got)
+	}
+}
+
+// TestSecurityV10EnrollPollDisclosesNoCredentials: the approval poll
+// returns only the node's id and the cluster CA — never credential
+// material. The node token is agent-generated and stored hashed; the
+// poll secret is proof-of-possession, not a re-disclosable secret.
+func TestSecurityV10EnrollPollDisclosesNoCredentials(t *testing.T) {
+	f := fakeollama.New()
+	defer f.Close()
+	e := startServer(t, f)
+
+	token, _ := newEnrollToken(t, e, 1)
+	nodeTok := creds.Generate(creds.PrefixNode, 32)
+	code, m := postEnroll(t, e, token, "noleaknode", nodeTok)
+	if code != http.StatusAccepted {
+		t.Fatalf("enroll: %d", code)
+	}
+	reqID := m["request_id"].(string)
+	secret := m["poll_secret"].(string)
+
+	// Approve the single pending request.
+	for _, r := range e.adminList(t, "/api/v1/enrollments?status=pending") {
+		if code, _, _ := e.adminReq(t, http.MethodPost,
+			"/api/v1/enrollments/"+r["id"].(string)+"/approve", nil); code != http.StatusOK {
+			t.Fatalf("approve: %d", code)
+		}
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, e.base+"/api/v1/enroll/"+reqID, nil)
+	req.Header.Set("X-Poll-Secret", secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("poll after approval: got %d, want 200", resp.StatusCode)
+	}
+	body := string(raw)
+	for _, leak := range []string{nodeTok, secret, creds.Hash(nodeTok), creds.Hash(secret)} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("poll response discloses credential material: %s", body)
+		}
+	}
+	if !strings.Contains(body, `"status":"approved"`) || !strings.Contains(body, `"node_id"`) {
+		t.Fatalf("poll response missing approval payload: %s", body)
 	}
 }
