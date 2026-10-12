@@ -1639,6 +1639,14 @@ func TestMaintenanceGuard(t *testing.T) {
 	n := e.node(t, "n1", "0.6.0", true, false)
 
 	_, u := e.driveDispatchedWait(n, rel, t)
+	// The guard's precondition is the 'updating' marker, stamped a
+	// statement after the pending→draining CAS — waitPhase can return
+	// inside that gap, so wait for the marker itself (the thing under
+	// test) before asserting refusal.
+	waitFor(t, 8*time.Second, func() bool {
+		nd, err := e.st.GetNode(e.ctx, n)
+		return err == nil && nd.Maintenance == store.MaintUpdating
+	}, func() string { return "updating marker never stamped" })
 	if err := e.m.SetNodeMaintenance(e.ctx, n, store.MaintMode, "admin"); !errors.Is(err, store.ErrActiveUpdate) {
 		t.Fatalf("admin set during update = %v, want ErrActiveUpdate", err)
 	}
