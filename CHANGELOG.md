@@ -4,6 +4,55 @@ Notable changes per release. Versions are stamped at release time by
 `scripts/release.sh` (git tag → `main.version`); this file follows the
 repo's `vX.Y` naming. Detail-level references live in `docs/`.
 
+## v0.14 — error surfaces & first-run UX
+
+Focused pass on what a fresh user actually sees from install to first
+inference, and what API clients see when a node dies mid-request.
+**No wire-protocol change** — v0.10+ servers and agents interoperate
+with v0.14 in both directions.
+
+### Better errors
+
+- **Retry-exhausted dispatches keep the scheduler's reason.** When a
+  node died mid-dispatch and the re-pick found nothing eligible, the
+  client got the generic "could not dispatch the request to any node"
+  while `lastErr` already carried the actionable cause. It now gets
+  `no_capacity` with the scheduler's reason ("node is offline",
+  "model not installed on this node") — the same contract the
+  first-pick path always had.
+- **New `node_unavailable` error class.** A node dropping mid-stream
+  or a dead/missing engine (`engine unreachable`, `no ollama engine
+  detected`) used to surface as generic `upstream_error`. Clients and
+  the playground now see a distinct class they can act on.
+- **`join` on an unreachable server gives guidance.** Both the CA
+  fetch and the enroll POST used to die on the raw dial error; they
+  now say "cannot reach `<url>` — check the server address/port and
+  that the control plane is running" — the most common first-run
+  failure is now self-diagnosing.
+
+### Fixed
+
+- **Pending-update marker clear no longer relies on a single
+  `os.Remove`.** A transient file lock (Windows indexer/AV, a reader
+  mid-poll) failed that one attempt and the resolved marker survived
+  to re-report next boot. `clearPendingMarker` retries 5×/50ms under
+  `updateStateMu` — no resurrection race, one fewer Windows CI flake.
+
+### Tests & docs
+
+- New `clientErr` classification table, an e2e that kills an agent
+  mid-dispatch and asserts the client sees `no_capacity` + the offline
+  reason, and an unreachable-server enroll test. `fakeollama` gains
+  `ChatFirstTokenDelay` (pre-TTFT delay) so pre-token kills are
+  deterministic.
+- `docs/api.md` corrected: the capacity error type was documented as
+  `"capacity"` — the real wire type is `no_capacity`; `node_unavailable`
+  and `model_unavailable` stream classes are now documented.
+- New SAME-HOST hardware-matrix row from a real `hw-validate.sh` run
+  on Apple M2 (macOS 27, Ollama 0.40.2) — real gateway stream +
+  non-stream inference and an agent self-test, 14/15 legs (enroll leg
+  skipped by design: device already enrolled).
+
 ## v0.13 — release verification & provenance
 
 Hardening pass on the release machinery itself: the gates that ship a

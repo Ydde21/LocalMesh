@@ -343,6 +343,12 @@ smoke-diagnostics that preserve evidence, and a fully green release
 gate. No product-code change — same runtime as 0.12.0. Notes:
 [docs/release-notes-0.13.md](docs/release-notes-0.13.md).
 
+`v0.14.0` is prepared on `main` (unsigned) — the error-surfaces &
+first-run UX cut: actionable `no_capacity`/`node_unavailable` errors,
+self-diagnosing `join` on unreachable servers, and a Windows
+marker-cleanup fix. Notes:
+[docs/release-notes-0.14.md](docs/release-notes-0.14.md).
+
 `v0.12.0` — the beta-experience cut:
 [docs/release-notes-0.12.md](docs/release-notes-0.12.md).
 
