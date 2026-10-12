@@ -39,6 +39,9 @@ type Server struct {
 
 	// ChatDelay simulates per-token latency.
 	ChatDelay time.Duration
+	// ChatFirstTokenDelay sleeps before the first token is sent —
+	// simulates slow prompt eval so tests can kill things pre-TTFT.
+	ChatFirstTokenDelay time.Duration
 	// PullStepDelay stretches each pull-progress step (default 5ms) —
 	// set higher to make pulls long enough to cancel mid-flight.
 	PullStepDelay time.Duration
@@ -245,6 +248,9 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if s.ChatFirstTokenDelay > 0 {
+		time.Sleep(s.ChatFirstTokenDelay)
+	}
 	for _, tok := range tokens {
 		send(map[string]any{
 			"model":      req.Model,

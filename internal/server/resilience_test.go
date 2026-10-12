@@ -11,11 +11,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/localmesh/localmesh/internal/agent"
 
 	"github.com/localmesh/localmesh/internal/server/store"
 	"github.com/localmesh/localmesh/internal/testutil"
@@ -239,5 +243,60 @@ func TestQueuedModelOpsSurviveRestart(t *testing.T) {
 	// survive for the next dispatcher to pick up.
 	if op.Status != "queued" {
 		t.Fatalf("queued op status=%q after restart, want queued", op.Status)
+	}
+}
+
+// A node that dies mid-dispatch — before any token reached the client —
+// triggers the safe retry path. With no eligible node left, the client
+// must get the scheduler's actionable reason ("node is offline"), not
+// the generic dispatch_failed string that discarded lastErr.
+func TestDispatchRetrySurfacesSchedulerReason(t *testing.T) {
+	ol := fakeollama.New(fakeollama.Model{Name: "m:1", Family: "f", Size: 1 << 30})
+	defer ol.Close()
+	ol.ChatFirstTokenDelay = 2 * time.Second // nothing reaches the client before the kill
+	e := startServer(t, ol)
+
+	cfg := e.srv.Scheduler().Config()
+	cfg.QueueTimeout = 300 * time.Millisecond
+	e.srv.Scheduler().UpdateConfig(cfg)
+
+	ac := enrollAndApprove(t, e, "flaky-node", ol.URL())
+	ag := agent.New(ac, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ag.Run(ctx)
+	e.waitNodeOnline(t, 1)
+
+	resCh := make(chan [2]string, 1)
+	go func() {
+		code, body := chatRaw(context.Background(), e.base, "m:1", "hi")
+		resCh <- [2]string{fmt.Sprint(code), body}
+	}()
+
+	// Kill the agent mid-dispatch; the pending stream fails pre-token
+	// and the re-pick finds the node offline.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(e.adminList(t, "/api/v1/workloads?status=running")) > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cancel()
+
+	var res [2]string
+	select {
+	case res = <-resCh:
+	case <-time.After(20 * time.Second):
+		t.Fatal("request never resolved after node disconnect")
+	}
+	if res[0] != "503" {
+		t.Fatalf("expected 503, got %s: %s", res[0], res[1])
+	}
+	if !strings.Contains(res[1], "no_capacity") {
+		t.Fatalf("expected no_capacity error type, got: %s", res[1])
+	}
+	if !strings.Contains(res[1], "offline") {
+		t.Fatalf("expected scheduler reason in client message, got: %s", res[1])
 	}
 }

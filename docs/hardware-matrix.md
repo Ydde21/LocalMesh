@@ -31,6 +31,7 @@ Verbatim from [docs/fleet-validation.md](fleet-validation.md#evidence-tiers)
 | OS | CPU arch | GPU (type + VRAM) | RAM | Engine (+version) | Model tested | Agent version | Network | Enroll | Models | Inference | Streaming | Scheduling notes | Restart persistence | Update behavior | Evidence tier | Date / tester |
 |----|----------|-------------------|-----|-------------------|--------------|---------------|---------|--------|--------|-----------|-----------|------------------|---------------------|-----------------|---------------|---------------|
 | macOS 27.0.1 | arm64 | Apple M2 (shared mem) | 16 GiB | ollama 0.40.2 | qwen2.5:0.5b (gateway) + smollm2:135m (local self-test) | dev (5951722 build) | same-host loopback | yes | yes | yes | yes | self-test hit its 30s bound twice under Docker-Ollama load; standalone re-run passed at 21.4s | not exercised | last update to 8.8.8 failed cleanly — no release key pinned | **SAME-HOST** | 2026-10-11 host-04cdb234 |
+| macOS 27.0.1 | arm64 | Apple M2 (Apple 0x106b, shared mem) | 16 GiB | ollama 0.40.2 | smollm2:135m (gateway stream + non-stream, local self-test 7.8s) | dev | same-host loopback | yes | yes | yes | yes | none | not exercised | last update to 8.8.8 failed cleanly — no release key pinned | **SAME-HOST** | 2026-10-12 host-a5a2a930 |
 
 Row format note: `hw-validate.sh` emits a paste-ready row in exactly
 this column order (leg 10 of the transcript, or `"matrix_row"` in the

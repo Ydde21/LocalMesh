@@ -180,3 +180,20 @@ func TestEnrollWaitReminder(t *testing.T) {
 		t.Fatalf("long waits should re-print a reminder, got: %q", errBuf.String())
 	}
 }
+
+// An unreachable server used to die on the raw dial error
+// ("enroll request: Get ... connection refused"). First-run users need
+// the actionable hint — is the address right, is the control plane up.
+func TestEnrollUnreachableServerGuidance(t *testing.T) {
+	// Port 1 is never bound — guaranteed refused on every platform.
+	_, err := Enroll(context.Background(), fastEnroll("http://127.0.0.1:1", io.Discard))
+	if err == nil {
+		t.Fatal("enroll against a dead address should fail")
+	}
+	if !strings.Contains(err.Error(), "cannot reach http://127.0.0.1:1") {
+		t.Fatalf("unreachable-server error lost the address: %v", err)
+	}
+	if !strings.Contains(err.Error(), "control plane is running") {
+		t.Fatalf("unreachable-server error missing actionable hint: %v", err)
+	}
+}

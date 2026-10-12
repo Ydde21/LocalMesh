@@ -102,7 +102,7 @@ func Enroll(ctx context.Context, opts EnrollOptions) (*EnrollResult, error) {
 	})
 	resp, err := hc.Post(base+"/api/v1/enroll", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("enroll request: %w", err)
+		return nil, fmt.Errorf("cannot reach %s — check the server address/port and that the control plane is running (%w)", base, err)
 	}
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	resp.Body.Close()
@@ -219,7 +219,7 @@ func fetchCA(ctx context.Context, base, fingerprint string, logf func(string, ..
 	}
 	resp, err := insecure.Get(caURL)
 	if err != nil {
-		return "", nil, fmt.Errorf("fetch CA cert: %w", err)
+		return "", nil, fmt.Errorf("cannot reach %s — check the server address/port and that the control plane is running (%w)", base, err)
 	}
 	pemBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	resp.Body.Close()

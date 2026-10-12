@@ -48,7 +48,12 @@ advertising it would just fail at dispatch); the admin
 - `stream: true` → SSE chunks, `data: [DONE]` terminator — the standard
   OpenAI wire format.
 - Unknown/absent model → `404`; no eligible node → `503` with
-  `{"error": {"type": "capacity"}}`.
+  `{"error": {"type": "no_capacity"}}` and the scheduler's reason
+  ("no nodes enrolled", "model not installed on this node", …) in
+  `message` — including when retries are exhausted after a node drops.
+- Mid-stream node loss surfaces as an SSE error frame with
+  `{"error": {"type": "node_unavailable"}}`; a dead or missing engine
+  reports the same class. Unknown models report `model_unavailable`.
 - Client disconnect cancels the request on the executing node.
 - The scheduler may retry once on another node **only if** no response
   bytes were sent yet — a stream is never replayed mid-flight.

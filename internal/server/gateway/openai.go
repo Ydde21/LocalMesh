@@ -266,8 +266,15 @@ func (g *Gateway) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		status = "cancelled"
 	}
 	g.finishWorkload(r.Context(), wl, status, errString(lastErr), nil, nil, nil, nil)
-	writeErr(w, http.StatusServiceUnavailable, "dispatch_failed",
-		"could not dispatch the request to any node")
+	// A re-pick that failed inside the retry loop carries the scheduler's
+	// actionable reason ("no nodes enrolled", "model not installed on
+	// this node") — surface it instead of the generic dispatch string.
+	if errors.Is(lastErr, scheduler.ErrNoCapacity) {
+		writeErr(w, http.StatusServiceUnavailable, "no_capacity", lastErr.Error())
+	} else {
+		writeErr(w, http.StatusServiceUnavailable, "dispatch_failed",
+			"could not dispatch the request to any node")
+	}
 }
 
 var errFirstToken = errors.New("stream failed before first token")
@@ -468,6 +475,10 @@ func clientErr(err error) (typ, msg string) {
 	if strings.Contains(s, "not found") || strings.Contains(s, "no such model") ||
 		strings.Contains(s, "does not exist") {
 		return "model_unavailable", "the requested model is not available on any node"
+	}
+	if strings.Contains(s, "node disconnected") || strings.Contains(s, "engine unreachable") ||
+		strings.Contains(s, "no ollama engine") {
+		return "node_unavailable", "the node serving this request became unavailable"
 	}
 	return "upstream_error", "the upstream node failed to complete the request"
 }
