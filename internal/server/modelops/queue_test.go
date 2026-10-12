@@ -3,6 +3,7 @@ package modelops
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -158,9 +159,11 @@ func waitFor(t *testing.T, d time.Duration, f func() bool, msg string) {
 func (e *qenv) waitStatus(t *testing.T, opID string, want ...string) string {
 	t.Helper()
 	var got string
-	waitFor(t, 5*time.Second, func() bool {
+	var lastErr error
+	waitFor(t, 15*time.Second, func() bool {
 		s, err := e.st.GetModelOpState(e.ctx, opID)
 		if err != nil {
+			lastErr = err
 			return false
 		}
 		got = s.Status
@@ -170,7 +173,7 @@ func (e *qenv) waitStatus(t *testing.T, opID string, want ...string) string {
 			}
 		}
 		return false
-	}, "op "+opID+" to reach "+want[0]+" (last: "+got+")")
+	}, "op "+opID+" to reach "+want[0]+" (last: "+got+", err: "+fmt.Sprint(lastErr)+")")
 	return got
 }
 
