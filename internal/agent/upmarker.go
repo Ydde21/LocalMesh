@@ -118,15 +118,22 @@ func readPendingMarker(path string) (pendingUpdate, bool, error) {
 // clearPendingMarker removes the marker under updateStateMu so a
 // clear can never interleave inside another goroutine's
 // read-modify-write section (which would resurrect a resolved marker).
-// Callers must not hold the mutex.
+// Callers must not hold the mutex. Windows makes a single Remove
+// unreliable — a transient indexer/AV lock fails it once and the
+// marker would survive to re-report next boot — so removal retries
+// briefly before giving up.
 func clearPendingMarker(path string) error {
 	updateStateMu.Lock()
 	defer updateStateMu.Unlock()
-	err := os.Remove(path)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
+	var err error
+	for i := 0; i < 5; i++ {
+		err = os.Remove(path)
+		if err == nil || errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	return nil
+	return err
 }
 
 // targetFromBackup recovers the live binary path a marker's backup
